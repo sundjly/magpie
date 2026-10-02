@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -264,6 +265,11 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			}
 			content, plain = nil, true
 		}
+		// A turn's tool results all go ahead of its own text and images: a
+		// tool message must immediately follow the assistant message whose
+		// tool_calls it answers — a strict upstream (Kimi) refuses the
+		// request otherwise, 400 "tool_call_id is not found".
+		var tools []map[string]any
 		for _, p := range m.Parts {
 			switch p.Kind {
 			case Text:
@@ -274,7 +280,6 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 				plain = false
 				content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": dataURL(p)}})
 			case ToolResult:
-				flush()
 				out := p.Text
 				if n := len(p.Images); n > 0 {
 					note := fmt.Sprintf("[The tool returned %d images; they follow in the next message.]", n)
@@ -286,13 +291,15 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 					}
 					out += note
 				}
-				msgs = append(msgs, map[string]any{"role": "tool", "tool_call_id": p.CallID, "content": out})
+				tools = append(tools, map[string]any{"role": "tool", "tool_call_id": p.CallID, "content": out})
 				seeLater(p)
 			}
 		}
+		msgs = append(msgs, tools...)
 		flush()
 	}
 	showSeen()
+	msgs = pairToolMessages(msgs)
 	out := map[string]any{"model": model, "messages": msgs, "stream": r.Stream}
 	if r.CacheKey != "" {
 		out["prompt_cache_key"] = r.CacheKey
@@ -364,6 +371,108 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	}
 	b, _ := json.Marshal(out)
 	return b
+}
+
+// pairToolMessages mends the tool exchange of a Chat request's messages
+// for upstreams that validate it strictly — Kimi answers a mismatch with
+// 400 "tool_call_id is not found" or "an assistant message with
+// 'tool_calls' must be followed by tool messages…":
+//
+//   - the tool messages answering an assistant's tool_calls go in the
+//     calls' order (an agent returns parallel results out of order);
+//   - a tool message answering no pending call gets a synthetic
+//     assistant message calling it (name unknown_tool, no arguments), so
+//     its result survives: a resumed or compacted history can keep a
+//     result whose call is gone, and some clients send results alone;
+//   - a call left unanswered gets a synthetic error result, so the turn
+//     can go on (an interrupted turn leaves its call pending);
+//   - an assistant message with nothing in it — no text, no calls, no
+//     reasoning, what a thinking-only turn becomes — is dropped: between
+//     calls and their answers it would break their adjacency.
+func pairToolMessages(msgs []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(msgs))
+	var pending []string          // unanswered calls of the last assistant message
+	order := map[string]int{}     // a pending call's place among them
+	answered := map[string]bool{} // pending calls a tool message answered
+	var tools []map[string]any    // answers to pending, held for sorting
+
+	flushTools := func() {
+		if len(tools) == 0 {
+			return
+		}
+		sort.SliceStable(tools, func(i, j int) bool {
+			return order[toolMsgID(tools[i])] < order[toolMsgID(tools[j])]
+		})
+		out = append(out, tools...)
+		tools = nil
+	}
+	flushPending := func() {
+		flushTools()
+		for _, id := range pending {
+			if !answered[id] {
+				out = append(out, map[string]any{"role": "tool", "tool_call_id": id,
+					"content": "[The result of this tool call is unavailable: the turn was interrupted.]"})
+			}
+		}
+		pending, order, answered = nil, map[string]int{}, map[string]bool{}
+	}
+
+	for _, m := range msgs {
+		switch m["role"] {
+		case "assistant":
+			flushPending()
+			calls, _ := m["tool_calls"].([]map[string]any)
+			if len(calls) == 0 {
+				if !emptyAssistant(m) {
+					out = append(out, m)
+				}
+				continue
+			}
+			out = append(out, m)
+			for i, c := range calls {
+				id, _ := c["id"].(string)
+				pending = append(pending, id)
+				order[id] = i
+			}
+		case "tool":
+			id := toolMsgID(m)
+			if _, ok := order[id]; !ok {
+				// answers no pending call: it gets one, so the
+				// exchange is valid and the result survives
+				flushPending()
+				out = append(out, map[string]any{"role": "assistant",
+					"tool_calls": []map[string]any{{"id": id, "type": "function",
+						"function": map[string]any{"name": "unknown_tool", "arguments": "{}"}}}})
+				pending, order[id] = []string{id}, 0
+			}
+			answered[id] = true
+			tools = append(tools, m)
+		default:
+			flushPending()
+			out = append(out, m)
+		}
+	}
+	flushPending()
+	return out
+}
+
+// toolMsgID is a tool message's tool_call_id.
+func toolMsgID(m map[string]any) string {
+	id, _ := m["tool_call_id"].(string)
+	return id
+}
+
+// emptyAssistant reports whether an assistant message carries nothing:
+// no text, no tool calls, no reasoning.
+func emptyAssistant(m map[string]any) bool {
+	if calls, ok := m["tool_calls"].([]map[string]any); ok && len(calls) > 0 {
+		return false
+	}
+	if s, _ := m["reasoning_content"].(string); strings.TrimSpace(s) != "" {
+		return false
+	}
+	s, _ := m["content"].(string)
+	return strings.TrimSpace(s) == ""
 }
 
 // aiStudioHost is Google AI Studio's Gemini API, whose OpenAI-compatible
