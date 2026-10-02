@@ -211,7 +211,7 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			seen = nil
 		}
 	}
-	for _, m := range r.Messages {
+	for i, m := range r.Messages {
 		if m.Role == "assistant" {
 			showSeen()
 			am := map[string]any{"role": "assistant"}
@@ -238,7 +238,10 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			if len(calls) > 0 {
 				am["tool_calls"] = calls
 			}
-			if replay && think != "" {
+			// a reply cut short and sent back to go on from (Resume) has its
+			// reasoning with it when the model reads reasoning_content back,
+			// so the going on picks the thought up where it was cut
+			if think != "" && (replay || r.Resume && i == len(r.Messages)-1 && reasoningBack(model)) {
 				am["reasoning_content"] = think
 			}
 			msgs = append(msgs, am)
@@ -371,6 +374,16 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	}
 	b, _ := json.Marshal(out)
 	return b
+}
+
+// reasoningBack is a model that reads a reply's reasoning back as
+// reasoning_content and goes on from it: Kimi's thinking models, as
+// DeepSeek's do (replay above names those by host). It names the model
+// however it is reached, for a reply cut short sent back to go on from
+// (Request.Resume); a vendor that doesn't read it turns the request away,
+// and the reply ends as it used to.
+func reasoningBack(model string) bool {
+	return strings.Contains(strings.ToLower(model), "kimi")
 }
 
 // pairToolMessages mends the tool exchange of a Chat request's messages

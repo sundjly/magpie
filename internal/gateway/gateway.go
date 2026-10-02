@@ -2632,6 +2632,9 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	stream := request.Stream
 	request.Stream = true
+	if stream {
+		return s.streamTranslated(w, r, p, from, to, request, model, zen, u)
+	}
 	res, actual, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
 	if err != nil {
 		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
@@ -2656,43 +2659,6 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
 		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg
-	}
-	if stream {
-		sw := newSSEWriter(w)
-		enc := encoder(from, sw, request)
-		var failed string
-		see := zenSee(zen, func(ev Event) {
-			switch ev.Kind {
-			case KError:
-				failed = ev.Text
-			case KStart, KUsage:
-				u.add(ev.Usage)
-				u.add(Usage{Served: ev.Model}) // the model the vendor says answered
-			}
-			enc.event(ev)
-		})
-		serr := readSSEAlive(rd, func(_, data string) error {
-			return dec(data, see)
-		}, func() {
-			// the provider's keepalives aren't events to translate: while
-			// it is heard from, the client hears from magpie (#436)
-			if failed == "" && sw.quiet() >= keepaliveGap {
-				enc.keepalive()
-			}
-		})
-		if serr != nil && failed == "" {
-			// the upstream died mid-reply: say so in the client's own
-			// protocol instead of finishing as if all went well
-			failed = cutMidReply(p.Name, serr)
-			enc.event(Event{Kind: KError, Text: failed})
-		}
-		if failed == "" {
-			if zen != nil {
-				zen.end(enc.event)
-			}
-			enc.finish()
-		}
-		return 200, failed
 	}
 	var col collector
 	see := zenSee(zen, col.add)
