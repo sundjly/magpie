@@ -376,22 +376,29 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 // pairToolMessages mends the tool exchange of a Chat request's messages
 // for upstreams that validate it strictly — Kimi answers a mismatch with
 // 400 "tool_call_id is not found" or "an assistant message with
-// 'tool_calls' must be followed by tool messages…":
+// 'tool_calls' must be followed by tool messages…", and OpenAI-style
+// upstreams refuse the same shapes. It runs on every request built for a
+// Chat upstream (Zed's xAI path included); Chat→Chat traffic relays
+// as-is and never reaches this path.
 //
 //   - the tool messages answering an assistant's tool_calls go in the
 //     calls' order (an agent returns parallel results out of order);
-//   - a tool message answering no pending call gets a synthetic
-//     assistant message calling it (name unknown_tool, no arguments), so
-//     its result survives: a resumed or compacted history can keep a
-//     result whose call is gone, and some clients send results alone;
+//   - a second answer to the same call is dropped: the first answer
+//     stands;
+//   - a tool message answering no pending call — its call was answered
+//     and flushed already, compacted away, or never there — becomes a
+//     user message, so the result survives with no made-up call and no
+//     id used twice, the way the Responses path's orphanedToolOutputs
+//     turns an output without a call into a user message;
 //   - a call left unanswered gets a synthetic error result, so the turn
 //     can go on (an interrupted turn leaves its call pending);
 //   - an assistant message with nothing in it — no text, no calls, no
-//     reasoning, what a thinking-only turn becomes — is dropped: between
-//     calls and their answers it would break their adjacency.
+//     reasoning, what a thinking-only turn becomes — is dropped inside a
+//     pending exchange, where it would sit between calls and their
+//     answers; outside an exchange it passes through, as on main.
 func pairToolMessages(msgs []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
-	var pending []string          // unanswered calls of the last assistant message
+	var pending []string          // calls of the last assistant message with tool_calls
 	order := map[string]int{}     // a pending call's place among them
 	answered := map[string]bool{} // pending calls a tool message answered
 	var tools []map[string]any    // answers to pending, held for sorting
@@ -416,18 +423,39 @@ func pairToolMessages(msgs []map[string]any) []map[string]any {
 		}
 		pending, order, answered = nil, map[string]int{}, map[string]bool{}
 	}
+	// toolAsUser turns a tool message that answers no pending call into a
+	// user message carrying its result. A user message just emitted takes
+	// the text in, so two user messages never stand in a row (some
+	// models' chat templates turn them away).
+	toolAsUser := func(m map[string]any) {
+		text, _ := m["content"].(string)
+		if strings.TrimSpace(text) == "" {
+			text = "Tool result received."
+		}
+		if n := len(out); n > 0 && out[n-1]["role"] == "user" {
+			if s, ok := out[n-1]["content"].(string); ok {
+				out[n-1]["content"] = s + "\n\n" + text
+				return
+			}
+		}
+		out = append(out, map[string]any{"role": "user", "content": text})
+	}
 
 	for _, m := range msgs {
 		switch m["role"] {
 		case "assistant":
-			flushPending()
 			calls, _ := m["tool_calls"].([]map[string]any)
 			if len(calls) == 0 {
-				if !emptyAssistant(m) {
-					out = append(out, m)
+				if len(pending) > 0 && emptyAssistant(m) {
+					// dropped before it can sit between the pending
+					// calls and their answers; the exchange stays open
+					continue
 				}
+				flushPending()
+				out = append(out, m)
 				continue
 			}
+			flushPending()
 			out = append(out, m)
 			for i, c := range calls {
 				id, _ := c["id"].(string)
@@ -437,13 +465,15 @@ func pairToolMessages(msgs []map[string]any) []map[string]any {
 		case "tool":
 			id := toolMsgID(m)
 			if _, ok := order[id]; !ok {
-				// answers no pending call: it gets one, so the
-				// exchange is valid and the result survives
+				// answers no pending call: the exchange in flight
+				// closes first, so the user message never breaks its
+				// adjacency, and the id is used nowhere else
 				flushPending()
-				out = append(out, map[string]any{"role": "assistant",
-					"tool_calls": []map[string]any{{"id": id, "type": "function",
-						"function": map[string]any{"name": "unknown_tool", "arguments": "{}"}}}})
-				pending, order[id] = []string{id}, 0
+				toolAsUser(m)
+				continue
+			}
+			if answered[id] {
+				continue // a second answer: the first stands
 			}
 			answered[id] = true
 			tools = append(tools, m)
