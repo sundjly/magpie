@@ -55,6 +55,11 @@ type Settings struct {
 	// is the proxy (http://, https:// or socks5://; host:port means http).
 	Proxy string `json:"proxy,omitempty"`
 	OTel  OTel   `json:"otel,omitempty"`
+	// GitHubToken is a GitHub token the library's requests to GitHub's
+	// API carry, raising its rate limit from 60 requests an hour to 5,000.
+	// It is a secret: the Settings page is told only a masked one, and a
+	// backup or sync without keys leaves it out, as it does LANKey.
+	GitHubToken string `json:"githubToken,omitempty"`
 	// Redact keeps secrets in what agents send (API keys, private keys,
 	// tokens, passwords) from the vendors behind magpie: they go as
 	// placeholders, and come back as they were. RedactPersonal does the same
@@ -234,6 +239,12 @@ type Settings struct {
 	// the routing groups, the usage records and what a call is priced at —
 	// keeps the name magpie knows the model by.
 	ModelWires map[string]string `json:"modelWires,omitempty"`
+	// ModelAPIs is the one API a model is asked on at its provider, by
+	// "<provider id>/<model id>": chat, responses or anthropic, for a relay
+	// whose one key serves some models on one and others on another
+	// (01huadalang on Discord). Absent leaves it to the vendor's list and
+	// to each URL the provider has (see provider.SetModelAPI).
+	ModelAPIs map[string]string `json:"modelAPIs,omitempty"`
 	// The main window's size when it was last resized, width and height,
 	// so it opens at it again after a restart.
 	Window []int `json:"window,omitempty"`

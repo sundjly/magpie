@@ -844,16 +844,18 @@ with the row's key or `all`, the list empties, and the note says magpie
 never erases them by itself. No left-border accent, every string in Chinese.
 Chromium and WebKit, English and Chinese, API faked.
 
-`sessions-folder-delete.test.cjs` deletes every session of a project folder
-at once (#527): each folder's row has Delete all, which asks in magpie's own
-dialog (a browser `confirm()` fails the test) naming the folder, the count
-and its path; Cancel posts nothing; the confirm posts sessions/delete with
-every id of the folder, the ones a filter hides too, so they go to magpie's
-trash as single deletes do; a session still being written to is left and
-said so, other folders stay, a folder of one asks as a single delete, and an
-agent magpie can't delete from has none. No click moves the page, no
-left-border accent, every string in Chinese. Chromium and WebKit, English and
-Chinese, API faked.
+`sessions-folder-delete.test.cjs` deletes every session of project folders
+at once (#527): each folder's row starts with a box, as each session's does,
+that picks every session of the folder shown, folded or not; the bar counts
+sessions, not folders, a session's own box part-ticks its folder's, and a
+filter picks only what it shows. The bar's Delete asks in magpie's own
+dialog (a browser `confirm()` fails the test), naming the folder and its
+path for one whole folder and how many folders for several; Cancel posts
+nothing; the confirm posts sessions/delete with their ids, so they go to
+magpie's trash as single deletes do; a session still being written to is
+left and said so, other folders stay, and an agent magpie can't delete from
+has no boxes. No click moves the page, no left-border accent, every string
+in Chinese. Chromium and WebKit, English and Chinese, API faked.
 
 `sessions-toolbar.test.cjs` uses ten agents to check that fitting tabs stay
 visible at 1800px, while 900, 660 and 320px windows use a compact agent menu.
@@ -982,10 +984,11 @@ checks run in English and Chinese, in Chromium and WebKit.
 unfinished (#526). In Qoder's editor at the issue's window size, Add another
 → Sign in anyway waits with Qoder's long device link: the box and every
 button in it stay inside the account list (the link is cut short, Cancel in
-sight), and Close sits beside Open again. Close posts signin/<id>/cancel,
-stops the polling and brings Add another back without moving the page; the
-box's Cancel does the same, and so do the editor's Cancel and Save, so the
-editor opened again has no box. English and Chinese, Chromium and WebKit;
+sight), and Cancel is the one button that puts it away: Open again stands
+alone, with no Close beside it doing the same. Cancel posts
+signin/<id>/cancel, stops the polling and brings Add another back without
+moving the page, and so do the editor's Cancel and Save, so the editor
+opened again has no box. English and Chinese, Chromium and WebKit;
 the API is faked.
 
 `signin-paste-codex.test.cjs` checks a ChatGPT sign-in finished from its
