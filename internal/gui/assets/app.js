@@ -91,6 +91,9 @@ async function api(path, body) {
     if (data?.why) err.why = data.why; // a failed move's reason, said in the reader's language
     throw err;
   }
+  // the accounts it names, for Hide accounts to know them (#568); a
+  // session's or a library's words aren't looked through
+  if (data && typeof data === "object" && !/^(sessions|library|skills|plugins|market)/.test(path)) noteAccounts(data);
   return data;
 }
 
@@ -3145,13 +3148,37 @@ function accountPlan(a) {
 
 // copy asks magpie to put text on the clipboard, as the page's own
 // clipboard API is refused inside the app's window; a browser tab on the
-// dev UI falls back to it.
+// dev UI falls back to it. A tab on `magpie web` reached over plain http
+// from another computer (a NAS's) has no clipboard API at all, so the
+// older copy command is the last try there.
 async function copy(text, what, btn, message) {
   const done = () => { status(message || t("{what} copied", { what }), "ok"); flashCopied(btn); };
   const res = await fetch("/api/copy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) }).catch(() => null);
   if (res && res.ok) return done();
-  try { await navigator.clipboard.writeText(text); done(); }
-  catch { status(text); }
+  try { await navigator.clipboard.writeText(text); return done(); } catch {}
+  if (copyByCommand(text)) return done();
+  status(text);
+}
+
+// copyByCommand copies text with the page's copy command, through a
+// textarea out of sight that is never scrolled to, the focus going back
+// where it was.
+function copyByCommand(text) {
+  const was = document.activeElement;
+  const box = document.createElement("textarea");
+  box.value = text;
+  box.setAttribute("readonly", "");
+  box.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none";
+  document.body.append(box);
+  let ok = false;
+  try {
+    box.focus({ preventScroll: true });
+    box.select();
+    ok = document.execCommand("copy");
+  } catch { ok = false; }
+  box.remove();
+  if (was && was.focus) was.focus({ preventScroll: true });
+  return ok;
 }
 
 // flashCopied answers on the button itself: the icon becomes a tick and
@@ -7986,7 +8013,9 @@ function moveWhy(m, p) {
     case "offline": return t("magpie couldn't reach npm to install the plugin. Check the network or proxy, then try again.");
     case "install": return t("npm couldn't install the plugin: {line}", { line: a.line });
     case "lapsed": return t("every {name} account needs signing in again. Sign one in above, then move.", { name: p.name });
-    case "unserved": return t("the plugin doesn't serve {models}. Untick them under Models, or keep the built-in.", { models: a.models });
+    case "unserved": return a.user
+      ? t("the plugin doesn't serve {models} for {user}, though the built-in does. Untick them under Models, or keep the built-in.", { models: a.models, user: a.user })
+      : t("the plugin doesn't serve {models}. Untick them under Models, or keep the built-in.", { models: a.models });
     case "account": return t("{user} doesn't work through the plugin: {error}", { user: a.user, error: a.error });
   }
   return m.error || "";
@@ -8430,6 +8459,8 @@ function renderQuotas() {
         card.append(who);
       } else if (every) head.append(every);
       card.append(meters);
+      // WorkBuddy's credits, day by day, as magpie counted them (#568)
+      if (sub.daily && !sub.error) card.append(creditDays(sub));
       // what is left besides the windows, under them
       if (sub.balance && sub.windows?.length && !sub.error) card.append(balanceRow(sub, "What is left on the account besides its windows", false));
       // windows standing in for ones that couldn't be read just now say
@@ -8454,6 +8485,51 @@ function renderQuotas() {
     }
     subscriptions.append(card);
   }
+}
+
+// creditDays: the credits an account used each day of the period, as
+// magpie counted them from its readings of the vendor's meter, which tells
+// only what the cycle has used so far — a bar a day, and the period's sum;
+// a day before magpie first read it is not known rather than nothing.
+function creditDays(sub) {
+  const box = el("div", "credit-days");
+  const { since, days } = sub.daily;
+  const by = new Map(days.map((d) => [d.day, d.used]));
+  const key = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+  // the period's days, the first from when counting began for All
+  let n = { today: 1, "7d": 7, "30d": 30 }[period];
+  if (!n) n = Math.min(120, Math.max(1, Math.round((today - new Date(since + "T12:00:00")) / 864e5) + 1));
+  const list = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    list.push({ day: key(d), date: d, used: by.get(key(d)) || 0, known: key(d) >= since });
+  }
+  const num = (v) => (Math.round(v * 100) / 100).toLocaleString(locale === "zh" ? "zh-CN" : undefined);
+  const dayName = (d) => d.toLocaleDateString(locale === "zh" ? "zh-CN" : undefined, { month: "short", day: "numeric" });
+  const sum = list.reduce((a, d) => a + d.used, 0);
+  const head = el("div", "cd-head");
+  const name = el("span", "", t("Credits used per day"));
+  name.title = t("Counted from magpie's readings of the vendor's meter, since {date}: what is used while magpie isn't reading it is counted on the day it next does", { date: dayName(new Date(since + "T12:00:00")) });
+  head.append(name, el("b", "", n === 1 ? t("{n} today", { n: num(sum) }) : t("{n} in {days} days", { n: num(sum), days: n })));
+  box.append(head);
+  if (n > 1) {
+    const bars = el("div", "cd-bars");
+    const peak = Math.max(...list.map((d) => d.used), 0);
+    for (const d of list) {
+      const b = el("span", "cd-day" + (d.known ? "" : " unknown"));
+      const fill = el("i");
+      fill.style.height = d.known && peak ? Math.max(d.used ? 6 : 0, 100 * d.used / peak).toFixed(1) + "%" : "0%";
+      b.append(fill);
+      b.title = d.known ? t("{date}: {n} credits", { date: dayName(d.date), n: num(d.used) }) : t("{date}: not counted — magpie began counting on {since}", { date: dayName(d.date), since: dayName(new Date(since + "T12:00:00")) });
+      bars.append(b);
+    }
+    box.append(bars);
+  }
+  if (since > list[0].day) box.append(el("div", "cd-note", t("Counted since {date}", { date: dayName(new Date(since + "T12:00:00")) })));
+  return box;
 }
 
 // planTerm says when a plan's paid time ends: renewed then, over, or
@@ -8570,8 +8646,13 @@ try {
 let panelUseAt = 0;
 const PANEL_USE_PERIODS = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"]];
 
-async function loadPanelUse() {
-  if (mode !== "panel") return;
+// One read at a time: a 10 s timer must not start a second behind a slow one,
+// and a read asked for while one is (a period or a provider picked, the tab
+// shown) is kept and served when it is done, so a pick is never dropped.
+let panelUseFlight = null, panelUseQueued = false;
+function loadPanelUse() {
+  if (mode !== "panel") return Promise.resolve();
+  if (panelUseFlight) { panelUseQueued = true; return panelUseFlight; }
   const q = new URLSearchParams({ period: panelUsePeriod, limit: "1" });
   if (panelUseProvider) q.set("provider", panelUseProvider);
   if (panelUseComputer) q.set("computer", panelUseComputer);
@@ -8580,19 +8661,31 @@ async function loadPanelUse() {
   // what is shown stays, dimmed, till the answer comes: the panel doesn't
   // shrink to a skeleton and lose where it was scrolled to
   $("#panelUsage").classList.add("pu-loading");
-  try {
-    const l = await api("usage/requests?" + want);
-    const now = new URLSearchParams({ period: panelUsePeriod, limit: "1" });
-    if (panelUseProvider) now.set("provider", panelUseProvider);
-    if (panelUseComputer) now.set("computer", panelUseComputer);
-    if (now.toString() !== want) return; // another period or provider was picked meanwhile
-    panelUse = l;
-    $("#panelUsage").classList.remove("pu-loading");
-    if (panelTab === "stats") renderPanelUse();
-  } catch (e) {
-    $("#panelUsage").classList.remove("pu-loading");
-    throw e;
-  }
+  const read = async () => {
+    try {
+      const l = await api("usage/requests?" + want);
+      const now = new URLSearchParams({ period: panelUsePeriod, limit: "1" });
+      if (panelUseProvider) now.set("provider", panelUseProvider);
+      if (panelUseComputer) now.set("computer", panelUseComputer);
+      if (now.toString() !== want) return; // another period or provider was picked meanwhile
+      panelUse = l;
+      $("#panelUsage").classList.remove("pu-loading");
+      if (panelTab === "stats") renderPanelUse();
+    } catch (e) {
+      // the read failed: nothing is on its way for it, so the dimming comes off
+      $("#panelUsage").classList.remove("pu-loading");
+      throw e;
+    }
+  };
+  const flight = read().finally(() => {
+    if (panelUseFlight !== flight) return;
+    panelUseFlight = null;
+    if (!panelUseQueued) return;
+    panelUseQueued = false;
+    return loadPanelUse(); // include the latest pick or manual refresh in this promise
+  });
+  panelUseFlight = flight;
+  return flight;
 }
 // the tab is shown: what it has is drawn, and read again if it is old
 function panelUseShown() {
@@ -13336,31 +13429,55 @@ function renderUsageEvery() {
 }
 
 // refreshUsage reads what the tab shown draws; now is the reader asking, which
-// reads the page it is on too, and the sessions and the allowances
-async function refreshUsage(now = false) {
+// reads the page it is on too, and the sessions and the allowances.
+// A read that outlives its interval must not have another started behind it:
+// one is in flight at a time, and a read asked for while one is (the timer, or
+// the reader's button, which may not be swallowed) is served when it is done,
+// the reader's own if either asked for it. The promise covers that second read
+// too, so the button turns while the reader's own is still to come.
+let usageFlight = null, usageQueued = false, usageQueuedNow = false;
+function refreshUsage(now = false) {
   usageLast = performance.now();
-  try {
-    if (usageTab === "sessions") {
-      if (sessions && (now || performance.now() - sessionsAt > 15e3)) { sessionsAt = performance.now(); await loadSessions(); }
-    } else if (usageTab === "requests") {
-      // the newest page takes the requests as they come; an older one stays put
-      if (ledger && (now || !ledOffset)) await loadLedger(true);
-    } else {
-      // the reader asking reads the allowances afresh, a Claude account's by
-      // running Claude Code's own /usage (the backend runs it at most once in 30s)
-      let q = null;
-      if (now) { quotasAsked = performance.now(); q = loadQuotas(true); }
-      else if (usage && performance.now() - quotasAsked > 60e3) { quotasAsked = performance.now(); loadQuotas(); }
-      if (usage) {
-        const p = period;
-        const u = await api("usage?period=" + p);
-        if (view === "usage" && usageTab === "usage" && p === period && JSON.stringify(u) !== JSON.stringify(usage)) { usage = u; renderUsage(); }
+  if (usageFlight) {
+    usageQueued = true;
+    usageQueuedNow = usageQueuedNow || now;
+    return usageFlight; // this promise includes the queued read
+  }
+  const run = async (want) => {
+    try {
+      if (usageTab === "sessions") {
+        if (sessions && (want || performance.now() - sessionsAt > 15e3)) { sessionsAt = performance.now(); await loadSessions(); }
+      } else if (usageTab === "requests") {
+        // the newest page takes the requests as they come; an older one stays put
+        if (ledger && (want || !ledOffset)) await loadLedger(true);
+      } else {
+        // the reader asking reads the allowances afresh, a Claude account's by
+        // running Claude Code's own /usage (the backend runs it at most once in 30s)
+        let q = null;
+        if (want) { quotasAsked = performance.now(); q = loadQuotas(true); }
+        else if (usage && performance.now() - quotasAsked > 60e3) { quotasAsked = performance.now(); loadQuotas(); }
+        if (usage) {
+          const p = period;
+          const u = await api("usage?period=" + p);
+          if (view === "usage" && usageTab === "usage" && p === period && JSON.stringify(u) !== JSON.stringify(usage)) { usage = u; renderUsage(); }
+        }
+        await q;
       }
-      await q;
-    }
-    usageReadAt = Date.now();
-    renderUsageEvery();
-  } catch {}
+      usageReadAt = Date.now();
+      renderUsageEvery();
+    } catch {}
+  };
+  const flight = Promise.resolve().then(() => run(now)).then(() => {
+    if (usageFlight !== flight) return;
+    usageFlight = null;
+    if (!usageQueued) return;
+    const want = usageQueuedNow;
+    usageQueued = usageQueuedNow = false;
+    // one more read, the reader's own if either asked for it
+    return refreshUsage(want);
+  });
+  usageFlight = flight;
+  return flight;
 }
 renderUsageEvery();
 setInterval(() => {
@@ -13385,34 +13502,111 @@ window.renderPluginDot = renderPluginDot;
 renderPluginDot();
 window.addEventListener("focus", renderPluginDot);
 setInterval(renderPluginDot, 15 * 60 * 1000);
-// ---------- hiding emails, for a screenshot to share ----------
-// Routing and Usage each have a Hide emails button, one setting for both.
-// Each email address on the page — an account's, in a row, a sentence,
-// a tooltip — is swapped for blurred stand-in letters while it's on, as the
-// page redraws too; the address itself is kept aside to put back.
+// ---------- hiding accounts, for a screenshot to share ----------
+// Routing and Usage each have a Hide accounts button, one setting for both,
+// which the tray panel follows too. Each account on the page — an email
+// address, or a name that isn't one (WorkBuddy's nickname or phone number,
+// a plugin's account id, #568), in a row, a sentence, a tooltip — is
+// swapped for blurred stand-in letters while it's on, as the page redraws
+// too; the account itself is kept aside to put back.
+//
+// accountNames are the names of subscription accounts magpie has told the
+// page of (noteAccounts, from what the API answered), beside the accounts
+// of the providers and allowances it holds now.
+const accountNames = new Set();
+// generic words an account can't be named, lest every one of them on the
+// page is hidden
+const NOT_ACCOUNTS = new Set(["default", "own", "desktop", "account", "main", "local", "unknown", "none", "free", "pro"]);
+function noteAccount(s) {
+  if (typeof s !== "string") return;
+  s = s.trim();
+  if (s.length >= 2 && s.length <= 80 && !/[\n\r]/.test(s)) accountNames.add(s);
+}
+// noteAccounts takes the accounts out of an answer of the API: a user, an
+// account named, or a route's account (kind "account", who)
+function noteAccounts(x, depth = 0) {
+  if (!x || typeof x !== "object" || depth > 8) return;
+  if (Array.isArray(x)) { for (const v of x) noteAccounts(v, depth + 1); return; }
+  for (const [k, v] of Object.entries(x)) {
+    if (typeof v === "string") {
+      if (k === "user" || k === "account" || (k === "who" && x.kind === "account")) noteAccount(v);
+    } else if (k === "who" && x.kind === "account" && Array.isArray(v)) for (const w of v) noteAccount(w);
+    else if (v && typeof v === "object") noteAccounts(v, depth + 1);
+  }
+}
+window.noteAccounts = noteAccounts;
 (() => {
   const EYE = "M2 12s3.5-8 10-8 10 8 10 8-3.5 8-10 8-10-8-10-8zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z";
   const EYE_OFF = "M9.9 4.2A10.4 10.4 0 0 1 12 4c6.5 0 10 8 10 8a17.6 17.6 0 0 1-2.2 3.2M6.6 6.6C3.9 8.4 2 12 2 12s3.5 8 10 8a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M2 2l20 20";
   // an address a vendor has half masked itself (Zhipu's abc***gh@…) is one
   // address still, the letters before its stars hidden too
-  const EMAIL = /[\w.+*•-]+@[\w*•-]+(?:\.[\w*•-]+)+/g, IS_EMAIL = new RegExp(EMAIL.source);
-  // stand-in letters of the address's shape, the same each time it's drawn:
+  const EMAIL = /[\w.+*•-]+@[\w*•-]+(?:\.[\w*•-]+)+/g, IS_EMAIL = new RegExp("^" + EMAIL.source + "$");
+  // stand-in letters of the account's shape, the same each time it's drawn:
   // blurred, they read as a name without being one
   const dots = (s) => { let h = 7; return s.replace(/[^@.]/g, (c) => (h = (h * 31 + c.charCodeAt(0)) >>> 0, "aeiounrstlcmdh"[h % 14])); };
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // names: the accounts that aren't addresses, longest first so one inside
+  // another is hidden whole; a name that is a provider's, an agent's or a
+  // card's own (WorkBuddy's account with no nickname is "WorkBuddy") is not
+  // one to hide
+  function names() {
+    const all = new Set(accountNames), not = new Set(NOT_ACCOUNTS);
+    for (const p of providers?.providers || []) {
+      for (const n of [p.id, p.name, p.account?.agentName, p.account?.agent]) if (n) not.add(String(n).toLowerCase());
+      if (p.account) { all.add((p.account.user || "").trim()); for (const l of p.account.logins || []) all.add((l.user || "").trim()); }
+    }
+    for (const q of quotas || []) {
+      for (const n of [q.provider, q.name, q.plan]) if (n) not.add(String(n).toLowerCase());
+      all.add((q.user || "").trim());
+    }
+    for (const a of state?.agents || []) for (const n of [a.id, a.name]) if (n) not.add(String(n).toLowerCase());
+    return [...all].filter((n) => n.length >= 2 && !IS_EMAIL.test(n) && !not.has(n.toLowerCase())).sort((a, b) => b.length - a.length);
+  }
+  let findKey = null, find = EMAIL;
+  // finder is the pattern of everything to hide now: an address, or a name
+  function finder() {
+    const ns = names(), key = ns.join("\n");
+    if (key !== findKey) {
+      findKey = key;
+      find = ns.length ? new RegExp(EMAIL.source + "|" + ns.map(esc).join("|"), "g") : EMAIL;
+    }
+    return find;
+  }
+  // a name found inside a longer word ("dev" in "developer") isn't the
+  // account; an address always is
+  const WORD = /[A-Za-z0-9_]/;
+  function* hits(s, re) {
+    re.lastIndex = 0; // matchAll starts where the pattern's last test ended
+    for (const m of s.matchAll(re)) {
+      const name = !m[0].includes("@");
+      if (name && ((WORD.test(m[0][0]) && WORD.test(s[m.index - 1] || "")) || (WORD.test(m[0].at(-1)) && WORD.test(s[m.index + m[0].length] || "")))) continue;
+      yield m;
+    }
+  }
   // what a page redraws is masked before it's painted; masking isn't
   // itself watched, so it can't set itself off again
   const OBS = { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["title"] };
+  const SKIP = new Set(["SCRIPT", "STYLE", "OPTION", "TEXTAREA"]);
   let masked = false;
   try { masked = localStorage.getItem("magpie.maskEmails") === "1"; } catch {}
-  const pages = [["#view-routing", "#rtMask"], ["#view-usage", "#usageMask"]].map(([v, b]) => {
-    const view = $(v), btn = $(b);
+  // the pages it hides on: Routing's and Usage's, each with its button; in
+  // the tray panel, the whole of it, as the window's setting says
+  const targets = mode === "panel" ? [["#view-agents", null]] : [["#view-routing", "#rtMask"], ["#view-usage", "#usageMask"]];
+  const pages = targets.map(([v, b]) => {
+    const view = $(v), btn = b && $(b);
+    if (!view) return () => {};
     function mask() {
+      const re = finder();
       const walk = document.createTreeWalker(view, NodeFilter.SHOW_TEXT), found = [];
-      for (let n; (n = walk.nextNode());) if (n.data.includes("@") && IS_EMAIL.test(n.data) && !n.parentElement?.closest(".pii")) found.push(n);
+      for (let n; (n = walk.nextNode());) {
+        if (n.data.length < 2 || SKIP.has(n.parentElement?.tagName) || n.parentElement?.closest(".pii")) continue;
+        re.lastIndex = 0;
+        if (re.test(n.data)) found.push(n);
+      }
       for (const n of found) {
         const bits = [];
         let last = 0;
-        for (const m of n.data.matchAll(EMAIL)) {
+        for (const m of hits(n.data, re)) {
           if (m.index > last) bits.push(n.data.slice(last, m.index));
           const s = el("span", "pii", dots(m[0]));
           s.dataset.raw = m[0];
@@ -13427,10 +13621,16 @@ setInterval(renderPluginDot, 15 * 60 * 1000);
         else n.replaceWith(...bits);
       }
       for (const e of view.querySelectorAll("[title]")) {
-        // one masked already reads as an address too, its stars and all
-        if ("piiTitle" in e.dataset || !e.title.includes("@") || !IS_EMAIL.test(e.title)) continue;
+        // one masked already reads as an account too, its stars and all
+        if ("piiTitle" in e.dataset || !e.title) continue;
+        let out = "", last = 0;
+        for (const m of hits(e.title, re)) {
+          out += e.title.slice(last, m.index) + m[0].replace(m[0].includes("@") ? /[^@.]/g : /./gu, "•"); // a tooltip can't blur
+          last = m.index + m[0].length;
+        }
+        if (!last) continue;
         e.dataset.piiTitle = e.title;
-        e.title = e.title.replace(EMAIL, (m) => m.replace(/[^@.]/g, "•")); // a tooltip can't blur
+        e.title = out + e.title.slice(last);
       }
     }
     function unmask() {
@@ -13445,7 +13645,7 @@ setInterval(renderPluginDot, 15 * 60 * 1000);
       mask();
       watch.observe(view, OBS);
     });
-    btn.onclick = () => {
+    if (btn) btn.onclick = () => {
       setMasked(!masked);
       // pixelated in when asked for, not again each time the page redraws
       view.classList.add("masking");
@@ -13453,23 +13653,30 @@ setInterval(renderPluginDot, 15 * 60 * 1000);
       btn._t = setTimeout(() => view.classList.remove("masking"), 450);
     };
     return (on) => {
-      btn.setAttribute("aria-pressed", String(on));
-      // what it is now, in its icon and its words: an open eye while the
-      // addresses show, struck through once they're hidden
-      btn.querySelector("path").setAttribute("d", on ? EYE_OFF : EYE);
-      const label = btn.querySelector("[data-t]");
-      label.dataset.en = on ? "Emails hidden" : "Hide emails";
-      label.textContent = t(label.dataset.en);
+      if (btn) {
+        btn.setAttribute("aria-pressed", String(on));
+        // what it is now, in its icon and its words: an open eye while the
+        // accounts show, struck through once they're hidden
+        btn.querySelector("path").setAttribute("d", on ? EYE_OFF : EYE);
+        const label = btn.querySelector("[data-t]");
+        label.dataset.en = on ? "Accounts hidden" : "Hide accounts";
+        label.textContent = t(label.dataset.en);
+      }
       view.classList.toggle("masked", on);
-      if (on) { mask(); watch.observe(view, OBS); }
+      // a name learnt since it was masked: hidden afresh
+      if (on) { watch.disconnect(); unmask(); mask(); watch.observe(view, OBS); }
       else { watch.disconnect(); unmask(); }
     };
   });
-  function setMasked(on) {
+  function setMasked(on, keep) {
     masked = on;
-    try { localStorage.setItem("magpie.maskEmails", on ? "1" : "0"); } catch {}
+    if (!keep) try { localStorage.setItem("magpie.maskEmails", on ? "1" : "0"); } catch {}
     for (const set of pages) set(on);
   }
+  // turned in the window: the tray panel (or another window) follows
+  window.addEventListener("storage", (e) => {
+    if (e.key === "magpie.maskEmails" && (e.newValue === "1") !== masked) setMasked(e.newValue === "1", true);
+  });
   setMasked(masked);
 })();
 

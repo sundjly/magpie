@@ -600,7 +600,8 @@
   // fly carries a dot along paths one after another, as one flight — and
   // the magpie holding it in its beak, if there is one
   const fly = (dot, bird, legs, ms) => new Promise((res) => {
-    const tr = { dot, bird, legs, t0: performance.now(), ms: still() || !shown() ? 0 : ms, res, g: gen };
+    if (!shown()) { res(); return; } // no hidden frame is needed to finish it
+    const tr = { dot, bird, legs, t0: performance.now(), ms: still() ? 0 : ms, res, g: gen };
     pose(tr, 0);
     trips.push(tr);
   }).finally(() => { for (const l of legs) if (l.j) l.p.remove(); });
@@ -1122,6 +1123,7 @@
       if (res.status === 404) throw new Error(t("Routing history for this request is no longer available."));
       if (!res.ok) throw new Error(await res.text());
       r = await res.json();
+      noteAccounts(r);
     }
     day = routes.has(id) ? "" : r.time.slice(0, 10);
     if (day) {
@@ -1220,6 +1222,7 @@
     try {
       const res = await (await fetch("/api/gateway/history?day=" + encodeURIComponent(d || ""))).json();
       days = res.days || [];
+      noteAccounts(res.routes);
       if (d && d === day) { past = res.routes || []; pastCut = !!res.cut; }
     } catch {}
     renderHist(); // shown once there are days, though none are live
@@ -1926,8 +1929,15 @@
     for (const r of live) play(r.id);
     renderAll();
   }
-  let seen = false, lastFrame = 0;
+  let seen = false, lastFrame = 0, ticking = 0;
+  // the loop runs only while the page is the one in sight: out of sight it
+  // is not scheduled at all, so a hidden Routing page — the window hidden,
+  // another view picked, another tab open — asks for no frames forever
+  // (#302's other half). Shown again, start() resumes it, and resume()
+  // draws the page as it is now. The requests that came meanwhile are
+  // listed by the poll, which never stops.
   function frame(ts) {
+    ticking = 0;
     const vis = shown();
     if (vis && (!seen || ts - lastFrame > 1000)) resume();
     seen = vis;
@@ -1944,13 +1954,30 @@
       }
       if (ts < flipUntil) layout();
       if (capQ.length && ts - capAt > (capLo && !capQ[0].lo ? 500 : 1700)) show(capQ.shift());
-    } else {
-      for (const tr of trips) tr.res();
-      trips = [];
-      if (capQ.length) { show(capQ[capQ.length - 1]); capQ = []; }
-    }
-    requestAnimationFrame(frame);
+    } else pause();
+    if (vis) ticking = requestAnimationFrame(frame);
   }
+  function pause() {
+    if (ticking) cancelAnimationFrame(ticking);
+    ticking = 0;
+    seen = false;
+    endReplay(true);
+    for (const tr of trips) tr.res();
+    trips = [];
+    wake();
+    if (capQ.length) { show(capQ[capQ.length - 1]); capQ = []; }
+  }
+  // Visibility events can arrive after the browser has suspended frames, so
+  // finish hidden work here too. The first visible frame alone owns resume.
+  function start() {
+    if (!shown()) { pause(); return; }
+    if (!ticking) ticking = requestAnimationFrame(frame);
+  }
+  // in sight again: the view picked, the window shown, another tab left,
+  // the window covered and drawing frames once more
+  new MutationObserver(start).observe($("#view-routing"), { attributes: true, attributeFilter: ["hidden"] });
+  document.addEventListener("visibilitychange", start);
+  window.addEventListener("focus", start);
   // countdowns tick once a second
   setInterval(() => { if (shown()) { if (!pinned && loaded && cur) sync(); render(); renderActs(listed()); } }, 1000);
 
@@ -1990,6 +2017,7 @@
       try {
         const res = await fetch(`/api/gateway/trace?after=${seq}${loaded ? "&wait=1" : ""}`);
         const d = await res.json();
+        noteAccounts(d);
         skew = at(d.now) - Date.now();
         mine = d.mine;
         hubText();
@@ -3068,6 +3096,6 @@
   new ResizeObserver(fitSoon).observe($("#view-routing"));
   new ResizeObserver(fitSoon).observe(box);
   words();
-  requestAnimationFrame(frame);
+  start();
   poll();
 })();
