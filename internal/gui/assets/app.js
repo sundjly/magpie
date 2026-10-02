@@ -2989,6 +2989,10 @@ function renderFileError() {
 const DEPRECATED_WHY = "Some subscriptions are reached in ways their vendors' terms may not allow. So that magpie itself isn't banned over them, subscription providers are being decoupled from magpie and run by community plugins instead.";
 // deprecatedSub: a built-in subscription with a plugin, not moved onto it
 const deprecatedSub = (agent) => (providers?.movable || []).includes(agent) && !movedSub(agent);
+// replacedSub: a deprecated built-in whose plugin is installed and serves
+// it, under the plugin's own id (the built-in's with "-plugin") until moved;
+// its accounts, if any, still work, and its plugin's Move brings them over
+const replacedSub = (agent) => deprecatedSub(agent) && (providers?.plugins || []).some((x) => x.pid === agent);
 function deprecatedBadge() {
   const b = el("span", "badge deprecated", t("Deprecated"));
   b.title = t(DEPRECATED_WHY);
@@ -3117,7 +3121,7 @@ function accountPlan(a) {
     return name + " " + plan;
   };
   if (agent === "codex") return named("ChatGPT", a.plan && cap(a.plan));
-  if (agent === "copilot") return "GitHub";
+  if (agent === "copilot") return named("GitHub", a.plan && cap(a.plan));
   if (agent === "claude") return named("Claude", a.plan && cap(a.plan));
   if (agent === "cursor") return named("Cursor", a.plan && cap(a.plan));
   if (agent === "grok") return a.plan || "SuperGrok";
@@ -4037,7 +4041,7 @@ function renderActivity() {
     r.append(el("span", "m", c.model));
     r.append(el("span", "p", c.from === c.to ? c.from : `${c.from} → ${c.to}`));
     r.append(el("span", "grow"));
-    r.append(el("span", "st", c.error ? `${c.status} ${c.error}` : `${c.status} · ${c.ms} ms` + (c.ttft ? " · " + t("TTFT {ms}", { ms: `${c.ttft} ms` }) : "")));
+    r.append(el("span", "st", c.error ? `${c.status} ${c.error}` : `${c.status} · ${ledTook(c.ms)}` + (c.ttft ? " · " + t("TTFT {ms}", { ms: ledTook(c.ttft) }) : "")));
     r.title = open ? t("Hide request and response bodies") : t("Show request and response bodies");
     const toggle = () => {
       if (expandedCalls.has(id)) expandedCalls.delete(id); else expandedCalls.add(id);
@@ -4151,8 +4155,10 @@ function renderAdd() {
       return grid;
     };
     let any = false;
-    // one moved onto its plugin stays where it was, signing in through it
-    const subs = SUBS.map((x) => subOf(x.agent)).filter((x) => !f || x.name.toLowerCase().includes(f) || x.agent.includes(f) || "subscription".includes(f));
+    // one moved onto its plugin stays where it was, signing in through it;
+    // a deprecated one whose plugin is installed is that plugin's row alone
+    // (ARNO on Discord: Qoder CN twice), unless it is signing in now
+    const subs = SUBS.filter((x) => !replacedSub(x.agent) || signing?.agent === x.agent).map((x) => subOf(x.agent)).filter((x) => !f || x.name.toLowerCase().includes(f) || x.agent.includes(f) || "subscription".includes(f));
     if (subs.length) {
       any = true;
       const grid = section("Subscriptions", "sign in, no key");
@@ -5027,21 +5033,40 @@ function drawEditor(p, presetID) {
           draft[to] = respellURL(draft[from], v);
           draft[from] = p?.[from] || "";
         }
-        draft.api = v;
-        url.value = draft[to] || "";
-        for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b);
-        slide(seg, "api");
-        url.placeholder = v === "anthropic" ? "https://…" : "https://…/v1";
-        fillEndpoints();
-        showSearch();
+        showApi(v);
       };
+      b.dataset.api = v;
       seg.append(b);
     }
+    // the protocol the base URL is for, shown as picked: by its button,
+    // or by a detection taken (useDetected)
+    const showApi = (v) => {
+      draft.api = v;
+      url.value = draft[apiField[v]] || "";
+      for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x.dataset.api === v);
+      slide(seg, "api");
+      url.placeholder = v === "anthropic" ? "https://…" : "https://…/v1";
+      fillEndpoints();
+      showSearch();
+    };
     queueMicrotask(() => slide(seg, "api"));
     url = input(draft[apiField[draft.api]], draft.api === "anthropic" ? "https://…" : "https://…/v1", "url");
     url.oninput = () => { draft[apiField[draft.api]] = url.value; showSearch(); };
     const urlWrap = el("div", "stack");
     urlWrap.append(seg, url);
+    // the APIs that answered a detection, taken for the provider: their
+    // URLs set, one that wasn't found there (404, 405) cleared, and the
+    // base URL's protocol one of those that answered
+    const useDetected = (rs) => {
+      for (const x of rs) {
+        if (x.ok) draft[x.protocol] = x.base;
+        else if ((x.status === 404 || x.status === 405) && (draft[x.protocol] || "").trim().replace(/\/+$/, "") === x.base) draft[x.protocol] = "";
+      }
+      const v = draft[apiField[draft.api]] ? draft.api : ["openai", "responses", "anthropic"].find((a) => draft[apiField[a]]);
+      showApi(v || draft.api);
+      draft.onModelPrefs?.(); // the APIs a model can be given follow the URLs
+    };
+    urlWrap.append(detectAPIs(p, () => url.value, useDetected));
     ed.append(...field("Base URL", urlWrap));
   }
 
@@ -5802,7 +5827,7 @@ function renderEndpoints(p, src) {
           s.className = "res " + (x.ok ? "ok" : "bad");
           s.replaceChildren();
           s.append(svg(x.ok ? CHECK : "M4.5 4.5l7 7M11.5 4.5l-7 7", 10, 2));
-          s.append(el("span", "", x.ok ? `${x.ms} ms` : x.status ? `${x.status} · ${x.error}` : x.error));
+          s.append(el("span", "", x.ok ? ledTook(x.ms) : x.status ? `${x.status} · ${x.error}` : x.error));
           s.title = x.ok ? t("model {model}", { model: x.model }) : x.error;
         }
       } catch (e) { for (const s of Object.values(slots)) { s.className = "res"; s.textContent = ""; } status(e.message, "err"); }
@@ -5811,6 +5836,92 @@ function renderEndpoints(p, src) {
     eps.append(test);
   }
   return eps;
+}
+
+// detectAPIs: which of the APIs magpie speaks to a vendor answer at the base
+// URL typed (01huadalang on Discord: 一键检测支持什么协议) — Detect sends
+// each the smallest request there, with the key typed (or the saved one)
+// and a model typed or picked from the vendor's list, and shows what each
+// answered; "Use these" takes those that answered for the provider. With
+// a model typed for a saved provider and only some APIs answering, that
+// model alone can be asked on one of them (staged with Names & levels).
+function detectAPIs(p, base, use) {
+  const box = el("div", "detect");
+  const row = el("div", "detect-row");
+  const go = el("button", "text action", t("Detect APIs"));
+  go.title = t("Send the smallest request to each API (OpenAI chat completions, Responses, Anthropic messages) at this URL, to see which answer");
+  const model = input(draft.detectModel || "", t("model to try · empty picks one from the vendor's list"));
+  model.classList.add("detect-model");
+  model.oninput = () => { draft.detectModel = model.value; };
+  model.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") go.click(); else if (e.key === "Escape") cancelEdit(); };
+  row.append(go, model);
+  const out = el("div", "eps detect-out");
+  out.hidden = true;
+  box.append(row, out);
+  go.onclick = async () => {
+    const typedBase = (base() || "").trim();
+    if (!typedBase && !(draft.chat || draft.responses || draft.anthropic || "").trim()) { status(t("Type the base URL first"), "warn"); return; }
+    go.classList.add("busy");
+    out.hidden = false;
+    out.replaceChildren(el("span", "hint", t("Asking each API…")));
+    try {
+      const m = model.value.trim();
+      // the URL typed is asked as each API takes it, not as the field
+      // holding it would send it; URLs given under More endpoints as they are
+      const body = { ...asTyped(), id: p?.id, base: typedBase, model: m };
+      for (const k of ["chat", "responses", "anthropic"]) if (body[k] === typedBase) body[k] = "";
+      const r = await api("provider/detect", body);
+      out.replaceChildren();
+      for (const x of r.results) {
+        const e = el("div", "ep");
+        e.dataset.api = x.protocol;
+        const [, label, hint] = PROTOS.find(([k]) => k === x.protocol) || [x.protocol, x.protocol, ""];
+        const pl = el("span", "pl", label);
+        pl.title = t(hint);
+        const res = el("span", "res " + (x.ok ? "ok" : "bad"));
+        res.append(svg(x.ok ? CHECK : "M4.5 4.5l7 7M11.5 4.5l-7 7", 10, 2));
+        const why = x.status ? `${x.status} · ${x.error}` : t(x.error || "");
+        res.append(el("span", "", x.ok ? ledTook(x.ms) : why));
+        res.title = (x.model ? t("model {model}", { model: x.model }) : "") + (x.ok ? "" : "\n" + why);
+        e.append(pl, el("code", "", x.base || "—"), res);
+        out.append(e);
+      }
+      const ok = r.results.filter((x) => x.ok);
+      const acts = el("div", "detect-acts");
+      if (!ok.length) acts.append(el("span", "hint", t("None answered: check the URL and the key, or type a model the vendor serves")));
+      else {
+        const take = el("button", "text action", t("Use these"));
+        take.title = t("Set the URLs of the APIs that answered; one not found there is cleared");
+        take.onclick = () => { use(r.results); take.disabled = true; take.textContent = t("Taken · save to keep"); };
+        acts.append(take);
+        // one model the provider serves, answering on some APIs only:
+        // it can be asked on one of them alone
+        const pm = p && m && p.models.find((x) => x.id === m);
+        if (pm && ok.length < r.results.filter((x) => x.base).length) {
+          for (const x of ok) {
+            const label = (PROTOS.find(([k]) => k === x.protocol) || [])[1] || x.protocol;
+            const b = el("button", "text action", t("Ask {model} on {api} only", { model: m, api: label }));
+            b.title = t("Staged in Names & levels and made with the Save; Auto there gives it back");
+            b.onclick = () => {
+              const prefs = draft.modelPrefs = draft.modelPrefs || {};
+              prefs[m] = prefs[m] || {};
+              if ((pm.api || "") === x.protocol) delete prefs[m].api; else prefs[m].api = x.protocol;
+              if (!Object.keys(prefs[m]).length) delete prefs[m];
+              if (!draft[x.protocol]) use(r.results);
+              for (const o of acts.querySelectorAll(".pick-api")) o.classList.toggle("on", o === b);
+              draft.onModelPrefs?.();
+              status(t("{model} is asked on {api} once saved", { model: m, api: label }), "ok");
+            };
+            b.classList.add("pick-api");
+            acts.append(b);
+          }
+        }
+      }
+      out.append(acts);
+    } catch (e) { out.replaceChildren(); out.hidden = true; status(e.message, "err"); }
+    go.classList.remove("busy");
+  };
+  return box;
 }
 
 // modelTestWhy: why a provider's models can't each be sent a test request
@@ -5839,7 +5950,7 @@ function renderModels(p) {
     if (!got || !(id in got)) return;
     const x = got[id];
     c.append(el("span", "tdot " + (!x ? "wait" : x.ok ? "ok" : "bad")));
-    c.title = !x ? t("Testing…") : x.ok ? t("Answered in {ms} ms", { ms: x.ms }) : (x.status ? x.status + " · " : "") + x.error;
+    c.title = !x ? t("Testing…") : x.ok ? t("Answered in {took}", { took: ledTook(x.ms) }) : (x.status ? x.status + " · " : "") + x.error;
   };
   // a chip's right-click (or the menu key) tests that model alone: Test models
   // asks every one, and a list of many takes a while (yonghe, Discord). A
@@ -5938,6 +6049,12 @@ function renderModels(p) {
     const ids = draft.chosen.length ? draft.chosen : p.models.filter((m) => m.on).map((m) => m.id);
     if (!ids.length) { names.append(el("span", "hint", t("Pick a model first."))); return; }
     const prefs = draft.modelPrefs = draft.modelPrefs || {};
+    draft.onModelPrefs = drawNames;
+    // the APIs a model can be asked on alone: those of a key's provider
+    // it has a URL for, when it has more than one (01huadalang on Discord:
+    // 一个 api 里有很多模型但是不同协议)
+    const urls = ["chat", "responses", "anthropic"].filter((k) => (draft[k] ?? p[k] ?? "").trim());
+    const apis = p.account || urls.length < 2 ? [] : PROTOS.filter(([k]) => urls.includes(k));
     for (const id of ids) {
       const m = p.models.find((x) => x.id === id) || { id, name: id };
       const own = m.default || m.name || m.id;
@@ -5971,6 +6088,23 @@ function renderModels(p) {
         drawReset();
       };
       row.append(img);
+      const apiNow = () => prefs[id]?.api ?? m.api ?? "";
+      let apiSeg = null;
+      if (apis.length || m.api) {
+        const items = [["", t("Auto")], ...apis.map(([k, l]) => [k, l])];
+        if (m.api && !items.some(([k]) => k === m.api)) items.push([m.api, (PROTOS.find(([k]) => k === m.api) || [])[1] || m.api]);
+        apiSeg = segs(items, apiNow(), (v) => {
+          if (v === (m.api || "")) delete pref().api; else pref().api = v;
+          drawReset();
+        });
+        apiSeg.classList.add("mapi");
+        apiSeg.title = t("The API {id} is asked on. Auto: as the vendor's list says, else each URL the provider has; pick one when the vendor serves it on that one only", { id: m.id });
+        for (const [i, b] of [...apiSeg.querySelectorAll(".opt")].entries()) {
+          b.dataset.api = items[i][0];
+          if (items[i][0]) b.title = t((PROTOS.find(([k]) => k === items[i][0]) || [])[2] || "");
+        }
+        row.append(apiSeg);
+      }
       // a model whose levels aren't known (m.given) can be given any
       // of them, and none again
       const boxes = [];
@@ -5998,7 +6132,7 @@ function renderModels(p) {
       const unsaved = el("span", "hint munsaved", t("unsaved"));
       unsaved.title = t("Made when the provider is saved; Cancel drops it");
       const reset = el("button", "text action", t("Restore default"));
-      reset.title = t("Its own name, every reasoning level it has, and whether it sees images");
+      reset.title = t("Its own name, every reasoning level it has, whether it sees images, and the API it is asked on");
       reset.onclick = () => {
         prefs[id] = {};
         if (m.default) prefs[id].name = "";
@@ -6007,6 +6141,8 @@ function renderModels(p) {
         name.value = nameNow();
         imgCb.checked = imagesNow();
         for (const [l, cb] of boxes) cb.checked = keptNow().includes(l);
+        if (m.api) prefs[id].api = "";
+        if (apiSeg) { for (const b of apiSeg.querySelectorAll(".opt")) b.classList.toggle("on", b.dataset.api === apiNow()); slide(apiSeg, "api"); }
         drawReset();
       };
       const drawReset = () => {
@@ -6015,7 +6151,7 @@ function renderModels(p) {
         unsaved.hidden = !prefs[id];
         // staged back to its own already, there is nothing to restore
         const images = prefs[id]?.ownImages ? false : prefs[id]?.images !== undefined ? prefs[id].images !== !!m.ownImages : !!m.imageSet;
-        const custom = nameNow() !== "" || (prefs[id]?.efforts ? prefs[id].efforts.length > 0 : !!m.kept?.length) || images;
+        const custom = nameNow() !== "" || (prefs[id]?.efforts ? prefs[id].efforts.length > 0 : !!m.kept?.length) || images || apiNow() !== "";
         reset.hidden = !custom;
       };
       row.append(unsaved, reset);
@@ -6106,7 +6242,7 @@ function renderModels(p) {
     try {
       const r = await api("provider/test", { ...asTyped(), id: p.id, test: [id] });
       const x = got[id] = r.results[0];
-      status(x.ok ? t("{model} answered in {ms} ms", { model: id, ms: x.ms }) : t("{model} didn't answer: {error}", { model: id, error: (x.status ? x.status + " · " : "") + x.error }), x.ok ? "ok" : "err");
+      status(x.ok ? t("{model} answered in {took}", { model: id, took: ledTook(x.ms) }) : t("{model} didn't answer: {error}", { model: id, error: (x.status ? x.status + " · " : "") + x.error }), x.ok ? "ok" : "err");
     } catch (e) { delete got[id]; status(e.message, "err"); }
     draw();
   };
@@ -6249,6 +6385,12 @@ function fallbackHint(p) {
 // opens the vendor's own sign-in in the browser, takes the account when it
 // comes back, and lists it with the others — any of them one click from
 // being the one in use.
+//
+// Some of these are deprecated: once moved onto their community plugin
+// (providers.onPlugins, the default for a new sign-in), the plugin signs in
+// and serves them, and subOf hands back the plugin's sign-in. A change to
+// such a built-in's sign-in on the Go side doesn't reach those users; see
+// AGENTS.md (PLUGIN-SERVED).
 
 const SUBS = [
   // both can also come from CLIProxyAPI's auth files or the agent's own (importing below)
@@ -6261,7 +6403,7 @@ const SUBS = [
   // so does Grok Build
   { agent: "grok", name: "Grok (SuperGrok)", icon: "xai", plans: "SuperGrok · X Premium+", own: true },
   // signed in with GitHub's device code; the editors' own sign-in stays theirs
-  { agent: "copilot", name: "Copilot", icon: "githubcopilot", plans: "Pro · Pro+ · Business", own: true },
+  { agent: "copilot", name: "Copilot", icon: "githubcopilot", plans: "Free · Education · Pro · Pro+ · Business · Enterprise", own: true },
   // Z.ai's GLM Coding Plan, signed in as ZCode does; ZCode's own account is read too
   // sites: where the account is, Z.ai's or BigModel's (智谱), asked before
   // the sign-in opens; a team's plan (团队套餐) is signed in on its site too
@@ -6806,11 +6948,7 @@ function renderSigning(sub) {
     const acts = el("span", "acts");
     const open = el("button", "link", t("Open again"));
     open.onclick = () => api("open", { url: signing.url }).catch(() => {});
-    // a sign-in left unfinished is put away from beside the link too (#526)
-    const close = el("button", "link", t("Close"));
-    close.title = t("Stop waiting for this sign-in");
-    close.onclick = cancelSignIn;
-    acts.append(open, close);
+    acts.append(open);
     tt.append(acts);
   }
   if (signing.pasteCallback || signing.pasteCode || signing.pasteKey) {
@@ -6886,7 +7024,10 @@ function renderSigning(sub) {
     const acts = tt.querySelector(".acts") || tt.appendChild(el("span", "acts"));
     acts.append(imp);
   }
+  // the one way to put it away (#526): a Close beside Open again did what
+  // this does, two buttons for one thing
   const x = el("button", "text", t("Cancel"));
+  x.title = t("Stop waiting for this sign-in");
   x.onclick = cancelSignIn;
   box.append(x);
   return box;
@@ -7328,9 +7469,11 @@ function accountQuota(data, user) {
   }
   // the two rolling windows fit a line; the per-model ones go in its
   // tooltip; per-model windows of a family are the family's one
-  const ws = familyWindows(q.windows);
+  const counted = q.windows.filter((w) => !w.unlimited);
+  const ws = familyWindows(counted);
+  if (!ws.length) { line.append(el("span", "aq-none", t("Unlimited"))); return line; }
   if (ws.some((w) => w.members)) return poolLine(line, ws, q);
-  line.title = ws.slice(2).map((w) => w.tiers ? tiersText(w) : t(w.name) + " " + quotaText(w)).join(ws !== q.windows ? "\n" : " · ");
+  line.title = ws.slice(2).map((w) => w.tiers ? tiersText(w) : t(w.name) + " " + quotaText(w)).join(ws !== counted ? "\n" : " · ");
   if (q.asOf) line.title = [line.title, asOfText(q)].filter(Boolean).join("\n");
   for (const w of ws.slice(0, 2)) {
     const used = Math.max(0, Math.min(100, w.used));
@@ -7391,6 +7534,7 @@ function quotaFill(w) {
   return quotaLeft ? 100 - used : used;
 }
 function quotaText(w) {
+  if (w.unlimited) return t("Unlimited");
   const used = Math.max(0, Math.min(100, w.used));
   const n = quotaLeft ? 100 - used : used;
   const pct = t(quotaLeft ? "{n} left" : "{n} used", { n: (Number.isInteger(n) ? n : n.toFixed(1)) + "%" });
@@ -8713,7 +8857,8 @@ function panelQuotaCard(q) {
     card.title += "\n" + asOfText(q);
   }
   // a pool's 5-hour and weekly rings, two pools of them, else three
-  const fam = familyWindows(q.windows);
+  const fam = familyWindows(q.windows.filter((w) => !w.unlimited));
+  if (!fam.length && q.windows.some((w) => w.unlimited)) { card.append(el("span", "pq-sub", t("Unlimited"))); return card; }
   const ws = fam.slice(0, fam.some((w) => w.members) ? 4 : 3);
   // when the windows begun start again: the first bare, the others by name
   const begun = ws.filter((w) => w.resetsAt && w.used > 0);
@@ -9032,7 +9177,8 @@ function quotaWindows(sub) {
     const fill = el("i");
     fill.style.width = `${quotaFill(w)}%`;
     track.append(fill);
-    quota.append(labels, track);
+    quota.append(labels);
+    if (!w.unlimited) quota.append(track);
     // when it starts again, on the clock and how long until then
     if (w.resetsAt) {
       const at = new Date(w.resetsAt);
@@ -9097,6 +9243,8 @@ function renderUsage() {
   for (const id of ["usageAgents", "usageModels"]) $("#" + id).hidden = empty;
   for (const h of $$("#view-usage .row-head")) h.hidden = empty;
   $("#usageKeysHead").hidden = $("#usageKeys").hidden = empty || !u.callerKeys?.length;
+  // each subscription account's share, by the account that answered (#557)
+  $("#usageAccountsHead").hidden = $("#usageAccounts").hidden = empty || !u.accounts?.length;
   if (empty) {
     stats.classList.add("empty");
     const none = { today: "No calls today.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[period];
@@ -9154,7 +9302,7 @@ function renderUsage() {
       const r = el("div", "row stat");
       r.append(icon(g.icon || "generic"));
       const who = el("div", "who");
-      who.append(el("div", "name", g.name));
+      who.append(el("div", "name" + (g.name ? "" : " faint"), g.name || t("account not recorded")));
       const sub = [];
       if (g.sub) sub.push(g.sub);
       sub.push(t(g.calls === 1 ? "{n} call" : "{n} calls", { n: g.calls }));
@@ -9162,8 +9310,7 @@ function renderUsage() {
       // how long the streamed replies took to begin, and how fast they
       // wrote after (#196)
       if (g.timed) {
-        const ms = Math.round(g.ttft_ms / g.timed);
-        sub.push(t("TTFT {ms}", { ms: ms < 1000 ? t("{n} ms", { n: ms }) : t("{n} s", { n: (ms / 1000).toFixed(1) }) }));
+        sub.push(t("TTFT {ms}", { ms: ledTook(Math.round(g.ttft_ms / g.timed)) }));
         if (g.decode_ms > 0) sub.push(t("{n} tok/s", { n: Math.round(g.decode_out / (g.decode_ms / 1000)) }));
       }
       who.append(el("div", "sub", sub.join(" · ")));
@@ -9183,6 +9330,7 @@ function renderUsage() {
   };
   list("usageAgents", u.agents);
   list("usageModels", u.models);
+  list("usageAccounts", u.accounts || []);
   list("usageKeys", u.callerKeys || []);
   $("#usageNote").textContent = t("Counted from the providers' own usage reports on every call through the gateway · {path}", { path: u.path });
 }
@@ -9196,7 +9344,7 @@ function renderUsage() {
 // server pages it (/api/usage/requests) and saves it whole as CSV.
 
 let ledger = null; // the page shown: { rows, offset, total, agents, …totals }
-let ledOffset = 0, ledAgent = "", ledProvider = "", ledCallerKey = "", ledFailed = false, ledQuery = "", ledModel = "", ledRoute = 0, ledComputer = "";
+let ledOffset = 0, ledAgent = "", ledProvider = "", ledAccount = "", ledCallerKey = "", ledFailed = false, ledQuery = "", ledModel = "", ledRoute = 0, ledComputer = "";
 
 // computerOpts are the Computer filter's choices: this computer, the others
 // together, and each other one, as sync shares their usage (#542); none
@@ -9218,10 +9366,10 @@ try {
 
 let ledRouteInfo = null, ledBeforeRoute = null;
 window.openUsageRoute = (route) => {
-  if (!ledBeforeRoute) ledBeforeRoute = { period, ledOffset, ledAgent, ledProvider, ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer };
+  if (!ledBeforeRoute) ledBeforeRoute = { period, ledOffset, ledAgent, ledProvider, ledAccount, ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer };
   ledRoute = route.id;
   ledRouteInfo = route;
-  ledOffset = 0; ledAgent = ""; ledProvider = ""; ledCallerKey = ""; ledFailed = false; ledQuery = ""; ledModel = ""; ledComputer = "";
+  ledOffset = 0; ledAgent = ""; ledProvider = ""; ledAccount = ""; ledCallerKey = ""; ledFailed = false; ledQuery = ""; ledModel = ""; ledComputer = "";
   $("#ledQ").value = "";
   period = "all";
   usageTab = "requests";
@@ -9233,6 +9381,7 @@ function ledParams(extra) {
   const q = new URLSearchParams({ period });
   if (ledAgent) q.set("agent", ledAgent);
   if (ledProvider) q.set("provider", ledProvider);
+  if (ledAccount) q.set("account", ledAccount);
   if (ledComputer) q.set("computer", ledComputer);
   if (ledCallerKey) q.set("callerKey", ledCallerKey);
   if (ledRoute) q.set("route", ledRoute);
@@ -9787,11 +9936,14 @@ function renderLedger() {
   const providers = l.providers || [];
   const missingAgent = ledAgent && !l.agents.some((a) => a.id === ledAgent);
   const missingProvider = ledProvider && !providers.some((p) => p.id === ledProvider);
+  const accounts = l.accounts || [];
+  const missingAccount = ledAccount && !accounts.some((a) => a.id === ledAccount);
   const missingCaller = ledCallerKey && !callers.some((k) => k.id === ledCallerKey);
   const computers = computerOpts(l.computers);
   const missingComputer = ledComputer && !computers.some((c) => c.v === ledComputer);
-  if (missingAgent || missingProvider || missingCaller || missingComputer) {
+  if (missingAgent || missingProvider || missingAccount || missingCaller || missingComputer) {
     if (missingComputer) ledComputer = "";
+    if (missingAccount) ledAccount = "";
     if (missingAgent) ledAgent = "";
     if (missingProvider) ledProvider = "";
     if (missingCaller) ledCallerKey = "";
@@ -9819,6 +9971,7 @@ function renderLedger() {
   sessPick($("#ledComputer"), "All computers", ledComputer, computers, "Computer", (v) => { ledComputer = v; ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
   sessPick($("#ledAgent"), "All agents", ledAgent, l.agents.map((a) => ({ v: a.id, name: a.name, note: "" })), "Agent", (v) => { ledAgent = v; ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
   sessPick($("#ledProvider"), "All providers", ledProvider, providers.map((p) => ({ v: p.id, name: t(p.name), note: "" })), "Provider", (v) => { ledProvider = v; ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
+  sessPick($("#ledAccount"), "All accounts", ledAccount, accounts.map((a) => ({ v: a.id, name: a.id, note: (a.providers || []).map((p) => t(p)).join(" · ") })), "Account", (v) => { ledAccount = v; ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
   sessPick($("#ledKey"), "All gateway keys", ledCallerKey, callers.map((k) => ({
     v: k.id, name: k.name, note: "",
   })), "Gateway keys", (v) => { ledCallerKey = v; ledOffset = 0; loadLedger().catch((e) => status(e.message, "err")); });
@@ -9851,7 +10004,7 @@ function renderLedger() {
   $("#ledRouteClear").setAttribute("aria-label", t("Clear filter"));
   $("#ledRouteClear").onclick = () => {
     ledRoute = 0; ledRouteInfo = null;
-    if (ledBeforeRoute) ({ period, ledOffset, ledAgent, ledProvider, ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer = "" } = ledBeforeRoute);
+    if (ledBeforeRoute) ({ period, ledOffset, ledAgent, ledProvider, ledAccount = "", ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer = "" } = ledBeforeRoute);
     ledBeforeRoute = null;
     $("#ledQ").value = ledQuery;
     loadLedger().catch((e) => status(e.message, "err"));
@@ -9862,7 +10015,7 @@ function renderLedger() {
   const pager = $("#ledPager");
   if (!l.total) {
     wrap.classList.add("none");
-    const filtered = ledRoute || ledAgent || ledProvider || ledComputer || ledCallerKey || ledModel || ledFailed || ledQuery.trim();
+    const filtered = ledRoute || ledAgent || ledProvider || ledAccount || ledComputer || ledCallerKey || ledModel || ledFailed || ledQuery.trim();
     const none = { today: "No calls today.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[period];
     wrap.replaceChildren(el("div", "led-none", filtered ? t("No requests match these filters.") : t(none)));
     pager.hidden = true;
@@ -11631,6 +11784,7 @@ function renderSettings() {
   $("#wbCheckinSub").title = t("As pressing 签到 in WorkBuddy does");
   renderTrayUsage(s, keep);
   renderProxy(s, keep);
+  renderGitHubToken(s);
   renderImages(s, keep);
   renderSearch(s);
   renderRedact(s, keep);
@@ -12124,6 +12278,49 @@ function renderProxy(s, keep) {
   box.append(segs([["auto", t("Auto")], ["off", t("Off")], ["custom", t("Custom")]], mode, pick));
 }
 
+// renderGitHubToken: the GitHub token the library's requests to GitHub's
+// API carry (checking skills for updates), which raises GitHub's limit from
+// 60 requests an hour to 5,000. The page is told a masked one only, and
+// whether it is the one set here or GITHUB_TOKEN / GH_TOKEN's.
+let githubTokenErr = "", githubTokenDraft = "";
+function renderGitHubToken(s) {
+  const box = $("#githubList");
+  box.replaceChildren();
+  const r = el("div", "row pref github-token");
+  const who = el("div", "who");
+  const sub = el("div", "sub");
+  who.append(el("div", "name", t("GitHub token")), sub);
+  const val = el("div", "val");
+  r.append(who, val);
+  box.append(r);
+  const set = (token) => writingPrefs(api("settings/github-token", { token }))
+    .then((ns) => { prefs = ns; githubTokenErr = githubTokenDraft = ""; renderSettings(); status(t("Saved"), "ok", 1500); })
+    .catch((e) => { githubTokenErr = t(e.message); status(t(e.message), "err"); renderSettings(); });
+  const why = t("The library checks skills for updates with it: GitHub allows 5,000 requests an hour with a token, 60 without. It needs no scopes.");
+  if (s.githubTokenFrom === "settings") {
+    sub.textContent = sub.title = why;
+    const x = el("button", "text", t("Remove"));
+    x.onclick = () => set("");
+    val.append(el("code", "", s.githubTokenMask || ""), x);
+    return;
+  }
+  sub.textContent = githubTokenErr || (s.githubTokenFrom
+    ? t("Using {env} from the environment ({mask}); a token set here comes first.", { env: s.githubTokenFrom, mask: s.githubTokenMask || "" }) + " " + why
+    : why);
+  if (githubTokenErr) sub.classList.add("err");
+  sub.title = sub.textContent;
+  const i = input(githubTokenDraft, "ghp_… / github_pat_…", "password");
+  i.className = "words github-token-input";
+  i.setAttribute("aria-label", t("GitHub token"));
+  const save = el("button", "text", t("Save"));
+  save.onclick = () => { const v = i.value.trim(); if (!v) return i.focus(); set(v); };
+  i.oninput = () => { githubTokenDraft = i.value; };
+  i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") save.onclick(); };
+  const get = el("button", "link", t("Create one ↗"));
+  get.onclick = () => api("open", { url: "https://github.com/settings/tokens/new?description=magpie" }).catch(() => {});
+  val.append(i, get, save);
+}
+
 // renderWarmAt draws a daily warm-up's control: Off, or a time of day in
 // a time field, saved as it is changed; On picks 06:00 to begin with, and
 // the field is there only while it is on. via says how the request goes.
@@ -12426,6 +12623,8 @@ function renderOTel(s, keep) {
     segs([["off", t("Off")], ["on", t("On")]], config.metrics ? "on" : "off", (v) => save({ metrics: v === "on" })));
   row("otelBodiesRow", "Include request and response bodies", "Attach each call's request and reply to its trace, as Langfuse's input and output. Secrets are masked and each body is cut at 256 KB",
     segs([["off", t("Off")], ["on", t("On")]], config.bodies ? "on" : "off", (v) => save({ bodies: v === "on" })));
+  if (config.bodies) row("otelWholeRow", "Include the whole bodies", "Keep each request and reply entire, not cut at 256 KB. A long reply is written to a temporary file, and a very large body may still be refused by the collector",
+    segs([["off", t("Off")], ["on", t("On")]], config.bodiesWhole ? "on" : "off", (v) => save({ bodiesWhole: v === "on" })));
   if (s.otelEnv) box.append(el("div", "sub", t("Environment variables override these saved OTLP preferences")));
 }
 
