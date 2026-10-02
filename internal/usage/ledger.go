@@ -51,6 +51,25 @@ type Filter struct {
 	Provider  string // a provider's id, as the ledger's rows have it
 	Failed    bool
 	Query     string
+	// Computer narrows to the calls of one computer (#542): ThisComputer,
+	// OtherComputers, or another's id; "" is every computer's
+	Computer string
+}
+
+// OtherComputers is the Filter.Computer of every other computer's calls.
+const OtherComputers = "others"
+
+// computer is whether r is of the computers Computer picks.
+func (f Filter) computer(r Record) bool {
+	switch f.Computer {
+	case "":
+		return true
+	case ThisComputer:
+		return r.Computer == ""
+	case OtherComputers:
+		return r.Computer != ""
+	}
+	return r.Computer == f.Computer
 }
 
 func (f Filter) keeps(r Record) bool {
@@ -67,6 +86,9 @@ func (f Filter) keeps(r Record) bool {
 		return false
 	}
 	if f.Provider != "" && r.Provider != f.Provider {
+		return false
+	}
+	if !f.computer(r) {
 		return false
 	}
 	if f.Failed && !r.Failed() {
@@ -121,7 +143,7 @@ func LedgerOf(p Period, f Filter) Ledgered {
 	if reader == nil {
 		reader = sessions.Calls
 	}
-	rows, sum, agents, providers := ledgerWith(since, f, Load(gatewaySince), reader(since))
+	rows, sum, agents, providers := ledgerWithShared(since, f, Load(gatewaySince), reader(since), sharedRecords(since))
 	return Ledgered{rows, sum, agents, providers}
 }
 
@@ -212,74 +234,30 @@ func logRecord(c sessions.Call) Record {
 // and an end within 2s. Fallback matches must be unique in both logs: an
 // ambiguous direct call stays visible. One gateway entry consumes one file call.
 func gatewayMatches(recs []Record, logs []sessions.Call) map[int]bool {
-	byID, bySession := map[string][]int{}, map[string][]int{}
+	gateway, local := &rowChunk{}, &rowChunk{}
 	for i, r := range recs {
-		if r.IsRejected() {
-			continue
-		}
-		if r.RequestID != "" {
-			byID[r.RequestID] = append(byID[r.RequestID], i)
-		}
-		session := r.NativeSession
-		if session == "" {
-			session = r.Session
-		}
-		if session != "" {
-			bySession[session] = append(bySession[session], i)
-		}
+		r.Agent = AgentOf(r.Agent)
+		gateway.add(Row{Record: r}, "", int64(i), false)
 	}
-	matched, used := map[int]bool{}, map[int]bool{}
-	for j, c := range logs {
-		if c.RequestID == "" {
-			continue
-		}
-		for _, i := range byID[c.RequestID] {
-			if !used[i] {
-				matched[j], used[i] = true, true
-				break
-			}
-		}
+	for i, c := range logs {
+		r := logRecord(c)
+		r.Agent = c.Agent // the native log already names its agent
+		local.add(Row{Record: r}, c.Msg, int64(i), c.Error != "")
 	}
-	candidates := map[int][]int{}
-	counts := map[int]int{}
-	for j, c := range logs {
-		if matched[j] || c.Session == "" {
-			continue
-		}
-		for _, i := range bySession[c.Session] {
-			r := recs[i]
-			if used[i] || c.RequestID != "" && r.RequestID != "" {
-				continue
-			}
-			// Empty successes carry too little evidence. Failed calls may have
-			// zero tokens, but both sources must agree that the call failed.
-			if c.Input+c.Output+c.CacheRead+c.CacheWrite == 0 && (c.Error == "" || !r.Failed()) {
-				continue
-			}
-			if (c.Error != "") != r.Failed() {
-				continue
-			}
-
-			if AgentOf(r.Agent) != c.Agent || r.Input != c.Input || r.Output != c.Output || r.CacheRead != c.CacheRead || r.CacheWrite != c.CacheWrite {
-				continue
-			}
-			end := r.Time.Add(time.Duration(r.Millis) * time.Millisecond)
-			if c.Time.Before(end.Add(-2*time.Second)) || c.Time.After(end.Add(2*time.Second)) {
-				continue
-			}
-			candidates[j] = append(candidates[j], i)
-			counts[i]++
-		}
-	}
-	for j, cs := range candidates {
-		if len(cs) == 1 && counts[cs[0]] == 1 {
-			matched[j] = true
-		}
+	matched := map[int]bool{}
+	for ref := range matchedBlocks([]*rowChunk{gateway}, []*rowChunk{local}, nil, time.Time{}, false) {
+		matched[ref.Index] = true
 	}
 	return matched
 }
 
 func ledgerWith(since time.Time, f Filter, recs []Record, logs []sessions.Call) (rows []Row, sum Totals, agents, providers []string) {
+	return ledgerWithShared(since, f, recs, logs, nil)
+}
+
+// ledgerWithShared is ledgerWith with the calls other computers made (#542),
+// priced and judged here as this computer's are.
+func ledgerWithShared(since time.Time, f Filter, recs []Record, logs []sessions.Call, others []SharedCall) (rows []Row, sum Totals, agents, providers []string) {
 	renamed := provider.Renamed()
 	// the upstream names in force now, read once for the lot: a row is
 	// judged by the names standing today, which is what Ledger says, and
@@ -335,6 +313,16 @@ func ledgerWith(since time.Time, f Filter, recs []Record, logs []sessions.Call) 
 		r.SessionOfficialLogin = identities.officialLogin(c, r.SessionAccount)
 		r.SessionProvider = c.Upstream
 		add(r, priceOf(r), "log")
+	}
+	for _, c := range others {
+		r := c.Record
+		if !since.IsZero() && r.Time.Before(since) {
+			continue
+		}
+		if id, ok := renamed[r.Provider]; ok {
+			r.Provider = id
+		}
+		add(r, priceOf(r), c.Source)
 	}
 	// the two logs, by when each call began
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Time.After(rows[j].Time) })
@@ -523,6 +511,11 @@ func (r Row) key(by string) string {
 		return r.Provider
 	case "agent":
 		return r.Agent
+	case "computer":
+		if r.Computer == "" {
+			return ThisComputer
+		}
+		return r.Computer
 	}
 	return r.Model
 }
