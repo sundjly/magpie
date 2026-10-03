@@ -109,6 +109,13 @@ body.window .lib-head { top: -2px; margin: -2px -16px 0; padding: 8px 16px 4px; 
 .lib-tag.lib-new.link { cursor: pointer; }
 .lib-tag.lib-new.link:hover { background: color-mix(in srgb, var(--accent) 22%, var(--accent-soft)); }
 .lib-tag.lib-unchecked { color: var(--faint); font-weight: 400; }
+.lib-tag.lib-signed { color: var(--green); background: var(--green-soft); }
+.lib-tag.lib-signed::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+
+/* magpie's sign-in to a remote server, in its editor (#615) */
+.lib-signin-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 28px; }
+.lib-signin-line .note { font-size: 12px; color: var(--fg-2); }
+.lib-signin-err { margin-top: 6px; font-size: 12px; color: var(--red); line-height: 1.45; overflow-wrap: anywhere; }
 
 /* the switch */
 .lib-switch { flex: none; position: relative; width: 32px; height: 19px; border-radius: 10px; background: var(--line); transition: background .2s var(--ease); }
@@ -189,6 +196,11 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 /* in a list row they sit stacked like a hand of cards, on one line, and fan
    out when the pointer or focus comes to them */
 .lib-row > .lib-agents { flex-wrap: nowrap; gap: 0; max-width: none; padding-left: 4px; }
+/* Reserve the spread width between All and the icons. As the gaps grow,
+   this spacer shrinks by the same amount, keeping All and the row in place. */
+.lib-row > .lib-agents::before { content: ""; order: 1; flex: none; width: max(0px, calc((var(--lib-agent-count, 1) - 1) * 10px)); transition: width .22s var(--ease); }
+.lib-row > .lib-agents:hover::before, .lib-row > .lib-agents:focus-within::before { width: 0; }
+.lib-row > .lib-agents .lib-ag[data-agent] { order: 2; }
 .lib-row > .lib-agents .lib-ag { flex: none; width: 24px; min-width: 0; height: 24px; padding: 0 0 0 4px; justify-content: flex-start; background: var(--card); border-color: var(--line-2); box-shadow: none; transition: margin .22s var(--ease), background .14s, border-color .14s, transform .14s var(--ease); }
 .lib-row > .lib-agents .lib-ag .ic { width: 14px; height: 14px; }
 /* the ring in the card's colour that cuts each chip out of the one under
@@ -198,7 +210,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-row > .lib-agents .lib-ag + .lib-ag { margin-left: -7px; }
 .lib-row > .lib-agents .lib-ag.on { border-color: var(--line); box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
 .lib-row > .lib-agents .lib-ag.via { border-style: dashed; }
-.lib-row > .lib-agents:hover .lib-ag + .lib-ag, .lib-row > .lib-agents:focus-within .lib-ag + .lib-ag { margin-left: 3px; }
+.lib-row > .lib-agents:hover .lib-ag[data-agent] + .lib-ag[data-agent], .lib-row > .lib-agents:focus-within .lib-ag[data-agent] + .lib-ag[data-agent] { margin-left: 3px; }
 .lib-row > .lib-agents:hover .lib-ag, .lib-row > .lib-agents:focus-within .lib-ag { box-shadow: none; }
 .lib-row > .lib-agents:hover .lib-ag:not(:focus-visible), .lib-row > .lib-agents:focus-within .lib-ag:not(:focus-visible) { outline-color: transparent; }
 .lib-row > .lib-agents .lib-ag:hover { background: var(--pill); z-index: 1; }

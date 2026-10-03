@@ -215,18 +215,23 @@
   }
 
   // Agent chips for a server or a skill: each agent that could have it, lit
-  // when it does. A chip whose agent couldn't be given it says why.
+  // when it does. A chip whose agent couldn't be given it says why. One that
+  // has it whatever is ticked (opts.always: a skill kept in ~/.agents/skills,
+  // which the agent reads itself, #595) is lit, can't be clicked, and says
+  // why; it is left out of what a click sends, and keeps what it had.
   function agentChips(all, on, onChange, opts = {}) {
     on ||= [];
     const box = el("div", "lib-agents");
+    box.style.setProperty("--lib-agent-count", all.length);
     for (const a of all) {
-      const has = on.includes(a.id);
-      const c = el("button", "lib-ag" + (has ? " on" : ""));
+      const always = opts.always?.(a) || "";
+      const has = on.includes(a.id) || !!always;
+      const c = el("button", "lib-ag" + (has ? " on" : "") + (always ? " always" : ""));
       c.dataset.agent = a.id;
       c.append(agentIcon(a.icon));
       if (opts.names) c.append(el("span", "n", a.name));
-      const problem = opts.problems?.[a.id];
-      const blocked = opts.blocked?.(a);
+      const problem = !always && opts.problems?.[a.id];
+      const blocked = always || opts.blocked?.(a);
       const via = !has && opts.via?.(a);
       let tip = has ? t("{agent} has it — click to take it away", { agent: a.name }) : t("Give it to {agent}", { agent: a.name });
       if (via) { c.classList.add("via"); tip = t("{agent} reads it through {other} — click to give it its own", { agent: a.name, other: via }); }
@@ -241,14 +246,26 @@
       c.onclick = (e) => {
         e.stopPropagation();
         const me = e.currentTarget;
-        const lit = [...me.parentElement.children].filter((x) => x.dataset.agent && x.getAttribute("aria-pressed") === "true").map((x) => x.dataset.agent);
-        const kept = on.filter((id) => !all.some((x) => x.id === id));
+        const lit = litOf(me.parentElement);
+        const kept = keptOf(me.parentElement, all, on);
         onChange([...kept, ...(lit.includes(a.id) ? lit.filter((x) => x !== a.id) : [...lit, a.id])], me);
       };
       box.append(c);
     }
     if (opts.all) allChip(box, all, on, onChange);
     return box;
+  }
+
+  // The agents a row's chips have lit by a click: not one lit because it
+  // has the item whatever is ticked.
+  function litOf(box) {
+    return [...box.children].filter((x) => x.dataset.agent && !x.classList.contains("always") && x.getAttribute("aria-pressed") === "true").map((x) => x.dataset.agent);
+  }
+  // What a click leaves as it was: an agent not shown, and one that has the
+  // item whatever is ticked, whose chip can't be clicked.
+  function keptOf(box, all, on) {
+    const fixed = [...box.children].filter((x) => x.classList.contains("always")).map((x) => x.dataset.agent);
+    return on.filter((id) => !all.some((x) => x.id === id) || fixed.includes(id));
   }
 
   // All, ahead of a row's chips: one click gives the item to every agent
@@ -263,9 +280,9 @@
     c.onclick = (e) => {
       e.stopPropagation();
       const me = e.currentTarget;
-      const lit = [...me.parentElement.children].filter((x) => x.dataset.agent && x.getAttribute("aria-pressed") === "true").map((x) => x.dataset.agent);
-      const kept = on.filter((id) => !all.some((x) => x.id === id));
-      onChange(can.every((id) => lit.includes(id)) ? kept : [...kept, ...new Set([...lit, ...can])], me);
+      const lit = litOf(me.parentElement);
+      const kept = keptOf(me.parentElement, all, on);
+      onChange(can.every((id) => lit.includes(id)) ? kept : [...new Set([...kept, ...lit, ...can])], me);
     };
     box.prepend(c);
     paintAll(box);
@@ -296,7 +313,7 @@
     return async (next, c) => {
       // All lights or darkens every chip of the row, a chip only itself
       const every = !!c.dataset.all;
-      for (const x of every ? [...c.parentElement.children].filter((y) => y.dataset.agent) : [c]) {
+      for (const x of every ? [...c.parentElement.children].filter((y) => y.dataset.agent && !y.classList.contains("always")) : [c]) {
         const on = next.includes(x.dataset.agent);
         x.classList.toggle("on", on);
         if (on || x === c) x.classList.remove("via");
@@ -681,6 +698,25 @@
       }
       card.append(ttl);
       if (rtk.note) card.append(el("p", "lib-rtk-note", rtk.note));
+      // found where magpie looks, but not on the PATH the agents get: their
+      // hooks run rtk by name, so it does nothing for them (#601)
+      if (rtk.offPath) {
+        const dir = tilde(rtk.path.replace(/[\\/][^\\/]*$/, ""));
+        card.append(el("p", "lib-rtk-note lib-rtk-offpath", t("RTK is in {dir}, which isn't on your PATH. Agents run rtk by name, so they can't find it and RTK does nothing for them (Pi says \"rtk binary not found in PATH\").", { dir })));
+        card.append(el("p", "lib-rtk-cmd", !rtk.pathDir
+          ? t("Add {dir} to PATH in your shell profile, then check again.", { dir })
+          : rtk.pathLink
+            ? t("Put RTK on PATH links it into {dir}.", { dir: tilde(rtk.pathDir) })
+            : t("Put RTK on PATH adds {dir} to your user PATH.", { dir: tilde(rtk.pathDir) })));
+        const acts = el("div", "lib-acts");
+        if (rtk.pathDir) {
+          const pb = button(rtkPathing ? t("Putting RTK on PATH…") : t("Put RTK on PATH"), "action", pathRTK);
+          pb.disabled = rtkPathing;
+          acts.append(pb);
+        }
+        acts.append(button(t("Check again"), rtk.pathDir ? "" : "action", () => { rtk = null; render(); }));
+        card.append(acts);
+      }
       const g = rtk.gain;
       card.append(el("p", "lib-rtk-gain", g
         ? t("{saved} tokens saved over {n} commands — {pct}% on average", { saved: tokens(g.saved), n: g.commands.toLocaleString(), pct: Math.round(g.pct) })
@@ -714,6 +750,8 @@
       row.append(icon(a.icon), who, el("span", "grow"));
       // its hook calls an rtk that isn't there: switching it off still works
       if (a.on && !rtk.path) row.append(tag(t("RTK missing"), "warn", t("{agent}'s hook calls rtk, which isn't installed, so its shell commands fail. Install RTK, or switch this off.", { agent: a.name })));
+      // …or one that is, off the PATH the agent gets
+      else if (a.on && rtk.offPath) row.append(tag(t("Not on PATH"), "warn", t("{agent}'s hook runs rtk by name and can't find it, so RTK does nothing for it. Put RTK on PATH above.", { agent: a.name })));
       // OpenCode 2 won't load rtk's plugin (written for OpenCode 1): it can't
       // be switched on, and one already there can be switched off
       if (a.blocked && a.id !== "opencode") row.append(tag(t("Update RTK"), "warn", t("{agent}'s hook needs RTK 0.50 or newer: older ones only add @RTK.md to AGENTS.md, which rewrites no command. Update RTK (brew upgrade rtk, or its installer again), then switch it on.", { agent: a.name })));
@@ -822,6 +860,19 @@
       status(e.message, "err", 10000);
     }
     rtkUpgrading = false;
+    render();
+  }
+  let rtkPathing = false;
+  async function pathRTK() {
+    rtkPathing = true;
+    render();
+    try {
+      rtk = await api("library/rtk/path", {});
+      status(rtk.restart?.length ? t("RTK is on your PATH — restart your agents, and the terminals they run in, to use it") : t("RTK is on your PATH"), "ok", 6000);
+    } catch (e) {
+      status(e.message, "err", 10000);
+    }
+    rtkPathing = false;
     render();
   }
   let rtkInstalling = false;
@@ -1152,7 +1203,10 @@
   function serverRow(s, all) {
     const row = el("div", "row lib-row click");
     const who = el("div", "who");
-    who.append(el("div", "name mono", s.name));
+    const nm = el("div", "name mono", s.name);
+    if (s.signIn?.dead) nm.append(tag(t("Sign-in ran out"), "warn", t("Open it to sign in again")));
+    else if (s.signIn?.signedIn) nm.append(tag(t("Signed in"), "lib-signed", t("The agents given it use magpie's sign-in")));
+    who.append(nm);
     const sub = el("div", "sub mono", serverLine(s));
     sub.title = serverLine(s);
     who.append(sub);
@@ -1161,6 +1215,76 @@
     row.onclick = () => editServer(s);
     row.title = t("Edit {name}", { name: s.name });
     return row;
+  }
+
+  // magpie's sign-in to a remote server (#615): signed in once here, and
+  // every agent given the server reaches it through magpie, with it
+  let mcpSigning = null; // { name, id, state, error } while one is under way
+  function signInBox(s) {
+    const box = el("div", "lib-signin");
+    const draw = () => {
+      box.replaceChildren();
+      const cur = lib.servers.find((x) => x.name === s.name)?.signIn || {};
+      const sg = mcpSigning?.name === s.name ? mcpSigning : null;
+      const line = el("div", "lib-signin-line");
+      if (sg && (sg.state === "starting" || sg.state === "waiting")) {
+        line.append(el("span", "note", sg.state === "starting" ? t("Opening the sign-in…") : t("Finish signing in in your browser…")),
+          button(t("Cancel"), "", async () => {
+            if (sg.id) await api("library/mcp-signin/" + sg.id + "/cancel", {}).catch(() => {});
+            mcpSigning = null;
+            draw();
+          }));
+      } else if (cur.signedIn && !cur.dead) {
+        line.append(tag(t("Signed in"), "lib-signed"), el("span", "note", t("The agents given it use magpie's sign-in")), el("span", "grow"), button(t("Sign out"), "", signOut));
+      } else {
+        if (cur.dead) line.append(tag(t("Sign-in ran out"), "warn"));
+        line.append(button(cur.dead ? t("Sign in again") : t("Sign in"), "action", start));
+      }
+      box.append(line);
+      if (sg?.state === "failed") box.append(el("div", "lib-signin-err", sg.error));
+    };
+    async function start() {
+      mcpSigning = { name: s.name, state: "starting" };
+      draw();
+      try {
+        const st = await api("library/mcp-signin", { name: s.name });
+        if (web && st.url) api("open", { url: st.url }).catch(() => {});
+        mcpSigning = { ...st, name: s.name };
+        draw();
+        follow(st.id);
+      } catch (e) {
+        mcpSigning = { name: s.name, state: "failed", error: e.message };
+        draw();
+      }
+    }
+    // followed with the dialog closed too, for the row to say it's signed in
+    async function follow(id) {
+      while (mcpSigning?.id === id) {
+        await new Promise((r) => setTimeout(r, 800));
+        let st;
+        try { st = await api("library/mcp-signin/" + id); } catch { continue; }
+        if (mcpSigning?.id !== id) return;
+        if (st.state === "waiting") continue;
+        if (st.state === "done") {
+          mcpSigning = null;
+          await api("library").then(take, () => {});
+          status(t("Signed in to {name} — the agents given it use magpie's sign-in", { name: s.name }), "ok");
+          render();
+        } else mcpSigning = st.state === "canceled" ? null : { ...st, name: s.name };
+        draw();
+        return;
+      }
+    }
+    async function signOut() {
+      try {
+        take(await api("library/mcp-signout", { name: s.name }));
+        status(t("Signed out of {name} — the agents are given the server's own address again", { name: s.name }), "ok");
+        render();
+        draw();
+      } catch (e) { status(e.message, "err", 6000); }
+    }
+    draw();
+    return box;
   }
 
   function foundServerRow(f) {
@@ -1309,6 +1433,9 @@
         url.classList.add("mono");
         g.append(...field("URL", url));
         g.append(...field(t("Headers"), pairs(d.headers, "Authorization", "Bearer …", (v) => { d.headers = v; })));
+        // the server as saved: one being added or turned into another is
+        // signed in to once it is saved
+        if (s?.transport === "http" && d.transport === "http") g.append(...field(t("Sign-in"), signInBox(s), t("For a server that asks you to sign in (OAuth): magpie signs in once, and every agent given it uses that sign-in")));
       }
       slot.append(g);
       // its own icon while it runs as it did; another way of running is another server
@@ -1487,6 +1614,10 @@
     if (lib.skills.length || lib.projects.length) renderProjects(body, "skills");
     const skip = shownAgents().filter((a) => !a.skills);
     if (skip.length) body.append(el("p", "lib-aside", t("{agents} has no skills folder.", { agents: skip.map((a) => a.name).join(", ") })));
+    // Desktop reads its skills list again only when its window is reloaded (#638)
+    if (shownAgents().some((a) => a.id === "claude-desktop" && a.skills)) {
+      body.append(el("p", "lib-aside", t("Claude Desktop shows skill changes once its window is reloaded ({keys}). It gets a copy of each skill, and one you change in Desktop is left as it is.", { keys: /^Mac/.test(navigator.platform) ? "⌘R" : "Ctrl+R" })));
+    }
     body.append(discover("skills"));
   }
 
@@ -2400,6 +2531,12 @@
 
   // Claude Code's skills are OpenCode's and Crush's too: a chip for one of
   // those says so while it has none of its own.
+  // the agents that have a skill kept in ~/.agents/skills whatever is
+  // ticked: they read that folder themselves (#595)
+  function alwaysFor(s) {
+    return (a) => s.always?.includes(a.id) ? t("{agent} reads ~/.agents/skills itself, where this skill is kept — it has it whatever is ticked here", { agent: a.name }) : "";
+  }
+
   function viaFor(s) {
     return (a) => {
       const also = lib.agents.find((x) => x.id === a.id)?.skillsAlso || [];
@@ -2560,7 +2697,7 @@
     rm.append(svg(GLYPH.trash, 13, 1.4));
     rm.title = t("Remove");
     acts.append(rm);
-    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s), all: true }));
+    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s), all: true, always: alwaysFor(s) }));
     row.onclick = () => viewSkill(s);
     row.title = t("Read {name}'s SKILL.md", { name: s.name });
     return row;
@@ -2608,6 +2745,8 @@
     const sub = el("div", "sub", f.description || "");
     sub.title = f.description || "";
     who.append(sub);
+    // put in the library's own folder by hand, not listed by it (#595)
+    if (f.library) { const src = el("div", "lib-src"); src.append(el("span", "", t("in the library's folder, not listed")), pathLink(f.library)); who.append(src); }
     if (f.shared) { const src = el("div", "lib-src"); src.append(el("span", "", t("shared in")), pathLink(f.shared)); who.append(src); }
     if (f.link) { const src = el("div", "lib-src"); src.append(el("span", "", t("linked from")), pathLink(f.link)); who.append(src); }
     const have = el("div", "lib-have");
@@ -2617,7 +2756,8 @@
     row.append(glyph(GLYPH.skill), who, have);
     if (f.others?.length) row.append(tag(t("differs in {agents}", { agents: f.others.map(nameOf).join(", ") }), "warn", t("{agents} has another skill by this name; bringing this one in leaves that one as it is", { agents: f.others.map(nameOf).join(", ") })));
     const b = button(t("Bring in"), "action", () => change("skills/import", { name: f.name }, t("{name} is in the library now", { name: f.name })));
-    b.title = f.shared ? t("Keeps it where it is in the shared skills folder and links to it: you can give it to any agent")
+    b.title = f.library ? t("Lists it in the library where it is, nothing moved: you can give it to any agent")
+      : f.shared ? t("Keeps it where it is in the shared skills folder and links to it: you can give it to any agent")
       : f.link ? t("Keeps a link to where it is: {agents} go on having it, and you can give it to the others", { agents: [...f.agents, ...(f.copies || [])].map(nameOf).join(", ") })
       : t("Moves it into the library and links it back: {agents} go on having it, and you can give it to the others", { agents: [...f.agents, ...(f.copies || [])].map(nameOf).join(", ") });
     row.append(b);

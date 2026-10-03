@@ -102,7 +102,7 @@ var (
 	// creditWords: the account or key has no money left.
 	creditWords = regexp.MustCompile(`(?i)insufficient.?(balance|credit|fund)|balance|credit|billing|payment|arrear|overdue|suspended|余额|欠费|充值|账户.*(不足|停)`)
 	// quotaWords: it has used up what its plan allows for now.
-	usedUpWords = regexp.MustCompile(`(?i)quota|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|exceeded.*(plan|limit)|额度|用量|套餐|上限`)
+	usedUpWords = regexp.MustCompile(`(?i)quota|usage.?limit|out of budget|budget (exceeded|exhausted)|limit.?reached|hit your .*limit|limit.{0,24}resets|exceeded.*(plan|limit)|额度|用量|套餐|上限`)
 	// rateWords: a 429 that is a short rate limit — requests or tokens per
 	// minute — which usedUpWords took for a used-up plan ("Rate limit
 	// exceeded", "reached"): as magpie words an upstream error, with
@@ -130,6 +130,10 @@ const (
 	// failFloor: the request asked for a shorter reply than the provider
 	// gives, and is sent again asking for the least it takes
 	failFloor = "floor"
+	// failUpdate: the upstream turned away the configuration_update items
+	// a changed effort went as (#617), and the request is sent again
+	// without them
+	failUpdate = "update"
 	// failVerify: the account must be verified with its vendor (Google's
 	// VALIDATION_REQUIRED) before it is served again
 	failVerify = "verify"
@@ -161,6 +165,10 @@ func failure(status int, body []byte) string {
 		return failVerify
 	}
 	switch {
+	case overflowed(status, body):
+		// Kimi's "exceeded model token limit" is the conversation's
+		// length, not the plan's
+		return failOther
 	case status == 402, creditWords.Match(body) && status != 429 || strings.Contains(string(body), "insufficient_quota"):
 		return failCredit
 	case status == 429 && rateWords.Match(body) && !plannedWords.Match(body):
@@ -490,8 +498,9 @@ func (c candidate) allowanceKey() allowanceKey {
 type left struct {
 	used   float64
 	renews []time.Time
-	pace   float64   // weekly pace: share of its week left per hour until it renews
-	due    time.Time // when the window that pace went by renews; zero when not known
+	soon   []time.Time // renews as Smart ranks them (Allowance.Renewal)
+	pace   float64     // weekly pace: share of its week left per hour until it renews
+	due    time.Time   // when the window that pace went by renews; zero when not known
 }
 
 // learns: c is a subscription whose allowance isn't known yet, of an agent
@@ -523,7 +532,7 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 		if a, ok := known[ag][c.p.Account.User]; ok {
 			u, r := a.For(c.model, now)
 			pc, due := a.Pace(c.model, now)
-			wg.lefts[c.allowanceKey()] = left{u, r, pc, due} // one not known counts as unused
+			wg.lefts[c.allowanceKey()] = left{u, r, a.Renewal(c.model, now), pc, due} // one not known counts as unused
 		}
 	}
 	lefts := wg.lefts
@@ -534,7 +543,10 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 		// soonest, since what it has left is lost then, while one renewing
 		// later keeps: the biggest window decides — the week, not the five
 		// hours in it — and the next one only when that renews in the
-		// same hour. Those alike stay in their order, keeping the vendor's
+		// same hour. An account with no week (Claude Enterprise's five
+		// hours alone) goes by its five hours, so ahead of every week
+		// but one renewing sooner; a window not started renews its whole
+		// span from now (#576). Those alike stay in their order, keeping the vendor's
 		// prompt cache warm. Past that, whichever has the most left, and
 		// one all but used up only when nothing else can take it. Only the
 		// windows that count the model do: Opus's own weekly allowance
@@ -558,7 +570,7 @@ func weigh(p provider.Provider, cs []candidate, model string, from provider.Prot
 			if li, lj := learns(fine[i], lefts), learns(fine[j], lefts); li != lj {
 				return li
 			}
-			ri, rj := lefts[fine[i].allowanceKey()].renews, lefts[fine[j].allowanceKey()].renews
+			ri, rj := lefts[fine[i].allowanceKey()].soon, lefts[fine[j].allowanceKey()].soon
 			for k := 0; k < len(ri) || k < len(rj); k++ {
 				var a, b time.Time // to the hour, so a few minutes don't reorder
 				if k < len(ri) {

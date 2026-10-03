@@ -15,6 +15,7 @@
 package davsync
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -31,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/backup"
 	"github.com/yetone/magpie/internal/edit"
@@ -426,6 +428,29 @@ func cached(want string) []byte {
 	return b
 }
 
+// keepDamaged writes a server file that couldn't be read aside under the
+// sync folder, so the damage is inspectable rather than silently replaced.
+// It keeps the newest few: a sync that rebuilds on every tick (a server
+// that always answers the same unreadable way) would otherwise pile up a
+// copy each time. The name is sorted by time, so the oldest are the first
+// to go.
+func keepDamaged(data []byte) {
+	dir := path("sync")
+	if os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	name := filepath.Join(dir, time.Now().Format("2006-01-02-150405")+"-server-damaged"+backup.Ext)
+	if edit.WriteAtomic(name, data) != nil {
+		return
+	}
+	old, _ := filepath.Glob(filepath.Join(dir, "*-server-damaged"+backup.Ext))
+	slices.Sort(old) // names begin with the time, so oldest first
+	for len(old) > 3 {
+		os.Remove(old[0])
+		old = old[1:]
+	}
+}
+
 func sum(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
@@ -553,6 +578,10 @@ func hashes(b backup.Bundle) map[string]string {
 		s = *b.Settings
 	}
 	s.KeepOwn(settings.Settings{}) // this computer's own: never synced
+	settingsHash := h(s)
+	if b.GatewayKeys != nil { // a missing store keeps older bundles' hash
+		settingsHash = h([]any{s, *b.GatewayKeys})
+	}
 	providers := []any{b.Providers, b.Icons, b.Groups}
 	if b.Searches != nil && len(*b.Searches) > 0 { // as before them, without one
 		providers = append(providers, *b.Searches)
@@ -562,7 +591,7 @@ func hashes(b backup.Bundle) map[string]string {
 	}
 	return map[string]string{
 		"providers": h(providers),
-		"settings":  h(s),
+		"settings":  settingsHash,
 		"profiles":  h(orEmpty(b.Profiles)),
 		"agents":    h(orEmpty(b.Agents)),
 		"library":   h(b.Library),
@@ -613,7 +642,25 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 		to.Providers, to.Icons, to.Groups, to.Searches, to.Order = ps, from.Icons, from.Groups, searches, from.Order
 		to.Keys = to.Keys || from.Keys
 	case "settings":
-		to.Settings = from.Settings
+		s := from.Settings
+		if s != nil && !from.Keys && to.Keys && to.Settings != nil {
+			// Sent without keys: keep the ones the server has, as for providers.
+			copy := *s
+			copy.LANKey, copy.LANKeyID = to.Settings.LANKey, to.Settings.LANKeyID
+			copy.GitHubToken = to.Settings.GitHubToken
+			copy.OTel.Headers = nil
+			if strings.TrimRight(strings.TrimSpace(copy.OTel.Endpoint), "/") == to.Settings.OTel.Endpoint {
+				copy.OTel.Headers = to.Settings.OTel.Headers
+			}
+			s = &copy
+		}
+		if s != nil {
+			to.Settings = s
+		}
+		if from.Keys && from.GatewayKeys != nil {
+			to.GatewayKeys = from.GatewayKeys // an explicit empty store clears it
+		}
+		to.Keys = to.Keys || from.Keys
 	case "profiles":
 		to.Profiles = from.Profiles
 	case "agents":
@@ -628,7 +675,7 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 }
 
 // changed is when a part was last changed here, as its files say.
-func changed(part string) time.Time {
+func changed(part string, keys bool) time.Time {
 	mtime := func(p string) time.Time {
 		if fi, err := os.Stat(p); err == nil {
 			return fi.ModTime()
@@ -639,7 +686,11 @@ func changed(part string) time.Time {
 	case "providers":
 		return mtime(provider.Path())
 	case "settings":
-		return mtime(settings.Path())
+		m := mtime(settings.Path())
+		if k := mtime(access.Path()); keys && k.After(m) {
+			m = k
+		}
+		return m
 	case "profiles":
 		return mtime(profile.Path())
 	case "library":
@@ -734,6 +785,7 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		}
 	}
 	etag := ver.ETag
+	rebuilt := false // a damaged server file replaced by this computer's merge
 	push := func(b backup.Bundle, etag string) error {
 		b.Created, b.App = time.Now().UTC(), "magpie"
 		sealed, err := backup.Seal(b, c.Passphrase)
@@ -765,7 +817,57 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 		return errors.New("the passphrase doesn't open the file on the server: it was sealed with another one; use the passphrase set on your other computers")
 	}
 	if err != nil {
-		return err
+		// The server's file can't be read as a backup: a write a relay or
+		// tunnel cut short, or one damaged since. Failing here would stop
+		// every sync after, because this computer's own setup is fine and
+		// could never be pushed over the unreadable file. But rebuilding
+		// must not lose another computer's newer setup that the damaged
+		// write swallowed, so this is not a place to push this computer's
+		// bundle as it is. It is a place to fall back to the last good copy
+		// of the server's file — the one this computer read whole before it
+		// broke — and merge over it as a normal sync would. That needs three
+		// things to hold, and any one missing means the error stands:
+		//   - this computer has synced before (st.Local): a fresh one has no
+		//     last-good copy and no right to rebuild what it never saw;
+		//   - the cached copy is the file this sync hashed (sum == st.Sum),
+		//     so it is the version the damage replaced, not some older one;
+		//   - the body really reads as a damaged backup, not as some other
+		//     answer a server gave (a captive portal's page): a body that
+		//     isn't backup-shaped at all is its own error, never rebuilt.
+		// The merge then runs with the cached copy as the remote and the
+		// damaged file's ETag as the version to replace, so the push is
+		// still checked against the server and another computer's parts
+		// survive the way they would on any sync.
+		if !errors.Is(err, backup.ErrCorrupt) || st.Local == nil {
+			return err
+		}
+		good := cached(st.Sum) // the version this computer last read whole
+		// The damaged body must be that version cut short — a prefix of it,
+		// which is what a relay that stops a long write leaves. But Seal
+		// writes with json.MarshalIndent, so every version starts with the
+		// same constant head up to the salt; a body cut inside that head is a
+		// prefix of every version, including an out-of-date computer's older
+		// cached copy. So the prefix check alone lets that computer rebuild
+		// and drop a newer one's data. Only a body reaching past the random
+		// fields — to the "data" key that follows them — is tied to the one
+		// version it was cut from. Requiring it keeps an out-of-date computer
+		// from rebuilding (its copy isn't the version that broke, so the body
+		// isn't its prefix and the error stands), and a body cut before the
+		// random fields stays an error for every computer, even the one that
+		// saw the good version: better to fail loud than rebuild blind. A
+		// sealed file holds a whole setup — hundreds of bytes at its very
+		// smallest — and a relay cuts a real write deep into the data, well
+		// past "data", so legit rebuilds still go.
+		if good == nil || !bytes.HasPrefix(good, data) || len(data) <= bytes.Index(good, []byte(`"data"`)) {
+			return err
+		}
+		remote, err = backup.Open(good, c.Passphrase)
+		if err != nil {
+			return err
+		}
+		keepDamaged(data) // the unreadable body, kept aside before it is replaced
+		data = good
+		rebuilt = true // push the merged result even if it matches the cached copy
 	}
 	R := hashes(remote)
 	first := st.Local == nil
@@ -790,7 +892,7 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 				here = append(here, p)
 			}
 		case lc && rc: // both: the newer stays
-			if changed(p).After(remote.Created) {
+			if changed(p, c.Keys).After(remote.Created) {
 				take(&merged, local, p)
 				there = append(there, p)
 			} else {
@@ -840,7 +942,9 @@ func syncOnce(ctx context.Context, c Config, st *state) error {
 	if len(here)+len(there) > 0 {
 		st.Notice = &Notice{At: time.Now(), Here: here, There: there, Saved: saved}
 	}
-	if !maps.Equal(M, R) {
+	// A rebuild always writes back: the server's file is the damaged one,
+	// so even a merge that matches the cached copy must replace it.
+	if rebuilt || !maps.Equal(M, R) {
 		if err := push(merged, etag); err != nil {
 			return err
 		}

@@ -19,12 +19,33 @@ import (
 	"sync"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/source"
 )
 
 // BunVersion is the Bun magpie downloads to run plugins with the first
 // time one is needed, and the oldest it runs them on: newer releases are
-// taken as they come (see CheckBun).
-const BunVersion = "1.3.14"
+// taken as they come (see CheckBun). Update bunSums below when it changes.
+const BunVersion = "1.4.2"
+
+// bunSums are the SHA-256s of BunVersion's builds, from Bun's own
+// SHASUMS256.txt. They let the default Bun be downloaded through a mirror
+// when Bun's GitHub release page can't be reached.
+var bunSums = map[string]string{
+	"bun-darwin-aarch64.zip":             "90987a3a16d7db556d886ac3d551e7b6d3edf0a1cf43acaed622e8676be1d12f",
+	"bun-darwin-x64.zip":                 "80520d7e17526308c9185d261679ac6d27798d3803a0e9f7ff9121ab8affb012",
+	"bun-linux-aarch64.zip":              "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7",
+	"bun-linux-x64-baseline.zip":         "c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f",
+	"bun-windows-x64-baseline.zip":       "78c221c2376f79731ccf4e4af0b3bb46d81fefa3296c5abee09ad8a1b21e68c6",
+	"bun-linux-aarch64-android.zip":      "a1c7e2983f1bb65146beb256a4d72449f23042412bc2cf278aa6397ba27e0274",
+	"bun-linux-x64-android-baseline.zip": "fe36d8d4795e0eadc22fb6696d44d168491c2e5b9b7cbb12b8c96b0c0c40a4f9",
+}
+
+func bunChecksum(version, target string) string {
+	if version != BunVersion {
+		return ""
+	}
+	return bunSums[target+".zip"]
+}
 
 // bunRelease is where Bun's releases are; a var for tests.
 var bunRelease = "https://github.com/oven-sh/bun/releases/download"
@@ -41,6 +62,12 @@ func bunTarget() (string, error) {
 	}
 	switch runtime.GOOS {
 	case "darwin", "linux":
+	case "android":
+		t := "bun-linux-" + arch + "-android"
+		if arch == "x64" {
+			t += "-baseline"
+		}
+		return t, nil
 	case "windows":
 		if arch != "x64" {
 			return "", fmt.Errorf("Bun has no build for windows/%s", runtime.GOARCH)
@@ -98,20 +125,22 @@ func downloadBun(ctx context.Context, version, exe string) error {
 		return err
 	}
 	base := bunRelease + "/bun-v" + version + "/"
-	sums, err := getURL(ctx, base+"SHASUMS256.txt", 1<<20)
-	if err != nil {
-		return err
-	}
-	want := ""
-	sc := bufio.NewScanner(strings.NewReader(string(sums)))
-	for sc.Scan() {
-		f := strings.Fields(sc.Text())
-		if len(f) == 2 && f[1] == target+".zip" {
-			want = f[0]
-		}
-	}
+	want := bunChecksum(version, target)
 	if want == "" {
-		return fmt.Errorf("%s.zip isn't in the release's checksums", target)
+		sums, err := getURLOfficial(ctx, base+"SHASUMS256.txt", 1<<20)
+		if err != nil {
+			return err
+		}
+		sc := bufio.NewScanner(strings.NewReader(string(sums)))
+		for sc.Scan() {
+			f := strings.Fields(sc.Text())
+			if len(f) == 2 && f[1] == target+".zip" {
+				want = f[0]
+			}
+		}
+		if want == "" {
+			return fmt.Errorf("%s.zip isn't in the release's checksums", target)
+		}
 	}
 	z, err := getURL(ctx, base+target+".zip", 200<<20)
 	if err != nil {
@@ -156,11 +185,24 @@ func downloadBun(ctx context.Context, version, exe string) error {
 }
 
 func getURL(ctx context.Context, url string, limit int64) ([]byte, error) {
+	return getURLFrom(ctx, url, limit, true)
+}
+
+func getURLOfficial(ctx context.Context, url string, limit int64) ([]byte, error) {
+	return getURLFrom(ctx, url, limit, false)
+}
+
+func getURLFrom(ctx context.Context, url string, limit int64, mirror bool) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	res, err := http.DefaultClient.Do(req)
+	var res *http.Response
+	if mirror {
+		res, err = source.Do(http.DefaultClient, req)
+	} else {
+		res, err = source.DoOfficial(http.DefaultClient, req)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -133,6 +133,81 @@ func TestDetectProtocols(t *testing.T) {
 	}
 }
 
+// Some Responses relays reject the string shorthand and require message arrays.
+func TestResponsesProbesUseArrayInput(t *testing.T) {
+	detectHome(t)
+	const model = "gpt-test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/models":
+			io.WriteString(w, `{"data":[{"id":"`+model+`"}]}`)
+		case "POST /v1/responses":
+			var in struct {
+				Model string `json:"model"`
+				Input []struct {
+					Type    string `json:"type"`
+					Role    string `json:"role"`
+					Content []struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				http.Error(w, `{"error":{"message":"input must be an array"}}`, http.StatusBadRequest)
+				return
+			}
+			if in.Model != model || len(in.Input) != 1 || in.Input[0].Type != "message" ||
+				in.Input[0].Role != "user" || len(in.Input[0].Content) != 1 ||
+				in.Input[0].Content[0].Type != "input_text" || in.Input[0].Content[0].Text != "hi" {
+				http.Error(w, `{"error":{"message":"expected a user text message"}}`, http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, `{"object":"response","status":"completed","output":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	p := Provider{ID: "relay", Key: "sk-relay", Responses: srv.URL + "/v1", Models: []string{model}}
+	ctx := context.Background()
+	check := func(t *testing.T, r Result) {
+		t.Helper()
+		if !r.OK || r.Status != http.StatusOK || r.Protocol != Responses || r.Model != model {
+			t.Fatalf("Responses probe: %+v", r)
+		}
+	}
+	t.Run("Detect", func(t *testing.T) {
+		rs, err := p.Detect(ctx, srv.URL, model)
+		if err != nil || len(rs) != len(Protocols) {
+			t.Fatalf("Detect: %v, %+v", err, rs)
+		}
+		check(t, rs[1].Result)
+	})
+	t.Run("DetectModels", func(t *testing.T) {
+		each, sum, err := p.DetectModels(ctx, srv.URL, []string{model})
+		if err != nil || len(each) != 1 || len(each[0].Results) != len(Protocols) || len(sum) != len(Protocols) {
+			t.Fatalf("DetectModels: %v, %+v, %+v", err, each, sum)
+		}
+		check(t, each[0].Results[1].Result)
+		check(t, sum[1].Result)
+	})
+	t.Run("Test", func(t *testing.T) {
+		rs := p.Test(ctx)
+		if len(rs) != 1 {
+			t.Fatalf("Test: %+v", rs)
+		}
+		check(t, rs[0])
+	})
+	t.Run("TestModels", func(t *testing.T) {
+		rs := p.TestModels(ctx, []string{model})
+		if len(rs) != 1 {
+			t.Fatalf("TestModels: %+v", rs)
+		}
+		check(t, rs[0])
+	})
+}
+
 // A model typed is the one asked on all three, and the vendor's list isn't
 // asked for; a URL the provider has for an API is asked rather than the
 // one typed; no URL at all says so.
@@ -237,5 +312,130 @@ func TestModelAPI(t *testing.T) {
 	}
 	if p, _ = Find("relay"); p.APIs("mixed") != nil {
 		t.Fatal("still anthropic")
+	}
+}
+
+// A relay serving each model on some APIs only: Detect asked for several
+// models says, model by model, which API answered it (01huadalang on
+// Discord: 有的仅支持 response 有的双协议), a few at a time and no more
+// than DetectMax of them; by API, the first model it served.
+func TestDetectModels(t *testing.T) {
+	detectHome(t)
+	serves := map[string][]string{
+		"/v1/chat/completions": {"gpt-both", "glm-chat"},
+		"/v1/responses":        {"gpt-both", "gpt-resp"},
+		"/v1/messages":         {"claude-only"},
+	}
+	var mu sync.Mutex
+	var n, most, asked int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		asked++
+		most = max(most, n)
+		mu.Unlock()
+		defer func() { mu.Lock(); n--; mu.Unlock() }()
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		m, _ := body["model"].(string)
+		if !slices.Contains(serves[r.URL.Path], m) {
+			http.Error(w, `{"error":{"message":"model `+m+` not supported on this endpoint"}}`, http.StatusBadRequest)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			io.WriteString(w, `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"length"}]}`)
+		case "/v1/responses":
+			io.WriteString(w, `{"id":"r","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}`)
+		case "/v1/messages":
+			io.WriteString(w, `{"id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"max_tokens"}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	models := []string{"gpt-both", "gpt-resp", " glm-chat", "claude-only", "gpt-both", "gpt-image-2", ""}
+	each, sum, err := Provider{Key: "k"}.DetectModels(context.Background(), srv.URL+"/v1", models)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][3]bool{ // chat, responses, anthropic
+		"gpt-both":    {true, true, false},
+		"gpt-resp":    {false, true, false},
+		"glm-chat":    {true, false, false},
+		"claude-only": {false, false, true},
+		"gpt-image-2": {false, false, false},
+	}
+	if len(each) != len(want) {
+		t.Fatalf("asked %d models: %+v", len(each), each)
+	}
+	for _, md := range each {
+		w, ok := want[md.Model]
+		if !ok || len(md.Results) != 3 {
+			t.Fatalf("%+v", md)
+		}
+		for i, r := range md.Results {
+			if r.OK != w[i] || r.Model != md.Model || r.Protocol != Protocols[i] {
+				t.Fatalf("%s on %s: %+v, want ok=%v", md.Model, Protocols[i], r, w[i])
+			}
+			if !r.OK && md.Model != "gpt-image-2" && (r.Status != 400 || !strings.Contains(r.Error, "not supported")) {
+				t.Fatalf("%s on %s said %+v", md.Model, r.Protocol, r)
+			}
+		}
+	}
+	if each[len(each)-1].Results[0].Error == "" {
+		t.Fatal("an image model was asked on chat")
+	}
+	if asked != 12 {
+		t.Fatalf("%d requests for 4 models on 3 APIs", asked)
+	}
+	for i, w := range []struct {
+		model, base string
+	}{{"gpt-both", srv.URL + "/v1"}, {"gpt-both", srv.URL + "/v1"}, {"claude-only", srv.URL}} {
+		if !sum[i].OK || sum[i].Model != w.model || sum[i].Base != w.base {
+			t.Fatalf("by API %s: %+v", Protocols[i], sum[i])
+		}
+	}
+
+	// many models: no more than DetectMax asked, DetectWide at a time
+	mu.Lock()
+	asked, most = 0, 0
+	mu.Unlock()
+	var many []string
+	for i := range DetectMax + 5 {
+		many = append(many, "m"+strings.Repeat("x", i))
+	}
+	each, _, err = Provider{Key: "k"}.DetectModels(context.Background(), srv.URL+"/v1", many)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(each) != DetectMax || asked != 3*DetectMax || most > DetectWide {
+		t.Fatalf("%d models, %d requests, %d at once", len(each), asked, most)
+	}
+	if _, _, err := (Provider{Key: "k"}).DetectModels(context.Background(), srv.URL, []string{" "}); err == nil {
+		t.Fatal("no model was taken")
+	}
+	if ps := All(); len(ps) != 0 {
+		t.Fatalf("detecting saved %+v", ps)
+	}
+}
+
+// A probe not started before the detection's time is up isn't sent.
+func TestDetectModelsOutOfTime(t *testing.T) {
+	detectHome(t)
+	srv, got := relay(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	each, _, err := Provider{Key: "k"}.DetectModels(ctx, srv.URL, []string{"a", "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, md := range each {
+		for _, r := range md.Results {
+			if r.OK || r.Error != "not asked: out of time" {
+				t.Fatalf("%+v", r)
+			}
+		}
+	}
+	if n := len(got()); n != 0 {
+		t.Fatalf("%d sent past the time", n)
 	}
 }

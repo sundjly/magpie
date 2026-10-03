@@ -68,6 +68,10 @@ var codexDrawers = []catalog.Model{
 	{ID: "gpt-image-2.5", Name: "GPT Image 2.5", Released: "2026-06-01"},
 }
 
+// codexDrawer is the image model Codex CLI asks a ChatGPT account for, the
+// one Automatic picks there.
+const codexDrawer = "gpt-image-2"
+
 // grokDrawers are the image models a Grok subscription (SuperGrok, X Premium+)
 // draws with, at the Imagine API of the backend Grok Build's image_gen tool
 // calls: cli-chat-proxy.grok.com/v1/images/generations.
@@ -142,10 +146,15 @@ func Drawers(p provider.Provider) []catalog.Model {
 func AutoDrawer() string {
 	best, bestCost, bestDate := "", 0.0, ""
 	for _, p := range provider.All() {
-		if !p.On() || p.Decides() {
+		if !p.On() || p.DecideOnly() {
 			continue
 		}
 		for _, m := range Drawers(p) {
+			if drawsCodex(p) && m.ID != codexDrawer {
+				// Codex CLI draws with gpt-image-2 only; a plan may be
+				// refused the others (chatgpt.com: 403, #545)
+				continue
+			}
 			cost := 1e9
 			switch {
 			case drawsCodex(p), drawsGrok(p):
@@ -528,6 +537,11 @@ func (s *Server) send(ctx context.Context, p provider.Provider, url, contentType
 
 // sendAs is send with the method: a video's progress is asked with a GET.
 func (s *Server) sendAs(ctx context.Context, p provider.Provider, method, url, contentType string, body []byte, sign bool) ([]byte, int, error) {
+	return s.sendWith(ctx, p, method, url, contentType, body, sign, nil)
+}
+
+// sendWith is sendAs with headers of the vendor's own besides.
+func (s *Server) sendWith(ctx context.Context, p provider.Provider, method, url, contentType string, body []byte, sign bool, extra http.Header) ([]byte, int, error) {
 	ctx = p.Via(ctx)
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
@@ -548,6 +562,7 @@ func (s *Server) sendAs(ctx context.Context, p provider.Provider, method, url, c
 			// signing asks of its Responses; the id is Codex CLI's own
 			req.Header.Set("Accept", "application/json")
 			req.Header.Set("x-codex-imagegen-request-id", newUUID())
+			req.Header.Set("x-codex-image-turn-id", newUUID())
 		}
 	} else {
 		// Google's API keys go in their own header
@@ -555,6 +570,9 @@ func (s *Server) sendAs(ctx context.Context, p provider.Provider, method, url, c
 		for k, v := range p.Headers {
 			req.Header[k] = []string{v}
 		}
+	}
+	for k, v := range extra {
+		req.Header[k] = v
 	}
 	res, err := p.Do(s.client, req) // a plugin's through the plugin
 	if err != nil {
@@ -569,7 +587,11 @@ func (s *Server) sendAs(ctx context.Context, p provider.Provider, method, url, c
 		return nil, 502, err
 	}
 	if res.StatusCode >= 300 {
-		return b, res.StatusCode, fmt.Errorf("%s: %d %s%s", provider.HostOf(url), res.StatusCode, http.StatusText(res.StatusCode), vendorSaid(vendorMessage(b)))
+		hint := ""
+		if drawsCodex(p) && res.StatusCode == http.StatusForbidden {
+			hint = fmt.Sprintf(" — ChatGPT turned %s's images away: its plan or workspace may not draw, or not with this model (Codex CLI draws with %s)", p.Name, codexDrawer)
+		}
+		return b, res.StatusCode, fmt.Errorf("%s: %d %s%s%s", provider.HostOf(url), res.StatusCode, http.StatusText(res.StatusCode), vendorSaid(vendorMessage(b)), hint)
 	}
 	return b, res.StatusCode, nil
 }
@@ -577,7 +599,13 @@ func (s *Server) sendAs(ctx context.Context, p provider.Provider, method, url, c
 // vendorMessage is the message of a vendor's error, or its body.
 func vendorMessage(b []byte) string {
 	var e struct {
-		Error json.RawMessage `json:"error"`
+		Error  json.RawMessage `json:"error"`
+		Errors struct {
+			Message string `json:"message"`
+		} `json:"errors"` // ModelScope's
+	}
+	if json.Unmarshal(b, &e) == nil && e.Errors.Message != "" {
+		return e.Errors.Message
 	}
 	if json.Unmarshal(b, &e) == nil && len(e.Error) > 0 {
 		var m struct {
@@ -597,6 +625,9 @@ func vendorMessage(b []byte) string {
 // drawImages asks an images API: generations, or edits with the images
 // sent along.
 func (s *Server) drawImages(ctx context.Context, p provider.Provider, model string, d drawing) (drawn, int, error) {
+	if isModelScope(p) {
+		return s.drawModelScope(ctx, p, model, d)
+	}
 	base := strings.TrimRight(p.Base(provider.Chat), "/")
 	if drawsCodex(p) || drawsGrok(p) {
 		base = strings.TrimRight(p.Base(provider.Responses), "/")
@@ -725,6 +756,10 @@ func (s *Server) drawImages(ctx context.Context, p provider.Provider, model stri
 		} else if e.URL != "" {
 			out.Images = append(out.Images, picture{URL: e.URL})
 		}
+	}
+	if len(out.Images) == 0 {
+		// an answer with no image says why, or is shown as it came
+		return out, 502, fmt.Errorf("%s answered with no image%s", provider.HostOf(url), vendorSaid(vendorMessage(b)))
 	}
 	return out, code, nil
 }

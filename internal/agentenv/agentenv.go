@@ -30,6 +30,8 @@ package agentenv
 var Vars = []string{
 	// Claude Code, Codex and Copilot CLI
 	"CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME",
+	// Gemini CLI's session/config home
+	"GEMINI_CLI_HOME",
 	// Cline: its folder, its data, its sessions and its MCP settings file
 	"CLINE_DIR", "CLINE_DATA_DIR", "CLINE_SESSION_DATA_DIR", "CLINE_MCP_SETTINGS_PATH",
 	// Pi and its forks (OmO, Senpi), whose profile and config are apart
@@ -46,6 +48,8 @@ var Vars = []string{
 	// MiMo Code, MiniMax Code, OpenHanako, Hermes, dsh, WorkBuddy
 	"MIMOCODE_HOME", "MINIMAX_DATA_DIR", "HANA_HOME", "HERMES_HOME", "DSH_HOME",
 	"WORKBUDDY_CONFIG_DIR",
+	// T3 Code's base folder (its settings in userdata/)
+	"T3CODE_HOME",
 	// Cursor's CLI: its config folder (its chats) and its data folder
 	"CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR",
 	// OpenCode and OpenChamber

@@ -251,6 +251,10 @@
         <div id="plainNamesSegs"></div>
       </div>
       <div class="row pref">
+        <div class="who"><div class="name" data-t>Codex subagents on any model</div><div class="sub" data-t>Codex’s OpenAI models hand subagents their tasks as text (multi-agent V1), so a GPT lead can spawn them on magpie’s other models. New threads only; Codex’s own multi_agent_v2 setting still wins</div></div>
+        <div id="codexAgentsV1Segs"></div>
+      </div>
+      <div class="row pref">
         <div class="who"><div class="name" data-t>Open at login</div><div class="sub" data-t>Start magpie in the tray when you log in, so agents find the gateway from the start</div></div>
         <div id="loginSegs"></div>
       </div>
@@ -258,9 +262,13 @@
         <div class="who"><div class="name" data-t>Dock</div><div class="sub" data-t>Keep magpie in the Dock too, always or while its window is open, for Cmd-Tab and a menu bar too full to show its icon</div></div>
         <div id="dockSegs"></div>
       </div>
+      <div class="row pref" id="lightweightRow" hidden>
+        <div class="who"><div class="name" data-t>Lightweight mode</div><div class="sub" data-t>A closed panel or window frees its page after a minute, about 100 MB each, and loads it anew when opened</div></div>
+        <div id="lightweightSegs"></div>
+      </div>
       <div class="row pref" id="sessionTerminalRow" hidden>
         <div class="who"><div class="name" data-t>Session terminal</div><div class="sub" data-t>Used by the terminal button in Sessions; only apps registered for .command files appear</div></div>
-        <select id="sessionTerminalSelect" class="session-terminal-select" aria-label="Session terminal" data-ta></select>
+        <button type="button" id="sessionTerminalSelect" class="sess-pick session-terminal-select" aria-label="Session terminal" aria-haspopup="menu" aria-expanded="false" data-ta></button>
       </div>
     </div>
   </section>

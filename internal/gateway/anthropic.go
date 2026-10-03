@@ -73,6 +73,10 @@ type aRequest struct {
 	} `json:"thinking,omitempty"`
 	OutputConfig *struct {
 		Effort string `json:"effort,omitempty"`
+		Format *struct {
+			Type   string          `json:"type"`
+			Schema json.RawMessage `json:"schema"`
+		} `json:"format,omitempty"`
 	} `json:"output_config,omitempty"`
 	Metadata json.RawMessage `json:"metadata,omitempty"`
 	Speed    string          `json:"speed,omitempty"` // "fast": Claude's fast mode
@@ -87,6 +91,9 @@ func parseAnthropic(body []byte) (*Request, error) {
 		Temp: a.Temperature, TopP: a.TopP, Stop: a.StopSequences, Stream: a.Stream, Fast: a.Speed == "fast"}
 	if len(a.Metadata) > 0 && string(a.Metadata) != "null" {
 		r.Metadata = a.Metadata
+	}
+	if oc := a.OutputConfig; oc != nil && oc.Format != nil && oc.Format.Type == "json_schema" && len(oc.Format.Schema) > 0 {
+		r.Schema = oc.Format.Schema
 	}
 	for _, m := range a.Messages {
 		msg := Message{Role: m.Role}
@@ -194,8 +201,10 @@ func thinkingOffUnlessAsked(body []byte) []byte {
 var anthropicModel = regexp.MustCompile(`(?i)(?:^|[/.:-])claude-`)
 
 // alwaysThinks is a vendor refusing to turn a model's thinking off: Z.ai's
-// GLM-5.3 answers 1210, "…always engages in thinking…".
-var alwaysThinks = regexp.MustCompile(`(?i)always engages in thinking|thinking (?:can ?not|can't) be (?:disabled|turned off)`)
+// GLM-5.3 answers 1210, "…always engages in thinking…", and DashScope's own
+// glm-5.3 answers "The value of the enable_thinking parameter is restricted
+// to True."
+var alwaysThinks = regexp.MustCompile(`(?i)always engages in thinking|thinking (?:can ?not|can't) be (?:disabled|turned off)|enable_thinking[^"]{0,60}restricted to true`)
 
 // withoutThinkingOff is body with its thinking left to the model, when it
 // says thinking is off; false when it doesn't.
@@ -384,6 +393,14 @@ func buildAnthropic(r *Request, model string) []byte {
 	} else if r.TopP != nil {
 		out["top_p"] = *r.TopP
 	}
+	if len(r.Schema) > 0 {
+		oc, _ := out["output_config"].(map[string]any)
+		if oc == nil {
+			oc = map[string]any{}
+		}
+		oc["format"] = map[string]any{"type": "json_schema", "schema": r.Schema}
+		out["output_config"] = oc
+	}
 	out["max_tokens"] = maxTokens
 	if len(r.Stop) > 0 {
 		out["stop_sequences"] = r.Stop
@@ -397,6 +414,8 @@ func buildAnthropic(r *Request, model string) []byte {
 			schema := t.Schema
 			if len(schema) == 0 {
 				schema = json.RawMessage(`{"type":"object","properties":{}}`)
+			} else {
+				schema = objectSchema(schema)
 			}
 			tools = append(tools, map[string]any{"name": t.Name, "description": t.Description, "input_schema": schema})
 		}
@@ -762,4 +781,25 @@ var idClock = time.Now
 
 func newID() string {
 	return fmt.Sprintf("%x%08x", idClock().UnixNano(), idSeq.Add(1))
+}
+
+// objectSchema is a tool's input schema with no anyOf, oneOf or allOf at
+// its root, which Anthropic's API refuses ("input_schema does not support
+// oneOf, allOf, or anyOf at the top level"): Codex's codex_app
+// automation_update has one, and Claude models behind Factory answered 400
+// to every request offering it (#646). A schema that has none is sent as
+// it came.
+func objectSchema(schema json.RawMessage) json.RawMessage {
+	if !bytes.Contains(schema, []byte(`Of"`)) {
+		return schema
+	}
+	var m map[string]any
+	if json.Unmarshal(schema, &m) != nil || !provider.ObjectRoot(m) {
+		return schema
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return schema
+	}
+	return b
 }

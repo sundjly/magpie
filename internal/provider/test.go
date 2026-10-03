@@ -34,7 +34,7 @@ type Result struct {
 // sees, and reports what came back.
 func (p Provider) Test(ctx context.Context) []Result {
 	ctx = p.Via(ctx)
-	if p.Decides() {
+	if p.DecideOnly() {
 		return p.testDecide(ctx)
 	}
 	p.Fetch(ctx)
@@ -51,6 +51,9 @@ func (p Provider) Test(ctx context.Context) []Result {
 		}
 		url, body := tiny(q, proto, UpstreamName(p, model))
 		out = append(out, probe(ctx, q, proto, url, q.Prepare([]byte(body)), model, testWait))
+	}
+	if p.Decides() {
+		out = append(out, p.testDecide(ctx)...)
 	}
 	return out
 }
@@ -102,7 +105,7 @@ func clineProbe(body string) string {
 // sign-in), which the gateway translates every request for, so a probe
 // has no endpoint to go to.
 func (p Provider) ModelTest() string {
-	if p.Decides() {
+	if p.DecideOnly() {
 		return "decide"
 	}
 	if p.isClaudeAccount() {
@@ -124,9 +127,12 @@ func tinyBody(q Provider, proto Protocol, model string) (url, body string) {
 		}
 		return q.Chat + "/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, model)
 	case Responses:
-		return q.Responses + "/responses", fmt.Sprintf(`{"model":%q,"input":"hi","max_output_tokens":16}`, model)
+		return q.Responses + "/responses", fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":16}`, model)
 	case Anthropic:
 		return q.Anthropic + "/v1/messages", fmt.Sprintf(`{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
+	case Gemini:
+		// Factory's generate route. droid sends no stream field.
+		return q.Base(Gemini) + "/generate", fmt.Sprintf(`{"model":%q,"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, model)
 	}
 	return "", ""
 }
@@ -184,11 +190,11 @@ func (p Provider) testOne(ctx context.Context, model string) Result {
 	}
 	var protos []Protocol
 	for _, pr := range p.Speaks() {
-		if pr == Chat || pr == Responses || pr == Anthropic {
+		if pr == Chat || pr == Responses || pr == Anthropic || pr == Gemini {
 			protos = append(protos, pr)
 		}
 	}
-	if len(protos) == 0 || p.Decides() {
+	if len(protos) == 0 || p.DecidesModel(model) {
 		return Result{Model: model, Error: "this provider can't be sent a test request"}
 	}
 	// the endpoint the vendor's list says serves it, else Anthropic's for a
@@ -286,7 +292,7 @@ func (p Provider) testModel(q Provider, proto Protocol) string {
 	} {
 		for _, pool := range pools {
 			for _, m := range pool {
-				if want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
+				if !p.DecidesModel(m.ID) && want(m.ID) && (k.Key == "" || p.Serves(k, m.ID)) {
 					return m.ID
 				}
 			}

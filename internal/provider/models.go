@@ -26,7 +26,7 @@ const manyModels = 24
 // from the vendor itself when there is one, over the models.dev catalog (or,
 // for an account, whatever the agent's own sign-in can see).
 func (p Provider) Available() []catalog.Model {
-	if p.Decides() {
+	if p.DecideOnly() {
 		return p.decideModels()
 	}
 	signedIn := p.Account != nil && p.Account.models != nil
@@ -123,7 +123,7 @@ func (p Provider) live() ([]catalog.Model, time.Time, bool) {
 // Fetch asks the vendor which models it serves and remembers the answer.
 func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	ctx = p.Via(ctx)
-	if p.Decides() {
+	if p.DecideOnly() {
 		return p.fetchDecide(ctx)
 	}
 	if p.Account != nil && p.Account.fetch != nil {
@@ -166,6 +166,33 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 		return nil, err
 	}
 	return catalog.Chat(ms), catalog.SaveLive(p.ID, base, ms)
+}
+
+// List asks the vendor which models it serves, as Fetch does, and keeps
+// nothing: a provider still being added (#578, the add form's Fetch models)
+// is shown its vendor's list to pick from before it is saved.
+func (p Provider) List(ctx context.Context) ([]catalog.Model, error) {
+	ctx = p.Via(ctx)
+	if pr := Preset(p.Preset); pr != nil && pr.NoList && strings.TrimSpace(p.ModelsURL) == "" && !p.listRegion(pr) {
+		return catalog.Chat(p.planModels(nil)), nil
+	}
+	if p.IsCline() && strings.TrimSpace(p.ModelsURL) == "" {
+		if ms, _, err := p.clineFeed(ctx); err == nil {
+			return catalog.Chat(ms), nil
+		}
+	}
+	if p.IsKilo() && strings.TrimSpace(p.ModelsURL) == "" {
+		ms, _, err := p.kiloModels(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return catalog.Chat(ms), nil
+	}
+	ms, _, err := p.fetchOne(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return catalog.Chat(ms), nil
 }
 
 // newFetches is when each account with no list from its vendor yet was
@@ -524,7 +551,10 @@ func (p Provider) Exposed() []catalog.Model {
 			if m, ok := byID[id]; ok {
 				out = append(out, m)
 			} else {
-				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.firstCatalog()})
+				// with the levels the gateway fits an effort to (Known),
+				// not the none effortsOf takes a vendor's word for: the
+				// vendor's list doesn't have it, so it gave no word (#597)
+				out = append(out, catalog.Model{ID: id, Name: id, Provider: p.firstCatalog(), Efforts: p.knownElsewhere(id)})
 			}
 		}
 		return out
@@ -590,8 +620,13 @@ func (p Provider) Known(model string) []string {
 			return []string{l}
 		}
 	}
-	// one of the vendor's own its list leaves out (a preview) or typed in:
-	// the vendor's word on it, before the others'
+	return p.knownElsewhere(model)
+}
+
+// knownElsewhere are the reasoning levels of a model the provider's list
+// doesn't have — one of the vendor's own its list leaves out (a preview),
+// or typed in: the vendor's word on it, before the others'.
+func (p Provider) knownElsewhere(model string) []string {
 	if e, ok := catalog.ListedBy(p.Catalogs(), model); ok {
 		return e
 	}
@@ -875,14 +910,20 @@ func Unlisted() []Entry {
 
 // providerEntries is the catalog without its groups.
 func providerEntries() []Entry {
+	return heldEntries(buildEntries)
+}
+
+func buildEntries() []Entry {
 	var out []Entry
 	s := settings.Load()
 	for _, p := range All() {
-		if !p.On() || p.Decides() { // a decision API only routes
+		if !p.On() || p.DecideOnly() { // a dedicated decision API only routes
 			continue
 		}
 		for _, m := range p.Exposed() {
-			out = append(out, entryFor(p, m, s))
+			if !p.DecidesModel(m.ID) {
+				out = append(out, entryFor(p, m, s))
+			}
 		}
 	}
 	return out
@@ -917,7 +958,10 @@ func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
 	if m.ImageInput != nil {
 		images = *m.ImageInput
 	}
-	images, imageInput := ApplyImage(p.ID, m.ID, images, m.ImageInput)
+	imageInput := m.ImageInput
+	if override, ok := s.ModelImages[p.ID+"/"+m.ID]; ok {
+		images, imageInput = override, &override
+	}
 	e := Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Family: p.Family, Name: m.Name, Efforts: effortsOf(m), Provider: p,
 		Images: images, ImageInput: imageInput, Context: ctx, Output: output, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas}
 	if n, ok := modelNameIn(s.ModelNames, p.ID, m.ID); ok {
@@ -1003,7 +1047,9 @@ func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 		}
 	}
 	if pid, model, ok := strings.Cut(id, "/"); ok {
-		if p, err := Find(pid); err == nil && p.On() {
+		// the providers a request holds: an agent's value of a model not
+		// listed lands here, and All is read anew each time
+		if p, err := findIn(heldOf("all", All), pid); err == nil && p.On() {
 			return *p, model, true
 		}
 	}
@@ -1018,21 +1064,33 @@ func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 	}
 	// not exposed, but some provider lists it
 	var found []Provider
-	for _, p := range All() {
-		if !p.On() || p.Decides() {
-			continue
-		}
-		for _, m := range p.Available() {
-			if m.ID == id {
-				found = append(found, p)
-				break
-			}
+	for _, p := range heldOf("listed", listedBy)[id] {
+		if !p.DecidesModel(id) {
+			found = append(found, p)
 		}
 	}
 	if len(found) == 1 {
 		return found[0], id, true
 	}
 	return Provider{}, "", false
+}
+
+// listedBy is the providers on that list each model, in order, each once.
+func listedBy() map[string][]Provider {
+	out := map[string][]Provider{}
+	for _, p := range All() {
+		if !p.On() {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, m := range p.Available() {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out[m.ID] = append(out[m.ID], p)
+			}
+		}
+	}
+	return out
 }
 
 // IDs lists the catalog ids, for error messages.
