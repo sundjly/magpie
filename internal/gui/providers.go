@@ -29,14 +29,19 @@ type modelJSON struct {
 	Default  string   `json:"default,omitempty"` // its own name, when the user gave it another
 	Kept     []string `json:"kept,omitempty"`    // the reasoning levels the user keeps of Efforts, when not all
 	Efforts  []string `json:"efforts,omitempty"`
-	Given    bool     `json:"given,omitempty"`    // its levels aren't known: Efforts are those it can be given, Kept those it was
-	Images   bool     `json:"images"`             // agents are told it can see images
-	ImageSet bool     `json:"imageSet,omitempty"` // the user said so, rather than its vendor
+	Given    bool     `json:"given,omitempty"`     // its levels aren't known: Efforts are those it can be given, Kept those it was
+	Images   bool     `json:"images"`              // agents are told it can see images
+	ImageSet bool     `json:"imageSet,omitempty"`  // the user said so, rather than its vendor
 	Own      bool     `json:"ownImages,omitempty"` // its vendor's answer, which a staged Restore default shows
-	On       bool     `json:"on"`                 // exposed to agents
+	On       bool     `json:"on"`                  // exposed to agents
 	Context  int      `json:"context,omitempty"`
-	Max      int      `json:"max,omitempty"`  // the most its context may be set to, above Context
-	Free     bool     `json:"free,omitempty"` // costs the subscription nothing
+	Max      int      `json:"max,omitempty"`     // the most its context may be set to, above Context
+	Free     bool     `json:"free,omitempty"`    // costs the subscription nothing
+	Rate     float64  `json:"rate,omitempty"`    // the credits a request costs the subscription, as a multiple
+	RateWas  float64  `json:"rateWas,omitempty"` // the rate before a discount running now
+	API      string   `json:"api,omitempty"`     // the one API the user said it is asked on
+	Same     string   `json:"same,omitempty"`    // the model the user said it is the same as, for the groups magpie finds (#583)
+	Merge    string   `json:"merge,omitempty"`   // what those groups merge it by when the user says nothing
 }
 
 type providerJSON struct {
@@ -98,6 +103,9 @@ type providerJSON struct {
 	// KeepLogin: magpie keeps Codex or Claude Code signed in to the first
 	// account rather than moving it on when that runs low (#524)
 	KeepLogin bool `json:"keepLogin,omitempty"`
+	// KeepLoginAs: the account it is kept signed in to instead of the
+	// first, the gateway still trying them in their order
+	KeepLoginAs string `json:"keepLoginAs,omitempty"`
 	// how many requests each of its keys or accounts has out at once, the
 	// rest queued: the user's (null: not set), and what its plugin says
 	// when the user set none (provider.Concurrency)
@@ -278,7 +286,7 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, Headers: p.Headers, Searches: p.Searches, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
-		Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, KeepLogin: p.KeepLogin, Unlisted: p.Unlisted, Off: p.Off, Contexts: p.Contexts,
+		Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Unlisted: p.Unlisted, Off: p.Off, Contexts: p.Contexts,
 		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(),
 	}
 	if out.Fallback == nil {
@@ -370,6 +378,7 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	}
 	seen := map[string]bool{}
 	names, kept := p.ModelNames(), p.ModelEfforts()
+	sames := settings.Load().ModelSameAs
 	// a list fetched before magpie kept each model's most: the one Codex
 	// CLI keeps says it
 	var most []catalog.Model
@@ -384,7 +393,7 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		own := images
 		images, _ = provider.ApplyImage(p.ID, m.ID, images, m.ImageInput)
 		_, imageSet := provider.ImageOverride(p.ID, m.ID)
-		j := modelJSON{ID: m.ID, Name: m.Name, Efforts: provider.EffortsOf(m), On: on, Context: m.Context, Max: m.MaxContext, Free: m.Free, Images: images, ImageSet: imageSet, Own: own}
+		j := modelJSON{ID: m.ID, Name: m.Name, Efforts: provider.EffortsOf(m), On: on, Context: m.Context, Max: m.MaxContext, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas, Images: images, ImageSet: imageSet, Own: own}
 		if i := slices.IndexFunc(most, func(c catalog.Model) bool { return c.ID == m.ID }); j.Max == 0 && i >= 0 {
 			j.Max = most[i].MaxContext
 		}
@@ -392,6 +401,11 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 			j.Default = cmp.Or(m.Name, m.ID)
 			j.Name = n
 		}
+		if api, ok := p.ModelAPI(m.ID); ok {
+			j.API = string(api)
+		}
+		j.Same = sames[p.ID+"/"+m.ID]
+		j.Merge = provider.MergeName(m.ID)
 		if len(j.Efforts) == 0 {
 			j.Efforts, j.Given = provider.Levels, true
 		}
@@ -648,9 +662,21 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// editor's Names & levels changed, by model id, made with the
 			// rest of the Save and not a click at a time
 			ModelPrefs map[string]provider.ModelPref `json:"modelPrefs"`
+			// Routing and Affinity, for route, affinity and save: how
+			// requests spread over its keys or accounts, and how long a
+			// conversation stays with the one that answered it. The
+			// editor's Save sends them only when picked there, a save
+			// that leaves them out keeping them: the Routing page's Stays
+			// was lost at each Save of the provider's editor, which never
+			// sent it.
+			Routing  *string `json:"routing"`
+			Affinity *string `json:"affinity"`
 			// Test, for test: models to send a request each, in place of
 			// one per endpoint
 			Test []string `json:"test"`
+			// DetectModels, for detect: models to ask on each API, each
+			// answered on its own, in place of Model
+			DetectModels []string `json:"detectModels"`
 			// Account and Allow, for accountmodels: the account (its name)
 			// or key (its id) and the models it alone serves, none for all
 			// the provider's (#474)
@@ -659,12 +685,21 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// Typed, for test and models: the request carries the editor's
 			// form, which is tried as it stands before a Save (see typed)
 			Typed bool `json:"typed"`
+			// Base, for detect: the base URL typed, asked as each API
+			// takes it where the form has no URL of that API's own
+			Base string `json:"base"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			fail(rw, err)
 			return
 		}
 		in := req.Provider
+		if req.Routing != nil {
+			in.Routing = *req.Routing
+		}
+		if req.Affinity != nil {
+			in.Affinity = *req.Affinity
+		}
 		var moved []agent.Move
 		switch r.PathValue("action") {
 		case "show":
@@ -788,8 +823,15 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				if old != nil {
 					// the other keys are kept apart, in the Accounts list
 					in.Keys = old.Keys
-					in.Routing = old.Routing     // set on its own, with route
-					in.KeepLogin = old.KeepLogin // and this with keeplogin
+					// the editor's picks, or as they were
+					if req.Routing == nil {
+						in.Routing = old.Routing
+					}
+					if req.Affinity == nil {
+						in.Affinity = old.Affinity
+					}
+					in.KeepLogin = old.KeepLogin // set on its own, with keeplogin
+					in.KeepLoginAs = old.KeepLoginAs
 					in.Off = old.Off             // and this with off and on
 					if in.Contexts == nil {
 						in.Contexts = old.Contexts // a save that doesn't say
@@ -886,11 +928,21 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 			provider.ForgetBalances()
 		case "keeplogin":
-			// Codex or Claude Code stays signed in to the first account (#524)
-			if err := provider.SetKeepLogin(in.ID, in.KeepLogin); err != nil {
+			// Codex or Claude Code stays signed in to the first account, or
+			// to one of the user's choosing (keepLoginAs), which signs it in
+			// to that one now, and back to the first when let go (#524)
+			var err error
+			moved, err = agent.Reseat(func() error {
+				if in.KeepLogin && in.KeepLoginAs != "" {
+					return provider.SetKeepLoginAs(in.ID, in.KeepLoginAs)
+				}
+				return provider.SetKeepLogin(in.ID, in.KeepLogin)
+			})
+			if err != nil {
 				fail(rw, err)
 				return
 			}
+			agent.SyncCatalog()
 		case "affinity":
 			if err := provider.SetAffinity(in.ID, in.Affinity); err != nil {
 				fail(rw, err)
@@ -927,6 +979,42 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				Provider providerJSON      `json:"provider"`
 			}{p.Test(ctx), providerInfo(saved, agentUses(agent.Detected(), provider.GroupFinder()))})
 			return
+		case "detect":
+			// which APIs answer at the URL typed (Model, or one from the
+			// list for each), the form as it stands: a new provider's,
+			// or a saved one's with its key when none is typed
+			var p provider.Provider
+			if in.ID != "" {
+				saved, err := provider.Find(in.ID)
+				if err != nil {
+					fail(rw, err)
+					return
+				}
+				p = *saved
+			}
+			p = typed(p, in, req.Proxy)
+			if len(req.DetectModels) > 0 {
+				// model by model, a few at a time (01huadalang: 应该能
+				// 看出来选择的模型支持情况)
+				ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+				defer cancel()
+				each, sum, err := p.DetectModels(ctx, req.Base, req.DetectModels)
+				if err != nil {
+					fail(rw, err)
+					return
+				}
+				writeJSON(rw, map[string]any{"results": sum, "models": each})
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+			defer cancel()
+			got, err := p.Detect(ctx, req.Base, req.Model)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			writeJSON(rw, map[string]any{"results": got})
+			return
 		case "balance":
 			// the editor's check of a balance as it stands in the form,
 			// before a Save: the saved provider with the form's URL, field,
@@ -961,6 +1049,39 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
+		case "list":
+			// the vendor's list for the form as it stands, nothing saved:
+			// the add form's Fetch models, picked from before the provider
+			// is (#578: 添加供应商的时候，希望添加可以获取全模型的按钮)
+			var p provider.Provider
+			if pr, err := provider.FromPreset(in.Preset); err == nil {
+				p = pr
+			}
+			if p.Name == "" {
+				p.Name = cmp.Or(strings.TrimSpace(in.Name), "the vendor")
+			}
+			p = typed(p, in, req.Proxy)
+			ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+			defer cancel()
+			ms, err := p.List(ctx)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			type listed struct {
+				ID   string `json:"id"`
+				Name string `json:"name,omitempty"`
+			}
+			out := make([]listed, 0, len(ms))
+			for _, m := range ms {
+				x := listed{ID: m.ID}
+				if m.Name != m.ID {
+					x.Name = m.Name
+				}
+				out = append(out, x)
+			}
+			writeJSON(rw, map[string]any{"models": out})
+			return
 		case "models":
 			p, err := provider.Find(in.ID)
 			if err != nil {

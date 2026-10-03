@@ -31,7 +31,7 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
+	Gemini    Protocol = "gemini"    // Google Gemini. Served to clients; spoken upstream only for Factory's generate route
 )
 
 // Protocols in the order magpie prefers them when it has to translate.
@@ -64,8 +64,8 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 	// Decide is the base of a decision API (TypeSafe's System One, which
-	// Jev answers): a provider with it serves no conversation, only the
-	// routing groups' choices of model and effort (see decide.go).
+	// Jev answers), for routing groups' choices of model and effort. The
+	// provider may also serve conversations on the other endpoints.
 	Decide string `json:"decide,omitempty"`
 
 	// Fallback is where a request goes when this provider can't take it —
@@ -95,6 +95,11 @@ type Provider struct {
 	// in to another when that one runs low or out (#524). The gateway still
 	// spreads its requests over the accounts that are on, as Routing says.
 	KeepLogin bool `json:"keepLogin,omitempty"`
+	// KeepLoginAs, with KeepLogin, is the account the agent is kept signed
+	// in to whichever is first in the order the gateway tries them: the one
+	// the user uses the agent as, while the first is only the one whose
+	// allowance is spent first (#524). Empty, it is the first.
+	KeepLoginAs string `json:"keepLoginAs,omitempty"`
 
 	// MaxConcurrency is how many requests may be out at the vendor at once
 	// on each of its keys or accounts (Discord, Lemon: a Codex account is
@@ -307,7 +312,7 @@ func All() []Provider {
 			continue
 		}
 		pk := picks[a.ID]
-		a.Models, a.Unlisted, a.Off, a.Fallback, a.Routing, a.Affinity, a.KeepLogin, a.Contexts, a.Family = pk.Models, pk.Unlisted, pk.Off, pk.Fallback, pk.Routing, pk.Affinity, pk.KeepLogin, pk.Contexts, pk.Family
+		a.Models, a.Unlisted, a.Off, a.Fallback, a.Routing, a.Affinity, a.KeepLogin, a.KeepLoginAs, a.Contexts, a.Family = pk.Models, pk.Unlisted, pk.Off, pk.Fallback, pk.Routing, pk.Affinity, pk.KeepLogin, pk.KeepLoginAs, pk.Contexts, pk.Family
 		a.Proxy, a.AccountProxies, a.AccountModels = pk.Proxy, pk.AccountProxies, pk.AccountModels
 		a.MaxConcurrency = pk.MaxConcurrency
 		if a.ID == "cursor" { // picked before its efforts were one model
@@ -346,8 +351,11 @@ func find(ps []Provider, id string) (Provider, bool) {
 
 // Find looks a provider up by id (or name, case-insensitively).
 func Find(id string) (*Provider, error) {
+	return findIn(All(), id)
+}
+
+func findIn(all []Provider, id string) (*Provider, error) {
 	q := strings.ToLower(strings.TrimSpace(id))
-	all := All()
 	// an id before a name: a provider of the user's called WorkBuddy isn't
 	// the workbuddy subscription
 	if i := slices.IndexFunc(all, func(p Provider) bool { return p.ID == q }); i >= 0 {
@@ -408,7 +416,7 @@ func Save(p Provider) error {
 		if p.ID == "kiro" {
 			key = p.Key
 		}
-		p = Provider{ID: p.ID, Key: key, Models: p.Models, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, KeepLogin: p.KeepLogin, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, MaxConcurrency: p.MaxConcurrency, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID)}
+		p = Provider{ID: p.ID, Key: key, Models: p.Models, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, MaxConcurrency: p.MaxConcurrency, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID)}
 	} else {
 		p.AccountProxies = nil // a provider of a key has no accounts to proxy apart
 		if subscriptionID(p.ID) && !stored(p.ID) {
@@ -694,6 +702,12 @@ func normalize(p Provider) Provider {
 	if p.Preset == "qianfan-token-plan" {
 		p.Preset = "baidu-qianfan"
 	}
+	// OpenCode Zen serves its free models (-free) signed out, to the key
+	// OpenCode itself sends then: a Zen provider saved with no key of its
+	// own asks with that one
+	if p.Preset == "opencode-zen" && p.Key == "" {
+		p.Key = OpenCodeAnonymousKey
+	}
 	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed && p.Routing != Pace {
 		p.Routing = ""
 	}
@@ -795,6 +809,12 @@ func (p Provider) Base(proto Protocol) string {
 		if p.Account != nil {
 			return p.Account.codeAssist
 		}
+	case Gemini:
+		// Factory's Gemini models are generateContent at /api/llm/g, not
+		// Code Assist. No other provider speaks Gemini upstream.
+		if p.ID == "factory" && p.Account != nil {
+			return factoryAPI + "/api/llm/g/v1"
+		}
 	}
 	return ""
 }
@@ -815,6 +835,11 @@ func (p Provider) Speaks() []Protocol {
 	if p.IsPlugin() && p.Account.codeAssist != "" {
 		out = append(out, CodeAssist)
 	}
+	// Factory's Gemini models, on generateContent. A model droid didn't
+	// list stays on the other three (factoryAPIs); this is not one of them.
+	if p.ID == "factory" && p.Account != nil {
+		out = append(out, Gemini)
+	}
 	return out
 }
 
@@ -829,6 +854,12 @@ func (p Provider) ResponsesFirst(model string) bool {
 	if p.Responses == "" || (p.ID != "copilot" && HostOf(p.Responses) != "api.openai.com" && HostOf(p.Responses) != "api.pipellm.ai" && !p.IsAzure()) {
 		return false
 	}
+	return openAIModel(model)
+}
+
+// openAIModel is whether model is one of OpenAI's own by its name: a GPT,
+// a Codex or an o-series model, after any vendor prefix.
+func openAIModel(model string) bool {
 	m := strings.ToLower(model[strings.LastIndex(model, "/")+1:])
 	return strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "codex") ||
 		len(m) > 1 && m[0] == 'o' && m[1] >= '0' && m[1] <= '9'

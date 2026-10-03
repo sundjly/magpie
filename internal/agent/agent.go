@@ -32,6 +32,11 @@ type Option struct {
 	GroupIcon string `json:"groupIcon,omitempty"`
 	Ref       string `json:"ref,omitempty"`  // the catalog model, the same in every agent
 	Free      bool   `json:"free,omitempty"` // costs its subscription nothing
+	// Rate and RateWas are the credits a request costs its subscription,
+	// as a multiple, and before a discount running now (Qoder's 0.5×,
+	// WorkBuddy's x0.03), when its vendor lists them
+	Rate    float64 `json:"rate,omitempty"`
+	RateWas float64 `json:"rateWas,omitempty"`
 	// Context is the tokens the model takes, when known; the picker marks
 	// the large ones
 	Context int `json:"context,omitempty"`
@@ -89,6 +94,12 @@ type Agent struct {
 	// rather than asking the gateway, rewrites that list as the catalog is
 	// now — where magpie wrote one; nothing else changes (see SyncCatalog).
 	Sync func() error
+	// Unwire, for an agent whose fields' default is the agent as installed
+	// rather than what it had before magpie (Codex, Claude Code, Gemini
+	// CLI), takes magpie out of its config and puts back what the stash
+	// kept: the endpoint, provider and model the user had. Disconnect runs
+	// it before the fields' defaults.
+	Unwire func() error
 	// RenameRefs, for an agent whose config names magpie's models beyond
 	// its fields (omp's other roles and fallback chains), moves those names
 	// off provider from onto to, the rest of each kept; it answers whether
@@ -115,6 +126,9 @@ type Agent struct {
 	// for this machine's, and while the distro is stopped: opening it
 	// would start it.
 	Home string
+	// Gateway is the gateway's address as the agent reaches it, a WSL
+	// distro's own way to it; nil is gateway.URL.
+	Gateway func() string
 	// Import, for an app that takes magpie only through an import link of
 	// its own, which the user confirms there (Cindy), is that link; the app
 	// has no fields magpie sets. Added says whether it has magpie already.
@@ -366,6 +380,9 @@ func atomic(a *Agent, paths ...string) *Agent {
 	}
 	if sync := a.Sync; sync != nil {
 		a.Sync = func() error { return edit.Atomically(sync, paths...) }
+	}
+	if unwire := a.Unwire; unwire != nil {
+		a.Unwire = func() error { return edit.Atomically(unwire, paths...) }
 	}
 	return a
 }

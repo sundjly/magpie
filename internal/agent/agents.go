@@ -70,6 +70,7 @@ func All() []*Agent {
 		omo(home),
 		goose(home, cfg),
 		cursor(home),
+		zed(home, cfg),
 		copilot(home),
 		crush(home, cfg),
 		dsh(home),
@@ -80,6 +81,7 @@ func All() []*Agent {
 		hermes(home),
 		kimi(home),
 		muse(cfg),
+		empryo(home),
 		miniMax(home),
 		droid(home),
 		cline(home),
@@ -89,6 +91,7 @@ func All() []*Agent {
 		zcode(home),
 		workbuddy(home),
 		pencil(home),
+		t3code(home),
 		hanako(home),
 		alma(),
 		cindy(),
@@ -609,6 +612,8 @@ func piLike(at place, id, name, dir string) *Agent {
 	get := func(k string) (string, bool) { return edit.GetJSON(path, k) }
 	set := func(kvs ...edit.KV) error { return edit.SetJSON(path, kvs...) }
 	pair := pairSet(set, "defaultProvider", "defaultModel")
+	// the model a new session starts on, as the model field shows it
+	startup := func() string { return piStartup(path, pairGet(get, "defaultProvider", "defaultModel")()) }
 	writeMagpie := func() error {
 		return edit.SetJSON(modelsPath, edit.KV{Path: "providers." + magpieID, Value: magpieProviderJSONAt("pi", id, at.gw())})
 	}
@@ -628,7 +633,7 @@ func piLike(at place, id, name, dir string) *Agent {
 			{
 				Key: "model", Label: "model",
 				// what a new session starts on, which enabledModels decides
-				Get: func() string { return piStartup(path, pairGet(get, "defaultProvider", "defaultModel")()) },
+				Get: startup,
 				Set: func(v string) error {
 					if v == "" {
 						if err := edit.DelJSON(path, "defaultProvider", "defaultModel"); err != nil {
@@ -661,8 +666,20 @@ func piLike(at place, id, name, dir string) *Agent {
 				// here replaced model fields a person had edited, such as a
 				// contextWindow. Picking the model, and the catalog sync, still
 				// refresh the provider.
+				//
+				// For a model of magpie's, the levels are those Pi offers for
+				// it, from the entry magpie writes, and a level it doesn't
+				// offer is shown as the one Pi runs it at: magpie showed max
+				// for a group Pi offered off alone for, so ran without
+				// reasoning (#597).
 				Key: "effort", Label: "thinking",
-				Get: func() string { v, _ := get("defaultThinkingLevel"); return v },
+				Get: func() string {
+					v, _ := get("defaultThinkingLevel")
+					if offered := piOffered(id, startup()); v != "" && offered != nil {
+						return piClamp(v, offered)
+					}
+					return v
+				},
 				Set: func(v string) error {
 					cur, _ := get("defaultThinkingLevel")
 					if v == cur {
@@ -673,8 +690,11 @@ func piLike(at place, id, name, dir string) *Agent {
 					}
 					return set(edit.KV{Path: "defaultThinkingLevel", Value: v})
 				},
-				Options: func(map[string]string) []Option {
-					return static("off", "minimal", "low", "medium", "high", "xhigh", "max")
+				Options: func(cur map[string]string) []Option {
+					if offered := piOffered(id, cur["model"]); offered != nil {
+						return static(offered...)
+					}
+					return static(piLevels...)
 				},
 			},
 		},

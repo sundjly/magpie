@@ -202,14 +202,15 @@ func accountRows(ls []provider.Login, now time.Time) []accountRow {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	usage := map[string]map[string]provider.SubscriptionQuota{}
+	seen := map[string]bool{}
 	provider.AskClaudeUsage()
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, l := range ls {
-		if _, ok := usage[l.Agent]; ok {
+		if seen[l.Agent] {
 			continue
 		}
-		usage[l.Agent] = nil
+		seen[l.Agent] = true
 		wg.Add(1)
 		go func(agent string) {
 			defer wg.Done()
@@ -371,6 +372,8 @@ func openInBrowser(url string) {
 		cmd = proc.Command("open", url)
 	case "windows":
 		cmd = proc.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "android":
+		cmd = proc.Command("termux-open-url", url)
 	default:
 		cmd = proc.Command("xdg-open", url)
 	}

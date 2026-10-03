@@ -87,7 +87,8 @@ type Migration struct {
 //	offline   magpie couldn't reach npm (or Bun's download) to install the plugin
 //	install   npm couldn't install it: line
 //	lapsed    every account of name needs signing in again
-//	unserved  the plugin doesn't serve models (their names)
+//	unserved  the plugin doesn't serve models (their names) for user (with
+//	          its plan), though the built-in does
 //	account   user doesn't work through the plugin: error
 type MoveWhy struct {
 	Code string            `json:"code"`
@@ -222,8 +223,17 @@ type mover struct {
 	// served is whether the plugin, listing listed, still serves model, one
 	// of the built-in's picks it doesn't list; nil for none.
 	served func(model string, listed []string) bool
+	// builtin is whether the built-in served model on account a, by the
+	// plan a is on; nil for every model on every account. One it didn't
+	// (a ZCode Start Plan account's GLM-5.3) is no loss when the plugin
+	// doesn't list it either.
+	builtin func(ctx context.Context, a Moving, model string) bool
 }
 
+// movers are the deprecated built-ins and their plugins, by id. Once one
+// is moved, its plugin serves it and the built-in's code no longer does:
+// each built-in's files say so (PLUGIN-SERVED, AGENTS.md), and
+// TestMovedBuiltinsSayTheirPlugin fails for a mover added without that.
 var movers = map[string]*mover{}
 
 // errStays is a back's answer for a sign-in the built-in has nowhere to
@@ -344,6 +354,7 @@ func setMigration(id string, f func(m *Migration)) error {
 	if err != nil {
 		return err
 	}
+	defer Changed()
 	return writePrivate(migrationsPath(), append(b, '\n'))
 }
 
@@ -594,10 +605,15 @@ func move(ctx context.Context, id string, mv *mover) (err error) {
 		}
 		if !tried {
 			if missing := slices.DeleteFunc(slices.Clone(inUse), func(m string) bool {
-				return slices.Contains(c.Models, m) || mv.served != nil && mv.served(m, c.Models)
+				return slices.Contains(c.Models, m) || mv.served != nil && mv.served(m, c.Models) ||
+					mv.builtin != nil && !mv.builtin(ctx, a, m)
 			}); len(missing) > 0 {
 				names := strings.Join(modelNames(id, missing), ", ")
-				return &moveError{MoveWhy{Code: "unserved", Args: map[string]string{"models": names}}, fmt.Sprintf("the plugin doesn't serve %s. Untick them under Models, or keep the built-in.", names), nil}
+				who := a.User
+				if a.Plan != "" {
+					who += " (" + a.Plan + ")"
+				}
+				return &moveError{MoveWhy{Code: "unserved", Args: map[string]string{"models": names, "user": who}}, fmt.Sprintf("the plugin doesn't serve %s for %s, though the built-in does. Untick them under Models, or keep the built-in.", names, who), nil}
 			}
 			tried = true
 		}
@@ -1080,6 +1096,65 @@ func MoveRetiring(ctx context.Context) map[string]error {
 	return out
 }
 
+// HandOver gives each deprecated built-in whose plugin the user has
+// installed, at the version its move needs, and which that plugin serves,
+// its id, so one subscription is never listed twice: the built-in, and the
+// plugin's under "<id>-plugin" (ARNO on Discord: Qoder CN twice once the
+// Qoder plugin's 0.2.0 served it, as nothing gave it the id). One with no
+// accounts is the plugin's at once, as Adopt makes it; with accounts too,
+// one that has some is moved (Move: each tried through the plugin, all put
+// back on any failure, the built-in carrying on). One the plugin has
+// accounts of its own for already is left as it is, since its models are
+// in use as <id>-plugin's and the id changing would leave agents asking
+// for a provider gone; the add sheet lists it once regardless. One the
+// user moved back stays built-in, and a failed move waits moveRetry. No
+// plugin is installed for it: the user's own install is what says to.
+func HandOver(ctx context.Context, accounts bool) map[string]error {
+	out := map[string]error{}
+	var pps []plugin.Provider
+	asked := false
+	for _, id := range MovableIDs() {
+		mv := movers[id]
+		if m, ok := MigrationOf(id); ok && (m.State != MoveFailed || time.Since(m.At) < moveRetry) {
+			continue
+		}
+		if !pluginReady(mv) {
+			continue
+		}
+		if !asked {
+			var err error
+			if pps, err = pluginProviders(ctx); err != nil {
+				return out
+			}
+			asked = true
+		}
+		i := slices.IndexFunc(pps, func(p plugin.Provider) bool { return p.ID == id && plugin.PackageName(p.Spec) == mv.pkg })
+		if i < 0 || pps[i].SignedIn || len(pps[i].Accounts) > 0 {
+			continue
+		}
+		accts, err := mv.out()
+		switch {
+		case err != nil:
+		case len(accts) == 0:
+			out[id] = Adopt(ctx, id)
+		case accounts:
+			out[id] = Move(ctx, id)
+		}
+	}
+	return out
+}
+
+// pluginReady is whether the mover's plugin is installed, switched on and
+// at the version its move needs.
+func pluginReady(mv *mover) bool {
+	for _, e := range plugin.Load().Plugins {
+		if plugin.PackageName(e.Spec) == mv.pkg {
+			return !e.Off && (mv.min == "" || !update.Newer(mv.min, plugin.Version(e.Spec)))
+		}
+	}
+	return false
+}
+
 // keepMovedCurrent updates the plugin of each built-in moved onto one to
 // the version its move needs, when older: a built-in came up to date with
 // magpie, and its plugin does too. One turned off or run from a folder is
@@ -1096,7 +1171,8 @@ func keepMovedCurrent(ctx context.Context) {
 	}
 }
 
-// KeepRetiringMoved moves the built-ins being retired, run by the magpie
+// KeepRetiringMoved moves the built-ins being retired, and hands over
+// those whose plugin the user installed (HandOver), run by the magpie
 // serving the gateway (one magpie, never two at once): a little after it
 // starts, then every hour, so a failed move is tried again once moveRetry
 // has gone. It also keeps each moved built-in's plugin up to date.
@@ -1110,7 +1186,9 @@ func KeepRetiringMoved(ctx context.Context) {
 		case <-t.C:
 		}
 		keepMovedCurrent(ctx)
-		for id, err := range MoveRetiring(ctx) {
+		moves := MoveRetiring(ctx)
+		maps.Copy(moves, HandOver(ctx, true))
+		for id, err := range moves {
 			if err != nil {
 				log.Printf("moving %s to its plugin: %s (it stays built-in)", id, err)
 			} else {

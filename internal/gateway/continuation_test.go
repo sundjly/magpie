@@ -272,8 +272,8 @@ func TestStreamCutMidThinkingContinues(t *testing.T) {
 }
 
 // A model that doesn't read reasoning back (no reasoning_content for it)
-// is asked again with no prefill to go on from, and answers anew: the
-// client reads the thinking the cut reply had, then the fresh answer.
+// is asked again with an empty prefill to go on from, and answers anew:
+// the client reads the thinking the cut reply had, then the fresh answer.
 func TestStreamCutMidThinkingContinuesWithoutReasoning(t *testing.T) {
 	f := &cutChat{
 		cuts:  map[int][]string{0: {chatThink("m", "think-1")}},
@@ -283,8 +283,8 @@ func TestStreamCutMidThinkingContinuesWithoutReasoning(t *testing.T) {
 	if f.calls() != 2 {
 		t.Fatalf("calls = %d, want 2", f.calls())
 	}
-	if m := f.lastAssistant(t, 1); m != nil {
-		t.Fatalf("a model that doesn't read reasoning back was sent a prefill: %v", m)
+	if m := f.lastAssistant(t, 1); m != nil && m["reasoning_content"] != nil {
+		t.Fatalf("a model that doesn't read reasoning back was sent it: %v", m)
 	}
 	if got := thinkOf(body); got != "think-1" {
 		t.Fatalf("client's thinking = %q, want %q", got, "think-1")

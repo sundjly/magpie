@@ -40,11 +40,19 @@ func sandbox(t *testing.T) string {
 	roots := piGlobalRoots
 	piGlobalRoots = func() []string { return nil }
 	t.Cleanup(func() { piGlobalRoots = roots })
+	// a terminal's PATH is the test's, never the developer's login shell's
+	up := userPath
+	userPath = func() []string { return filepath.SplitList(os.Getenv("PATH")) }
+	t.Cleanup(func() { userPath = up })
 	for _, k := range agentenv.Vars {
 		t.Setenv(k, "")
 	}
 	t.Setenv("APPDATA", "")
 	t.Setenv("LOCALAPPDATA", "")
+	// never the developer's own GitHub token, sent to a fake GitHub
+	for _, k := range GitHubTokenEnv {
+		t.Setenv(k, "")
+	}
 	for _, f := range []string{
 		".claude/settings.json", ".codex/config.toml", ".gemini/settings.json",
 		".config/opencode/opencode.json", ".config/mimocode/mimocode.json", ".pi/agent/settings.json", ".config/goose/config.yaml",

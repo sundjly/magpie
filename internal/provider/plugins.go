@@ -70,7 +70,7 @@ func (p Provider) PluginProvider() string {
 
 // PluginOf is the plugin provider magpie's provider id is, when it is one.
 func PluginOf(id string) (plugin.Provider, bool) {
-	for _, pp := range plugin.Cached() {
+	for _, pp := range heldPlugins() {
 		if PluginID(pp.ID) == id {
 			return pp, true
 		}
@@ -82,7 +82,7 @@ func PluginOf(id string) (plugin.Provider, bool) {
 // first account.
 func pluginAccounts() []Provider {
 	var out []Provider
-	for _, pp := range plugin.Cached() {
+	for _, pp := range heldPlugins() {
 		if movingNow(pp.ID) {
 			continue // shown once the move is through (migrate.go)
 		}
@@ -155,6 +155,7 @@ func pluginCatalog(pp plugin.Provider) []catalog.Model {
 			ID: m.ID, Name: m.Name, Provider: pp.ID, Released: m.Released,
 			APIs: []string{string(pluginProtocol(pp.ID, m))}, Images: m.Image,
 			Context: m.Input, Output: m.Output, Free: m.Free,
+			Rate: m.Rate, RateWas: m.RateWas,
 		}
 		if c.Context == 0 {
 			c.Context = m.Context

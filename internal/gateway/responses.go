@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -156,6 +157,42 @@ func searchFound(tools []rTool) string {
 
 // flatName is the name a namespaced tool is offered to a model under,
 // namespace__name, the same a Grok subscription is offered it under.
+// unsealed is a tool's parameters without the "encrypted" marks Codex puts
+// on some (spawn_agent's message): a translated request's calls go back to
+// Codex as unsealed (callTo's encrypted_function_args), so an upstream that
+// honours the mark must not seal them (#613).
+func unsealed(schema json.RawMessage) json.RawMessage {
+	if !bytes.Contains(schema, []byte(`"encrypted"`)) {
+		return schema
+	}
+	var v any
+	if json.Unmarshal(schema, &v) != nil {
+		return schema
+	}
+	var strip func(any)
+	strip = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if _, ok := x["encrypted"].(bool); ok {
+				delete(x, "encrypted")
+			}
+			for _, c := range x {
+				strip(c)
+			}
+		case []any:
+			for _, c := range x {
+				strip(c)
+			}
+		}
+	}
+	strip(v)
+	out, err := marshalPlain(v)
+	if err != nil {
+		return schema
+	}
+	return out
+}
+
 func flatName(namespace, name string) string {
 	return provider.FlatName(namespace, name)
 }
@@ -333,7 +370,7 @@ func parseResponses(body []byte) (*Request, error) {
 		}
 		switch t.Type {
 		case "function":
-			offer(i, Tool{Name: t.Name, Description: t.Description, Schema: t.Parameters, Strict: t.Strict != nil && *t.Strict}, nsTool{})
+			offer(i, Tool{Name: t.Name, Description: t.Description, Schema: unsealed(t.Parameters), Strict: t.Strict != nil && *t.Strict}, nsTool{})
 		case "custom":
 			offer(i, Tool{Name: t.Name, Description: customDescription(t), Schema: customSchema}, nsTool{Name: t.Name, Custom: true})
 		case "namespace":
@@ -343,7 +380,7 @@ func parseResponses(body []byte) (*Request, error) {
 				flat := flatName(t.Name, nt.Name)
 				switch nt.Type {
 				case "function":
-					offer(i, Tool{Name: flat, Description: nt.Description, Schema: nt.Parameters, Strict: nt.Strict != nil && *nt.Strict}, nsTool{Namespace: t.Name, Name: nt.Name})
+					offer(i, Tool{Name: flat, Description: nt.Description, Schema: unsealed(nt.Parameters), Strict: nt.Strict != nil && *nt.Strict}, nsTool{Namespace: t.Name, Name: nt.Name})
 				case "custom":
 					offer(i, Tool{Name: flat, Description: customDescription(nt), Schema: customSchema}, nsTool{Namespace: t.Name, Name: nt.Name, Custom: true})
 				}
@@ -704,37 +741,81 @@ type rUsage struct {
 	TotalTokens        int `json:"total_tokens"`
 	InputTokensDetails struct {
 		CachedTokens int `json:"cached_tokens"`
+		// what was written to the cache, which Codex reads too (#589)
+		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 	OutputTokensDetails struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 	} `json:"output_tokens_details"`
 }
 
+// usage: input_tokens is the whole prompt, what was read from the cache and
+// what was written to it among it.
 func (u rUsage) usage() Usage {
-	return Usage{Input: u.InputTokens - u.InputTokensDetails.CachedTokens, Output: u.OutputTokens,
-		CacheRead: u.InputTokensDetails.CachedTokens, Reasoning: u.OutputTokensDetails.ReasoningTokens}
+	d := u.InputTokensDetails
+	return Usage{Input: max(u.InputTokens-d.CachedTokens-d.CacheWriteTokens, 0), Output: u.OutputTokens,
+		CacheRead: d.CachedTokens, CacheWrite: d.CacheWriteTokens, Reasoning: u.OutputTokensDetails.ReasoningTokens}
 }
 
 func (u Usage) responses() map[string]any {
 	in := u.prompt()
 	return map[string]any{"input_tokens": in, "output_tokens": u.Output, "total_tokens": in + u.Output,
-		"input_tokens_details":  map[string]any{"cached_tokens": u.CacheRead},
+		"input_tokens_details":  map[string]any{"cached_tokens": u.CacheRead, "cache_write_tokens": u.CacheWrite},
 		"output_tokens_details": map[string]any{"reasoning_tokens": u.Reasoning}}
 }
 
 // responsesDecoder turns a Responses stream into events.
+//
+// A function call's arguments are given once the call is done, not as
+// their deltas come: the deltas can leave out what the finished call holds
+// (#613: Codex's spawn_agent came back with arguments {} where the request
+// was translated, though the upstream's finished call had them), and what
+// was sent of a call's arguments can't be taken back.
 type responsesDecoder struct {
-	started  bool
-	argsSeen bool // arguments of the open function call arrived as deltas
-	called   bool // a function call was streamed
+	started bool
+	called  bool            // a function call was streamed
+	calling bool            // a function call is open
+	args    strings.Builder // the open call's argument deltas
+	full    string          // the open call's arguments as its done events give them
+}
+
+// endCall gives the open call's arguments: the deltas, or what its done
+// events give where that holds more.
+func (d *responsesDecoder) endCall(emit func(Event)) {
+	if !d.calling {
+		return
+	}
+	d.calling = false
+	args := pickArgs(d.args.String(), d.full)
+	d.args.Reset()
+	d.full = ""
+	if args != "" {
+		emit(Event{Kind: KToolArgs, Text: args})
+	}
+}
+
+// pickArgs is the fuller of a call's arguments as streamed and as its done
+// events give them, JSON first.
+func pickArgs(streamed, done string) string {
+	s, f := strings.TrimSpace(streamed), strings.TrimSpace(done)
+	switch sv, fv := json.Valid([]byte(s)), json.Valid([]byte(f)); {
+	case fv && (!sv || len(f) > len(s)):
+		return done
+	case sv || f == "":
+		return streamed
+	default:
+		return done
+	}
 }
 
 func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 	var ev struct {
-		Type     string `json:"type"`
-		Delta    string `json:"delta"`
-		Item     rItem  `json:"item"`
-		Response struct {
+		Type  string `json:"type"`
+		Delta string `json:"delta"`
+		Item  rItem  `json:"item"`
+		// function_call_arguments.done's
+		Arguments string `json:"arguments"`
+		Response  struct {
 			ID                string `json:"id"`
 			Model             string `json:"model"`
 			Status            string `json:"status"`
@@ -762,20 +843,33 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 			emit(Event{Kind: KStart, MsgID: ev.Response.ID, Model: ev.Response.Model})
 		}
 	case "response.output_item.added":
+		d.endCall(emit)
 		if ev.Item.Type == "function_call" {
-			d.argsSeen, d.called = false, true
+			d.called, d.calling = true, true
 			emit(Event{Kind: KToolStart, ID: ev.Item.CallID, Name: ev.Item.Name})
 		}
 	case "response.output_text.delta":
+		d.endCall(emit)
 		emit(Event{Kind: KText, Text: ev.Delta})
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		d.endCall(emit)
 		emit(Event{Kind: KThink, Text: ev.Delta})
 	case "response.function_call_arguments.delta":
-		d.argsSeen = true
-		emit(Event{Kind: KToolArgs, Text: ev.Delta})
+		if d.calling {
+			d.args.WriteString(ev.Delta)
+		} else {
+			emit(Event{Kind: KToolArgs, Text: ev.Delta})
+		}
+	case "response.function_call_arguments.done":
+		if d.calling && ev.Arguments != "" {
+			d.full = ev.Arguments
+		}
 	case "response.output_item.done":
-		if ev.Item.Type == "function_call" && !d.argsSeen && ev.Item.Arguments != "" {
-			emit(Event{Kind: KToolArgs, Text: string(ev.Item.Arguments)})
+		if ev.Item.Type == "function_call" {
+			if ev.Item.Arguments != "" {
+				d.full = string(ev.Item.Arguments)
+			}
+			d.endCall(emit)
 		}
 		if a := ev.Item.Action; ev.Item.Type == "web_search_call" && a != nil && a.Query != "" {
 			var hits []Hit
@@ -787,6 +881,7 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 			emit(Event{Kind: KSearch, Text: a.Query, Hits: hits})
 		}
 	case "response.completed", "response.incomplete", "response.failed":
+		d.endCall(emit)
 		if ev.Response.Error != nil {
 			emit(Event{Kind: KError, Text: ev.Response.Error.Message, Code: refusedCode(data)})
 			return nil
@@ -810,6 +905,7 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		emit(Event{Kind: KStop, Stop: stop})
 		emit(Event{Kind: KUsage, Usage: ev.Response.Usage.usage()})
 	case "error":
+		d.endCall(emit)
 		msg := ev.Message
 		if ev.Error != nil {
 			msg = ev.Error.Message
@@ -870,12 +966,13 @@ func callTo(item map[string]any, name string, named map[string]nsTool) map[strin
 }
 
 // itemPrefix is the prefix of a call item's id, by its type: OpenAI turns
-// away a tool_search_call whose id isn't a tsc_ one ("Invalid
-// 'input[98].id': 'fc_…'. Expected an ID that begins with 'tsc'"), and
-// Codex hands the item back to it when the conversation goes there.
+// away a tool_search_call or custom_tool_call whose id isn't its own kind
+// ("Invalid 'input[98].id': 'fc_…'. Expected an ID that begins with
+// 'tsc'", openaiItemPrefix), and Codex hands the item back to it when the
+// conversation goes there.
 func itemPrefix(item map[string]any) string {
-	if item["type"] == "tool_search_call" {
-		return "tsc_"
+	if t, _ := item["type"].(string); openaiItemPrefix[t] != "" {
+		return openaiItemPrefix[t]
 	}
 	return "fc_"
 }

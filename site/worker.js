@@ -13,9 +13,14 @@
 //   /download/windows      the Windows app (x64);  /download/windows-arm64
 //   /download/linux        the Linux app (x86-64); /download/linux-arm64
 //   /download/<file>       any file of the newest release, by name
-//   /docs, /docs/zh        the getting-started guide: /docs/start, /docs/zh/start
+//   /docs, /docs/zh, /docs/ja  the getting-started guide: /docs/start, /docs/<lang>/start
+//   /zh/, /ja/             the home page in Chinese, Japanese (i18n.js); / sends
+//                          a browser that prefers one of them there, until a
+//                          language is picked on the page (the lang cookie)
 //
 // Everything else is the static site in public/.
+
+import { LANGS } from "./i18n.js";
 
 const REPO = "yetone/magpie-releases";
 const TTL = 300; // seconds the newest release is remembered
@@ -33,7 +38,7 @@ const SHORT = {
 };
 
 // The bare docs paths open the getting-started guide.
-const DOCS = { "/docs": "/docs/start", "/docs/zh": "/docs/zh/start" };
+const DOCS = { "/docs": "/docs/start", "/docs/zh": "/docs/zh/start", "/docs/ja": "/docs/ja/start" };
 
 export default {
   async fetch(req, env, ctx) {
@@ -67,9 +72,83 @@ export default {
     }
     const guide = DOCS[url.pathname.replace(/\/+$/, "")];
     if (guide) return Response.redirect(new URL(guide, url).toString(), 302);
+    const home = url.pathname.match(/^\/([a-z]{2})(\/(index\.html)?)?$/);
+    if (home && LANGS[home[1]]) {
+      if (!home[2]) return Response.redirect(new URL(`/${home[1]}/`, url).toString(), 301);
+      // the English page, fetched afresh: its ETag would also stand for an
+      // older dictionary
+      const res = await env.ASSETS.fetch(new Request(new URL("/", url), { method: req.method }));
+      return beacon(translate(res, home[1]));
+    }
+    if (url.pathname === "/" && (req.method === "GET" || req.method === "HEAD")) {
+      const lang = preferred(req);
+      const vary = { Vary: "Accept-Language, Cookie", "Cache-Control": "no-cache" };
+      if (lang !== "en") return new Response(null, { status: 302, headers: { Location: `/${lang}/`, ...vary } });
+      const res = beacon(await env.ASSETS.fetch(req));
+      const out = new Response(res.body, res);
+      out.headers.append("Vary", "Accept-Language, Cookie");
+      return out;
+    }
     return beacon(await env.ASSETS.fetch(req));
   },
 };
+
+// preferred is the home page's language for this browser: the one picked on
+// the page (the lang cookie), else the first of its Accept-Language that the
+// site has, else English.
+export function preferred(req) {
+  const picked = (req.headers.get("Cookie") || "").match(/(?:^|;\s*)lang=([a-z]{2})/);
+  if (picked) return LANGS[picked[1]] ? picked[1] : "en";
+  const wants = (req.headers.get("Accept-Language") || "")
+    .split(",")
+    .map((p, i) => {
+      const [tag, ...rest] = p.trim().toLowerCase().split(";");
+      const q = rest.map((x) => x.trim()).find((x) => x.startsWith("q="));
+      return { lang: tag.split("-")[0], q: q ? parseFloat(q.slice(2)) || 0 : 1, i };
+    })
+    .filter((w) => w.lang && w.q > 0)
+    .sort((a, b) => b.q - a.q || a.i - b.i);
+  for (const w of wants) {
+    if (w.lang === "en") return "en";
+    if (LANGS[w.lang]) return w.lang;
+  }
+  return "en";
+}
+
+// translate puts a language's strings into the English home page: the
+// inner HTML of each data-i18n element, the attributes data-i18n-attr names,
+// <html lang>, and links to the docs and home made the language's own.
+function translate(res, lang) {
+  const { dict, html, docs } = LANGS[lang];
+  const out = new Response(res.body, res);
+  out.headers.delete("ETag");
+  const rw = new HTMLRewriter()
+    .on("html", { element: (el) => el.setAttribute("lang", html) })
+    .on("[data-i18n]", {
+      element: (el) => {
+        const v = dict[el.getAttribute("data-i18n")];
+        if (v != null) el.setInnerContent(v, { html: true });
+      },
+    })
+    .on("[data-i18n-attr]", {
+      element: (el) => {
+        for (const pair of el.getAttribute("data-i18n-attr").split(",")) {
+          const [attr, key] = pair.split(":");
+          if (dict[key] != null) el.setAttribute(attr, dict[key]);
+        }
+      },
+    })
+    .on("a.brand", { element: (el) => el.setAttribute("href", `/${lang}/`) });
+  // the docs in the language where there are any, else the English ones
+  if (docs)
+    rw.on('a[href^="/docs/"]', {
+      element: (el) => {
+        const href = el.getAttribute("href");
+        if (!href.startsWith(`/docs/${lang}/`)) el.setAttribute("href", `/docs/${lang}/` + href.slice(6));
+      },
+    });
+  return rw.transform(out);
+}
 
 // beacon adds Cloudflare Web Analytics to a page. The dashboard's automatic
 // injection skips whatever a worker returns, and every page passes through

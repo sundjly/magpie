@@ -83,7 +83,8 @@ type Account struct {
 	// reach, factory.go; another model for Copilot's Auto, copilot_refused.go).
 	retry func(ctx context.Context, model string, status int, body []byte) bool
 	// unusable is set on a Copilot account: whether a model its list offers
-	// is one the account was refused (copilot_refused.go).
+	// is one the account was refused (copilot_refused.go); and on a ZCode
+	// account on the Start Plan: whether it is one only the Coding Plan has.
 	unusable func(model string) bool
 	// explain adds what the user can do about a refusal the account's
 	// backend answered, "" when there is nothing to add (factory.go).
@@ -106,8 +107,13 @@ type Account struct {
 // APIs lists the APIs model is served on, as the provider's last model
 // list said: Copilot serves its GPT models on Responses alone and its
 // Claude models on Chat and Anthropic's. nil is not known, and every API
-// the provider speaks may be tried.
+// the provider speaks may be tried. One the user set for the model
+// (SetModelAPI) is the only one.
 func (p Provider) APIs(model string) []Protocol {
+	// the one the user said it is asked on, whatever the list says
+	if proto, ok := p.ModelAPI(model); ok {
+		return []Protocol{proto}
+	}
 	if p.IsPlugin() {
 		return p.pluginAPIs(model)
 	}

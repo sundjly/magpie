@@ -86,9 +86,10 @@ const usage = `magpie — one place to pick every agent's model
   magpie serve                    run the gateway alone (the app runs it too)
   magpie healthcheck              exit 0 when the gateway answers (a container's HEALTHCHECK)
   magpie gateway-key list|add <name>|rotate <id>|remove <id>   manage the keys clients use to call a shared gateway
+  magpie gateway-key limit <id> [off|day|week|month --tokens N --cost USD --cache-reads]   a key's own limit, and what it used
   magpie mcp image                the image and video generation MCP server an agent is given from the library (stdio)
-  magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
-  magpie usage --csv [today|7d|30d|all]   every request as CSV: the model asked for, sent and served, tokens, cost, time, status
+  magpie usage [today|7d|30d|all] tokens and cost per agent, model and subscription account (30d)
+  magpie usage --csv [--account <name>] [today|7d|30d|all]   every request as CSV (or one account's): the model asked for, sent and served, tokens, cost, time, status, account
   magpie sessions [--model <m>] [--folder <f>] [--json]   the latest Claude Code, Codex, OpenCode and Pi sessions, with what each cost
   magpie sessions --days N|today|all [--model <m>] [--folder <f>] [--json]
                                   what every session spent, day by day, with the top models and folders (7 days)
@@ -98,7 +99,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie update [check]           install the newest release (check: only say if there is one)
   magpie update auto [on|off] [30m|1h|6h|24h]  whether the app looks for updates by itself, and how often (6h)
 
-agents: claude (cc), codex, gemini, opencode (oc), mimocode, pi, goose, cursor, copilot, crush
+agents: claude (cc), codex, gemini, opencode (oc), mimocode, pi, goose, cursor, zed, copilot, crush
 `
 
 var (

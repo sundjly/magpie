@@ -108,7 +108,7 @@ func init() {
 	// names, as the built-in does: the homes stay where they are.
 	movers["grok"] = &mover{
 		pkg:    "@magpie-community/opencode-grok-auth",
-		min:    "0.1.5", // a failure's status and its sign-in mark as the built-in's; grok-4.7's reasoning levels; a token Grok refuses early reads as expired
+		min:    "0.1.6", // a failure's status and its sign-in mark as the built-in's; grok-4.7's reasoning levels; a token Grok refuses early reads as expired; the sign-in renewed ahead of time through auth.refresh
 		agents: []string{"grok"},
 		out: func() ([]Moving, error) {
 			var out []Moving
@@ -221,7 +221,7 @@ func init() {
 	// the plugin reads cursor-agent's token as the built-in does.
 	movers["cursor"] = &mover{
 		pkg:    "@magpie-community/opencode-cursor-auth",
-		min:    "0.1.5", // a failure's status and its sign-in mark as the built-in's
+		min:    "0.1.8", // a failure's status and its sign-in mark as the built-in's; Max Mode models retried in Max Mode; glm-5.3 listed; catalog entries written as CallDynamicTool calls, an empty turn retried (plugins #11)
 		agents: []string{"cursor"},
 		out: func() ([]Moving, error) {
 			if CursorExecutable() == "" || cursorSignedOut() {

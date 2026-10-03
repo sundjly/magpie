@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/redact"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -90,7 +92,7 @@ func videomaker() (string, bool) {
 // can.
 func AutoVideomaker() string {
 	for _, p := range provider.All() {
-		if !p.On() || p.Decides() {
+		if !p.On() || p.DecideOnly() {
 			continue
 		}
 		if ms := Videomakers(p); len(ms) > 0 {
@@ -108,7 +110,7 @@ func bareVideomaker(name string) (provider.Provider, string, bool) {
 		return provider.Provider{}, "", false
 	}
 	for _, p := range provider.All() {
-		if !p.On() || p.Decides() {
+		if !p.On() || p.DecideOnly() {
 			continue
 		}
 		for _, m := range Videomakers(p) {
@@ -161,7 +163,7 @@ func readFilming(r *http.Request) (filming, error) {
 			}
 		}
 	} else {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return f, err
 		}
@@ -473,6 +475,16 @@ func (s *Server) videoStatus(ctx context.Context, p provider.Provider, vendorID 
 
 // videosCreate starts a video and answers with its id.
 func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
+	inputBody, admitted := s.requestBody(w, r, provider.Chat)
+	if !admitted {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(inputBody))
+	defer func() {
+		if r.MultipartForm != nil {
+			r.MultipartForm.RemoveAll()
+		}
+	}()
 	start := time.Now()
 	f, err := readFilming(r)
 	if err != nil {
@@ -514,6 +526,9 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		fail(400, fmt.Sprintf("%s/%s can't make videos: magpie makes videos with a Grok subscription's grok-imagine-video", p.ID, model))
 		return
 	}
+	var unmask func()
+	w, f.Prompt, unmask = redactedPrompt(w, f.Prompt)
+	defer unmask()
 	// another magpie is asked at its videos API, which says itself what
 	// it can't make
 	at, field := strings.TrimRight(p.Base(provider.Responses), "/")+"/videos/generations", "request_id"
@@ -537,7 +552,7 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 			call.Status = code
 		}
 	}
-	appendUsage(r, usage.Record{Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model,
+	appendUsage(r, usage.Record{Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model, ProviderAccount: accountOf(p),
 		Millis: call.Millis, Status: call.Status, Session: sessionOf(r.Header)})
 	if err != nil {
 		call.Error = err.Error()
@@ -556,6 +571,10 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 
 // videosGet answers how a video is going.
 func (s *Server) videosGet(w http.ResponseWriter, r *http.Request) {
+	// A later poll can echo the prompt masked when the video was created.
+	rw := redact.NewWriter(w)
+	defer rw.Finish()
+	w = rw
 	id := r.PathValue("id")
 	p, vendorID, started, err := videoMaker(id)
 	if err != nil {

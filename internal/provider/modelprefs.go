@@ -360,19 +360,87 @@ func setModelImage(ref string, images *bool) (bool, error) {
 	return true, nil
 }
 
+// SetModelAPI says which one of a provider's APIs a model is asked on —
+// chat, responses or anthropic — for a relay whose one key serves some of
+// its models on one and others on another (01huadalang on Discord: 有的供应商
+// 一个 api 里有很多模型但是不同协议); "" leaves it to the vendor's list and
+// the URLs the provider has, as before. It must be an API the provider has
+// a URL for, and a provider of a key's: a sign-in's models are asked the
+// way its agent asks them.
+func SetModelAPI(ref, api string) error {
+	return touchedIf(setModelAPI(ref, api))
+}
+
+func setModelAPI(ref, api string) (bool, error) {
+	p, model, err := splitRef(ref)
+	if err != nil {
+		return false, err
+	}
+	proto := Protocol(strings.TrimSpace(api))
+	if proto != "" {
+		if !slices.Contains(Protocols, proto) {
+			return false, fmt.Errorf("a model's API is chat, responses or anthropic, not %q", api)
+		}
+		if p.Account != nil {
+			return false, fmt.Errorf("%s's models are asked the way its sign-in is; their API can't be set", p.ID)
+		}
+		if p.Base(proto) == "" {
+			return false, fmt.Errorf("%s has no %s URL to ask %s on: add it under More endpoints first", p.ID, proto, model)
+		}
+		if !p.serves(model) {
+			return false, fmt.Errorf("%s has no model %s (magpie provider %s lists them)", p.ID, model, p.ID)
+		}
+	}
+	s := settings.Load()
+	key := p.ID + "/" + model
+	if s.ModelAPIs[key] == string(proto) {
+		return false, nil
+	}
+	if proto == "" {
+		delete(s.ModelAPIs, key)
+	} else {
+		if s.ModelAPIs == nil {
+			s.ModelAPIs = map[string]string{}
+		}
+		s.ModelAPIs[key] = string(proto)
+	}
+	if err := settings.Save(s); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ModelAPI is the API the user said p's model is asked on, when p has a
+// URL for it still.
+func (p Provider) ModelAPI(model string) (Protocol, bool) {
+	if p.Account != nil || len(p.Speaks()) < 2 {
+		return "", false
+	}
+	proto := Protocol(settings.Load().ModelAPIs[p.ID+"/"+model])
+	if proto == "" || !slices.Contains(Protocols, proto) || p.Base(proto) == "" {
+		return "", false
+	}
+	return proto, true
+}
+
 // ModelPref is what the provider editor's Names & levels changed of one
 // model, sent with its Save: each part left nil is as it was. Name "" gives
-// the model its own name back, Efforts [] all its levels, and OwnImages the
-// vendor's answer for whether it sees images.
+// the model its own name back, Efforts [] all its levels, OwnImages the
+// vendor's answer for whether it sees images, API "" every API the
+// provider has for it, and Same "" its own id to merge it with other
+// vendors' by (see SetModelSame).
 type ModelPref struct {
 	Name      *string   `json:"name,omitempty"`
 	Efforts   *[]string `json:"efforts,omitempty"`
 	Images    *bool     `json:"images,omitempty"`
 	OwnImages bool      `json:"ownImages,omitempty"`
+	API       *string   `json:"api,omitempty"`
+	Same      *string   `json:"same,omitempty"`
 }
 
 // SetModelPrefs makes the changes to a provider's models, by model id, as
-// SetModelName, SetModelEfforts and SetModelImage do, and tells the agents
+// SetModelName, SetModelEfforts, SetModelImage, SetModelAPI and
+// SetModelSame do, and tells the agents
 // once, after them all, rather than once a change. It stops at the first
 // that fails, telling the agents of those made before it.
 func SetModelPrefs(pid string, prefs map[string]ModelPref) error {
@@ -403,10 +471,69 @@ func SetModelPrefs(pid string, prefs map[string]ModelPref) error {
 					return err
 				}
 			}
+			if m.API != nil {
+				if err := set(setModelAPI(ref, *m.API)); err != nil {
+					return err
+				}
+			}
+			if m.Same != nil {
+				if err := set(setModelSame(ref, *m.Same)); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}()
 	return touchedIf(changed, err)
+}
+
+// SetModelSame says which model a provider's model, spelt "provider/model",
+// is the same as, for one a vendor names its own way (Volcengine Ark's
+// dated ids, kyzhouxu on #583): the routing groups magpie finds merge it
+// with that model from every other provider (autoGroups). The name is a
+// model's id as any vendor spells it ("deepseek-v4.1-flash", or with a
+// vendor's prefix); "" — or a name that is the model's own however spelt —
+// merges it by its own id again. The agents are told, the groups they are
+// shown having changed.
+func SetModelSame(ref, same string) error {
+	return touchedIf(setModelSame(ref, same))
+}
+
+func setModelSame(ref, same string) (bool, error) {
+	p, model, err := splitRef(ref)
+	if err != nil {
+		return false, err
+	}
+	same = strings.TrimSpace(same)
+	if len([]rune(same)) > 80 {
+		return false, errors.New("the model a model is the same as is at most 80 characters")
+	}
+	if same != "" && Slug(sameModel(same)) == "" {
+		return false, fmt.Errorf("%q names no model: give a model's id, as deepseek-v4.1-flash", same)
+	}
+	if sameModel(same) == sameModel(model) {
+		same = "" // its own id: merged by it already
+	}
+	if same != "" && !p.serves(model) {
+		return false, fmt.Errorf("%s has no model %s (magpie provider %s lists them)", p.ID, model, p.ID)
+	}
+	s := settings.Load()
+	key := p.ID + "/" + model
+	if s.ModelSameAs[key] == same {
+		return false, nil
+	}
+	if same == "" {
+		delete(s.ModelSameAs, key)
+	} else {
+		if s.ModelSameAs == nil {
+			s.ModelSameAs = map[string]string{}
+		}
+		s.ModelSameAs[key] = same
+	}
+	if err := settings.Save(s); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ImageOverride is the user's answer for whether pid's model takes images.
@@ -544,6 +671,21 @@ func SetSuffixMode(mode string) error {
 		return nil
 	}
 	s.PlainNames, s.PlainOwnNames = plain, own
+	if err := settings.Save(s); err != nil {
+		return err
+	}
+	catalog.Touched()
+	return nil
+}
+
+// SetCodexAgentsV1 turns settings.CodexAgentsV1 on or off, and has Codex's
+// lists written and asked for again.
+func SetCodexAgentsV1(on bool) error {
+	s := settings.Load()
+	if s.CodexAgentsV1 == on {
+		return nil
+	}
+	s.CodexAgentsV1 = on
 	if err := settings.Save(s); err != nil {
 		return err
 	}
