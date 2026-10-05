@@ -58,7 +58,16 @@ func agentOf(r *http.Request) string {
 	if isClaudeDesktop(r) {
 		return "claude-desktop"
 	}
-	return usage.AgentOf(r.Header.Get("User-Agent"))
+	ua := r.Header.Get("User-Agent")
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(ua)), "cursor") {
+		// cursor-agent talks to Cursor's backend alone, never to a
+		// gateway: a Cursor User-Agent here is Cursor Private Inference's
+		// ("Cursor-CLI/…") sent with a key other than its own, the one
+		// typed in its Open configuration or a model's settings ("magpie"),
+		// and it is shown its models as with its key (mamba on Discord)
+		return "cursor-local"
+	}
+	return usage.AgentOf(ua)
 }
 
 // StandIn is the model an agent is set to use in place of one it named that
@@ -686,8 +695,16 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 		data = desktopModels(shown)
 	} else {
 		labels := provider.Labels(shown)
+		// for another magpie: how it searches the web for each model
+		magpie := r.Header.Get(provider.DrawersHeader) != ""
+		searches := magpie && canSearch()
 		for i, e := range shown {
 			m := modelObject(e)
+			if magpie {
+				if how := webSearchOf(e, searches); how != "" {
+					m["web_search"] = how
+				}
+			}
 			// for another magpie: its name as the agents' lists here call
 			// it, with its provider's after it unless the user wants it
 			// plain, so two providers' models of one name are told apart
@@ -1761,6 +1778,43 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 			continue
 		}
+		if !last && hw.failed() && hw.turnedAway {
+			// another member may answer what this account was turned away
+			// from, and this one isn't set aside: Antigravity refused the
+			// request, whatever quota the account has left, so nothing is
+			// wrong with it and no usage is asked again (#666). Its own
+			// mates are asked last, not first: they carry the same system
+			// prompt, so each is turned away just the same before the group
+			// reaches a member that answers
+			try.Fail = failRefused
+			s.trace.update(tr, func(t *Route) {
+				t.Tries[len(t.Tries)-1] = try
+				if call.To != "" {
+					t.Usage = append(t.Usage, routeUsage(call.Provider, c.model, call.Usage)...)
+				}
+			})
+			skipped = append(skipped, c.label()+": "+call.Error)
+			matesLast(cands[i+1:], c)
+			if call.To != "" {
+				rec := usage.Record{RouteID: tr.ID, Time: began, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: c.model,
+					ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: providerAccount,
+					Requested: call.Model, Served: call.Usage.Served,
+					Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
+					CacheWrite: call.Usage.CacheWrite, Reasoning: call.Usage.Reasoning, Effort: sent, Millis: time.Since(began).Milliseconds(), Status: call.Status,
+					TTFT: try.TTFT, FirstText: try.FirstText, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
+					RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To), Archive: call.archiveName()}
+				failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
+				// what this account answered is its refusal, the reply
+				// captured so far being no one's yet
+				refusal := &Call{RequestBody: call.RequestBody, RequestTruncated: call.RequestTruncated, ResponseBody: string(hw.errBody())}
+				if call.otelIn != nil {
+					refusal.otelIn, refusal.otelOut = call.otelIn, hw.errBody()
+				}
+				withBodies(&rec, refusal)
+				appendUsage(r, rec)
+			}
+			continue
+		}
 		if c.p.Account != nil && !hw.passing && hw.code() >= 400 && hw.code() < 500 && modelTakes(c, sent) {
 			if takes, ok := effortRefused(hw.errBody(), sent); ok {
 				// the account's plan doesn't take the level, which the
@@ -2118,7 +2172,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	relay := slices.Contains(s.usable(p, model), from) && (p.Account == nil || !p.Account.Stream || streamOf(body))
 	// a web search offered is done by the provider, or by magpie for it,
 	// which a relayed request can't
-	if relay && searchAsked(from, body) && (from == provider.Chat || !searchesItself(p, from)) {
+	if relay && searchAsked(from, body) && (from == provider.Chat && !p.IsRemoteMagpie() || !searchesModel(p, from, model)) {
 		relay = false
 	}
 	// Zen's free models are asked as OpenCode asks them (zenfree.go)
@@ -2190,6 +2244,29 @@ func markOpenRouterSharedPool(w http.ResponseWriter) {
 	if h, ok := w.(*holdWriter); ok {
 		h.sharedPool = true
 	}
+}
+
+// markAntigravityTurnsAway keeps in the held attempt that the account was
+// asked with the system prompt Antigravity turns away, so a failure on it
+// isn't held against the account.
+func markAntigravityTurnsAway(w http.ResponseWriter) {
+	if h, ok := w.(*holdWriter); ok {
+		h.turnedAway = true
+	}
+}
+
+// markAntigravityRefused marks the attempt when what the account said is the
+// refusal Antigravity answers such a system prompt with. said is what the
+// failure said once the status is gone: the 429's body arrives with its 429,
+// and the reply's own error event arrives with 200 from translate and only
+// its message, the Code Assist decoder keeping neither its code nor its
+// status. An error event of any other kind says something else and marks
+// nothing.
+func markAntigravityRefused(w http.ResponseWriter, p provider.Provider, system, said string) {
+	if said == "" || !antigravityRefuses(said) || accountAgent(p) != "antigravity" || !antigravityTurnsAway(system) {
+		return
+	}
+	markAntigravityTurnsAway(w)
 }
 
 // forward sends a request to the provider. On Anthropic's messages, a
@@ -2329,6 +2406,7 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	}
 	if p.IsRemoteMagpie() {
 		passOnCaller(ctx, req)
+		markSearching(ctx, req)
 	}
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
@@ -2860,6 +2938,10 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 		if to == provider.Chat && (p.IsBedrock() || p.IsAzure()) {
 			body = asCompletionTokens(body)
 		}
+		if to == provider.Chat && req.WebSearch && p.IsRemoteMagpie() {
+			// the other magpie searches for it (search_remote.go)
+			body = withFields(body, map[string]any{"web_search_options": map[string]any{}})
+		}
 		if to == provider.CodeAssist && p.Account != nil {
 			// the envelope is named in there, where the id it carries is
 			// known: on Antigravity that is the variant the effort picked,
@@ -3280,6 +3362,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		msg := p.Explain(p.Name+": "+provider.APIError(b, res.Status), res.StatusCode, b)
 		if res.StatusCode == http.StatusTooManyRequests && accountAgent(p) == "antigravity" && antigravityTurnsAway(request.System) {
 			msg += " — " + antigravityTurnedAwayHint
+			markAntigravityTurnsAway(w)
 		}
 		if p.Preset == "openrouter" && openRouterSharedPool(b) {
 			markOpenRouterSharedPool(w)
@@ -3322,6 +3405,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		return writeError(w, from, 502, msg), msg
 	}
 	if col.err != "" && !saidAnything(col.res.Parts) {
+		markAntigravityRefused(w, p, request.System, col.err)
 		return writeError(w, from, 502, p.Name+": "+col.err), col.err
 	}
 	if empty && !saidAnything(col.res.Parts) && answersNothing(col.res.Stop) {

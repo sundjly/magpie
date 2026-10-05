@@ -299,6 +299,9 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				failed += " — " + antigravityTurnedAwayHint
 			}
 			if !cont.resume {
+				if res.StatusCode == http.StatusTooManyRequests && accountAgent(p) == "antigravity" && antigravityTurnsAway(request.System) {
+					markAntigravityTurnsAway(w)
+				}
 				if p.Preset == "openrouter" && openRouterSharedPool(b) {
 					markOpenRouterSharedPool(w)
 				}
@@ -384,6 +387,10 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		// the upstream died mid-reply: say so in the client's own
 		// protocol instead of finishing as if all went well
 		failed = cutMidReply(p.Name, serr)
+	}
+	if failed != "" {
+		// the same refusal as the 429's, said inside the reply
+		markAntigravityRefused(w, p, request.System, failed)
 	}
 	if !errSent {
 		enc.event(Event{Kind: KError, Text: failed, Code: failedCode})

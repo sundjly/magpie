@@ -2936,7 +2936,7 @@ async function renderUpdateBadge() {
       delete b.dataset.pulling;
       return restart();
     }
-    label.textContent = u.total ? t("Downloading… {p}%", { p: Math.floor((u.done / u.total) * 100) }) : t("Downloading…");
+    label.textContent = downloadingText(u);
     setTimeout(renderUpdateBadge, 700);
     return;
   }
@@ -2983,6 +2983,15 @@ async function renderUpdateBadge() {
     if (web && u.url) return window.open(u.url, "_blank", "noopener");
     api("update/install", {}).catch(() => {});
   };
+}
+
+// downloadingText is the pill's word while an update downloads: its
+// percent once there is one. The answer leaves done out while it is 0, and
+// total too while the size isn't known yet, so the first reads have none —
+// they said "NaN%" (inaction on Discord).
+function downloadingText(u) {
+  const p = u?.total > 0 ? Math.floor(((u.done || 0) / u.total) * 100) : NaN;
+  return Number.isFinite(p) ? t("Downloading… {p}%", { p: Math.min(100, Math.max(0, p)) }) : t("Downloading…");
 }
 
 // updatePillOff is whether the user keeps the Update pill away for v.
@@ -7304,9 +7313,9 @@ function drawEditor(p, presetID) {
     inner.append(...field(t("Catalog"), cat, t("Display names and reasoning levels for the models; for a gateway that serves several vendors, list them all, first match wins")));
     const bal = input(draft.balanceURL, "https://…/api/usage/token", "url");
     bal.classList.add("bal-url");
-    bal.oninput = () => { draft.balanceURL = bal.value; };
+    bal.oninput = () => { draft.balanceURL = bal.value; balPath.placeholder = balanceFieldOf(bal.value); };
     inner.append(...field(t("Balance URL"), bal, t("Where the vendor tells what is left on the key, asked with it like a chat request; {key} in it or in a header is each key's own, for a vendor that takes the key in the URL (…?key={key}); shown on the Usage page")));
-    const balPath = input(draft.balancePath, "data.balance");
+    const balPath = input(draft.balancePath, balanceFieldOf(draft.balanceURL));
     balPath.classList.add("bal-path");
     balPath.oninput = () => { draft.balancePath = balPath.value; };
     // asked as the form has it, before a Save: what the Usage page would show
@@ -9993,6 +10002,18 @@ function quotaError(err) {
   if (/access token is invalid or expired|didn't take the access token/.test(err)) return t("AiHubMix didn't take the access token — paste a new one in the provider's settings");
   if (/this key has no limit/.test(err)) return t("This key has no limit — add the account's access token in the provider's settings to see its balance");
   return balanceError(err) || t("Allowance unavailable");
+}
+
+// the Balance field magpie reads, left empty, from a query whose reply it
+// knows (balancePathOf in balance.go), shown as the field's placeholder
+function balanceFieldOf(raw) {
+  let path = "";
+  try { path = new URL((raw || "").trim()).pathname.replace(/\/+$/, ""); } catch { return "data.balance"; }
+  if (path === "/api/user/self") return "$data.quota / 500000";
+  if (path === "/api/usage/token") return "$data.total_available / 500000";
+  if (path === "/api/v1/user/profile") return "$data.balance";
+  if (path.endsWith("/dashboard/billing/credit_grants")) return "$total_available";
+  return "data.balance";
 }
 
 // balanceError: a balance that couldn't be read, said plainly where magpie
@@ -13072,7 +13093,9 @@ function renderLedgerLoading() {
 }
 
 const ledNum = (n) => (n || 0).toLocaleString(intlLang() || "en");
-const ledTook = (ms = 0) => ms < 1000 ? t("{n} ms", { n: ms }) : t("{n} s", { n: (ms / 1000).toFixed(ms < 10e3 ? 1 : 0) });
+// an average first token is a fraction of a millisecond: whole ones under a
+// second, rounded first so 999.6 reads 1.0 s rather than 1000 ms
+const ledTook = (ms = 0) => (ms = Math.round(ms) || 0) < 1000 ? t("{n} ms", { n: ms }) : t("{n} s", { n: (ms / 1000).toFixed(ms < 10e3 ? 1 : 0) });
 function ledTime(when) {
   const d = new Date(when), now = new Date();
   const opts = { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false };
@@ -17340,6 +17363,12 @@ function hold(h) {
     // button held, and room made for the button slid the chip up under the
     // tabs, out of sight
     if (want > max && h.top) want = max;
+    // room is only kept while some of the view stays in sight: a redraw can take
+    // away the whole of what the reader was looking at (a group's editor closed
+    // on its Save, the list it had in it), and scrolled to `want` not one row of
+    // the view would be in sight, only the room — a blank page. The browser's own
+    // clamp after the content shrank stands instead.
+    if (want > max && contentEnd(v) <= want) want = max;
     if (want > max) setRoom(v, want + v.clientHeight - contentEnd(v));
     v.scrollTop = want;
   }

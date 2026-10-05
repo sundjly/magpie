@@ -431,6 +431,12 @@ with the quota as its field, the New-Api-User header is asked for until it
 is typed, Check balance asks as the form has it and says the fix plainly,
 and the Usage page's card does too.
 
+`balance-field-default.test.cjs` leaves a custom provider's Balance field
+empty (#881): its placeholder is the field magpie reads from a Balance URL
+whose reply it knows (new-api's `/api/usage/token` and `/api/user/self`, a
+sub2api panel's `/api/v1/user/profile`, OpenAI's `credit_grants`), following
+the URL as it is typed; any other URL keeps the example.
+
 `cli-update.test.cjs` draws the agents' CLI versions on the Agents page
 (#202) from a faked API: the version after each name, "Update to x.y.z" only
 where magpie knows how the CLI was installed, the rows' height kept, an
@@ -603,6 +609,12 @@ that version, through a reload, until a newer one is out; a right-click does
 the same. Settings → Update button says which version it is hidden for, with
 Show again, and turns it off for good; the version row still offers the
 restart. No click moves the page. Panel and window, English and Chinese.
+
+`update-download-percent.test.cjs` checks the Update pill while a failed
+update downloads again (inaction on Discord): with the size known and
+nothing in yet it says 0%, with no size "Downloading…", then the percent —
+never NaN, which it said while the answer left `done` out. The click doesn't
+move the page. English and Chinese.
 
 `update-auto.test.cjs` checks Settings → Automatic updates (#472): on, every
 6 h, with nothing set; Check every saves 30 min, 1 h, 6 h or 24 h; Off is
