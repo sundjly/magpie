@@ -239,6 +239,7 @@ function renderAgentsLoading() {
 let agentArranging = false, agentRenderPending = false;
 function renderAgents() {
   if (agentArranging) { agentRenderPending = true; return; }
+  if (unhideCleared()) return; // it renders again with the hiding dropped
   const page = $("#view-agents");
   page.classList.remove("loading");
   page.removeAttribute("aria-busy");
@@ -1748,7 +1749,36 @@ function importButton(a) {
   };
   return b;
 }
-const isHidden = (a) => (state.settings?.agentsHidden || []).includes(a.id);
+// unhid: the agents whose hiding unhideCleared dropped here. A state answered
+// while that was being saved (a pick's, which is read once the agent's files
+// are written) can still name them hidden; they stay shown unless hidden by
+// hand again.
+const unhid = new Set();
+const hiddenIds = () => (state.settings?.agentsHidden || []).filter((id) => !unhid.has(id));
+const isHidden = (a) => hiddenIds().includes(a.id);
+
+// unhideCleared: a hidden agent whose settings change so that nothing is set
+// on it any more goes under Not set up, its hiding dropped (Hu9956, #842):
+// put back to its defaults it kept Hidden and its Show until the switch was
+// turned on and off. One hidden while nothing was set on it stays hidden
+// until something on it changes. True when the arrangement is saved, which
+// renders the list again.
+const agentSeen = new Map(); // each agent's settings when last rendered
+const agentSig = (a) => JSON.stringify([!!a.wired, !!a.added, !!a.drift, a.fields.filter((f) => !tweak(f)).map((f) => [f.key, f.value || ""])]);
+function unhideCleared() {
+  const hidden = hiddenIds();
+  const cleared = [];
+  for (const a of state.agents || []) {
+    const was = agentSeen.get(a.id), now = agentSig(a);
+    agentSeen.set(a.id, now);
+    if (was !== undefined && was !== now && hidden.includes(a.id) && !agentUsed(a)) cleared.push(a);
+  }
+  if (!cleared.length) return false;
+  for (const a of cleared) unhid.add(a.id);
+  saveArrangement(state.settings?.agentOrder || [], hiddenIds(), []);
+  status(t("{agent} has nothing set on it now · it is under Not set up, no longer hidden", { agent: cleared.map((a) => a.name).join(", ") }), "ok", 4000);
+  return true;
+}
 
 // arrangeAgents: the rows in view, in order, and the folded rest. Folded is
 // what was hidden by hand, and what nothing is set on — noise in a picker —
@@ -1756,7 +1786,7 @@ const isHidden = (a) => (state.settings?.agentsHidden || []).includes(a.id);
 // otherwise).
 function arrangeAgents() {
   const s = state.settings || {};
-  const order = s.agentOrder || [], hidden = new Set(s.agentsHidden || []);
+  const order = s.agentOrder || [], hidden = new Set(hiddenIds());
   const rank = (a) => { const i = order.indexOf(a.id); return i < 0 ? order.length : i; };
   const all = state.agents.map((a, i) => [a, i]).sort(([x, i], [y, j]) => rank(x) - rank(y) || i - j).map(([a]) => a);
   // with 「接入」 there to use, folding starts once one is on magpie, not for a
@@ -1793,14 +1823,14 @@ function moveAgent(id, to) {
   if (from < 0 || to < 0 || to >= ids.length || to === from) return;
   ids.splice(to, 0, ...ids.splice(from, 1));
   const s = state.settings || {};
-  saveArrangement([...ids, ...folded.map((a) => a.id)], s.agentsHidden || [], []);
+  saveArrangement([...ids, ...folded.map((a) => a.id)], hiddenIds(), []);
 }
 
 function setAgentHidden(a, hide) {
   const s = state.settings || {};
   const { all } = arrangeAgents();
-  let hidden = (s.agentsHidden || []).filter((x) => x !== a.id);
-  if (hide) hidden.push(a.id);
+  let hidden = hiddenIds().filter((x) => x !== a.id);
+  if (hide) { hidden.push(a.id); unhid.delete(a.id); }
   // the rows that change go on the panel's edge, as the fold does
   agentsGlide = hide ? ROLLUP : UNROLL;
   saveArrangement(all.map((x) => x.id), hidden, []);
@@ -2130,8 +2160,9 @@ async function openAgentModels(a, anchor, ev) {
     },
   };
   document.addEventListener("mousedown", loading.away, true);
-  let models;
-  try { models = (await api("agent-models/" + encodeURIComponent(a.id))).models; }
+  // an agent whose list goes in the order dragged here (Codex's, #855)
+  let models, orderable = false, ordered = false;
+  try { ({ models, orderable, ordered } = await api("agent-models/" + encodeURIComponent(a.id))); }
   catch (e) {
     if (agentModelsLoading === loading) { loading.drop(); status(e.message, "err"); }
     return;
@@ -2155,9 +2186,10 @@ async function openAgentModels(a, anchor, ev) {
   q.placeholder = t("Search models");
   search.append(q);
   const seg = el("div", "am-seg");
-  const segAll = el("button", "on", t("All")), segOn = el("button", "", t("Shown"));
-  segAll.type = segOn.type = "button";
+  const segAll = el("button", "on", t("All")), segOn = el("button", "", t("Shown")), segOrder = el("button", "", t("Order"));
+  segAll.type = segOn.type = segOrder.type = "button";
   seg.append(segAll, segOn);
+  if (orderable) seg.append(segOrder);
   tools.append(search, seg);
   const list = el("div", "am-list");
   const foot = el("div", "am-foot");
@@ -2165,16 +2197,23 @@ async function openAgentModels(a, anchor, ev) {
   const hideAll = el("button", "am-reset am-hide", t("Hide all"));
   const reset = el("button", "am-reset", t("Show all"));
   hideAll.type = reset.type = "button";
-  foot.append(el("span", "", t("New models are shown")), el("span", "sp"), hideAll, el("span", "am-dot", "·"), reset);
+  const unorder = el("button", "am-reset", t("Default order"));
+  unorder.type = "button";
+  const footNote = el("span", "", t("New models are shown"));
+  foot.append(footNote, el("span", "sp"), hideAll, el("span", "am-dot", "·"), reset);
   // groups as the catalog has them, routing groups first; a long one
   // starts folded, unless the agent is set to a model in it
   const groups = [];
-  for (const m of models) {
-    let g = groups.find((x) => x.name === m.group);
-    if (!g) groups.push(g = { name: m.group, icon: m.icon, models: [] });
-    g.models.push(m);
-  }
-  groups.sort((x, y) => (y.name === ROUTING_GROUPS) - (x.name === ROUTING_GROUPS));
+  const regroup = () => {
+    groups.length = 0;
+    for (const m of models) {
+      let g = groups.find((x) => x.name === m.group);
+      if (!g) groups.push(g = { name: m.group, icon: m.icon, models: [] });
+      g.models.push(m);
+    }
+    groups.sort((x, y) => (y.name === ROUTING_GROUPS) - (x.name === ROUTING_GROUPS));
+  };
+  regroup();
   const shut = new Set(groups.filter((g) => groups.length > 1 && g.models.length > 8 && !g.models.some((m) => m.inUse)).map((g) => g.name));
   // with a few providers, a rail of them down the left: one picked shows
   // its models alone, so a long list is one click away rather than a
@@ -2213,6 +2252,8 @@ async function openAgentModels(a, anchor, ev) {
   };
   // under "Shown", one just turned off stays until the view changes
   let onlyShown = false, kept = new Set();
+  // under "Order", the models shown, as the agent lists them
+  let ordering = false;
 
   const me = agentModels = { a, anchor, box, saving: Promise.resolve(), changed: false };
   const save = () => {
@@ -2241,7 +2282,65 @@ async function openAgentModels(a, anchor, ev) {
     me.saving = me.saving.then(() => api("agent-models/" + encodeURIComponent(a.id), { hidden }))
       .catch((e) => status(e.message, "err"));
   };
+  // the shown models as the agent lists them: as dragged, or, before any
+  // drag, Codex's own (a ChatGPT account's) ahead of magpie's, as its
+  // /model has them
+  const inOrder = () => {
+    const shown = models.filter((m) => !m.hidden);
+    return ordered ? shown : [...shown.filter((m) => m.own), ...shown.filter((m) => !m.own)];
+  };
+  const saveOrder = (ids) => {
+    me.changed = true;
+    me.saving = me.saving.then(() => api("agent-models/" + encodeURIComponent(a.id), { order: ids }))
+      .catch((e) => status(e.message, "err"));
+    return me.saving;
+  };
+  const moveTo = (id, to) => {
+    const shown = inOrder();
+    const from = shown.findIndex((m) => m.id === id);
+    to = Math.max(0, Math.min(shown.length - 1, to));
+    if (from < 0 || to === from) return false;
+    shown.splice(to, 0, ...shown.splice(from, 1));
+    // the hidden after them, as they were; the groups keep the new order
+    models.splice(0, models.length, ...shown, ...models.filter((m) => m.hidden));
+    for (const g of groups) g.models.sort((x, y) => models.indexOf(x) - models.indexOf(y));
+    ordered = true;
+    saveOrder(shown.map((m) => m.id));
+    return true;
+  };
+  const drawOrder = () => {
+    const top = list.scrollTop;
+    list.replaceChildren();
+    const body = el("div", "am-rows am-order");
+    body.setAttribute("role", "list");
+    const shown = inOrder();
+    shown.forEach((m, i) => {
+      const r = el("div", "am-mr am-or");
+      r.tabIndex = 0;
+      r.dataset.id = m.id;
+      r.setAttribute("role", "listitem");
+      r.title = t("Drag to move · Alt+↑/↓ from the keyboard");
+      const lg = m.group === ROUTING_GROUPS ? svg(FAN, 14, 1.5) : icon(m.logo || m.icon || "generic");
+      lg.classList.add("lg");
+      r.append(el("span", "grip"), el("span", "ix", String(i + 1)), lg, el("span", "n", m.name),
+        el("span", "x", m.group === ROUTING_GROUPS ? t(m.group) : m.group));
+      r.onkeydown = (e) => {
+        if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+        e.preventDefault();
+        if (!moveTo(m.id, i + (e.key === "ArrowUp" ? -1 : 1))) return;
+        draw();
+        list.querySelector(`.am-or[data-id="${CSS.escape(m.id)}"]`)?.focus({ preventScroll: true });
+      };
+      r.onpointerdown = (e) => dragRows(e, r, r, body, [...body.children], (to) => { moveTo(m.id, to); draw(); });
+      body.append(r);
+    });
+    list.append(body);
+    if (!shown.length) list.append(el("div", "am-none", t("No matches.")));
+    list.scrollTop = top;
+    unorder.disabled = !ordered;
+  };
   const draw = () => {
+    if (ordering) return drawOrder();
     const top = list.scrollTop;
     list.replaceChildren();
     const words = q.value.trim().toLowerCase();
@@ -2321,16 +2420,37 @@ async function openAgentModels(a, anchor, ev) {
     hideAll.disabled = !models.some((m) => !m.hidden && !m.inUse);
   };
   q.oninput = () => { list.scrollTop = 0; draw(); };
-  const view = (shown) => {
+  const view = (shown, order = false) => {
     onlyShown = shown;
+    ordering = order;
     kept = new Set();
-    segAll.classList.toggle("on", !shown);
-    segOn.classList.toggle("on", shown);
+    segAll.classList.toggle("on", !shown && !order);
+    segOn.classList.toggle("on", shown && !order);
+    segOrder.classList.toggle("on", order);
+    // ordering is of the whole list: no search, no provider picked, and the
+    // foot puts magpie's own order back rather than showing or hiding
+    box.classList.toggle("ordering", order);
+    footNote.textContent = order ? t("Drag to put them in the order {agent} lists them; new models go last", { agent: a.name }) : t("New models are shown");
+    if (order) foot.replaceChildren(footNote, el("span", "sp"), unorder);
+    else foot.replaceChildren(footNote, el("span", "sp"), hideAll, el("span", "am-dot", "·"), reset);
     list.scrollTop = 0;
     draw();
   };
   segAll.onclick = () => view(false);
   segOn.onclick = () => view(true);
+  segOrder.onclick = () => view(false, true);
+  unorder.onclick = async () => {
+    unorder.disabled = true;
+    const r = await saveOrder([]);
+    ordered = false;
+    // magpie's own order, as the list comes back
+    if (r?.models) {
+      const was = new Map(models.map((m) => [m.id, m]));
+      models.splice(0, models.length, ...r.models.map((m) => was.get(m.id) || m));
+      regroup();
+    }
+    draw();
+  };
   reset.onclick = () => {
     for (const m of models) m.hidden = false;
     save();
@@ -2815,7 +2935,9 @@ async function renderUpdateBadge() {
     : t("{v} is out", { v: u.latest });
   if (u.error) b.title += "\n" + u.error;
   b.onclick = () => {
-    if (u.state === "ready") return restart();
+    // what changed is shown first, and a click there restarts (#844); one
+    // that failed restarts again at once
+    if (u.state === "ready") return u.error ? restart() : confirmUpdate(u, restart);
     if (u.state === "error") {
       b.dataset.pulling = "1";
       b.classList.add("busy");
@@ -3044,6 +3166,51 @@ function noteLink(text, url) {
   a.rel = "noopener";
   a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); api("open", { url }).catch(() => {}); };
   return a;
+}
+
+// confirmUpdate shows what changed before an update downloaded is put in
+// (Hu9956, #844: every update came unseen, its notes three clicks away in
+// Settings › About): every release's notes after this one up to it, newest
+// first, with Restart to update and Later. The update's own notes show at
+// once; the releases between come in after. go restarts. The tray's panel,
+// with no room for a dialog, restarts as before.
+async function confirmUpdate(u, go) {
+  if (mode === "panel" || !$("#modal").hidden) return go();
+  const ed = el("div", "editor whatsnew update-ask");
+  const head = el("div", "ehead");
+  head.append(el("b", "", t("Update to {v}", { v: "v" + u.latest })));
+  if (u.current) head.append(el("span", "wn-since", t("What changed since {v}", { v: "v" + u.current })));
+  const box = el("div", "wn-list");
+  const draw = (releases) => {
+    box.replaceChildren();
+    for (const r of releases) {
+      const sec = el("section", "wn-rel");
+      const h = el("div", "wn-ver");
+      h.append(el("b", "", "v" + r.version));
+      sec.append(h, noteBlocks(r.notes));
+      box.append(sec);
+    }
+    if (!releases.length) {
+      const sec = el("section", "wn-rel wn-none");
+      sec.append(el("p", "wn-msg", t("No release notes provided.")));
+      if (u.url) sec.append(noteLink(t("Open the release page"), u.url));
+      box.append(sec);
+    }
+  };
+  draw(u.notes ? [{ version: u.latest, notes: u.notes }] : []);
+  const bar = el("div", "bar");
+  const later = el("button", "text", t("Later"));
+  later.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
+  const ok = el("button", "text primary", t("Restart to update"));
+  ok.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); go(); };
+  bar.append(el("span", "grow"), later, ok);
+  ed.append(head, box, bar);
+  confirmAsk = ed;
+  openModal(ed);
+  $("#modal").classList.add("lib");
+  ok.focus({ preventScroll: true });
+  const w = await api(updatePath("update/notes")).catch(() => null);
+  if (confirmAsk === ed && w?.releases?.length) draw(w.releases);
 }
 
 // ---------- picker ----------
@@ -8964,16 +9131,37 @@ function renderSigning(sub) {
     // ZCode: a Z.ai account or a BigModel (智谱) one, a team's seat included
     tt.append(el("span", "n", t("Where is your {name} account?", { name: sub.name })),
       el("span", "s", t("Sign in where your GLM Coding Plan was bought, a team's plan too: z.ai, or bigmodel.cn for 智谱.")));
+    // the question keeps the row's width, Cancel beside it; the sites go
+    // under it as one group and a plugin's other ways under them as links,
+    // each line wrapping (361: four buttons in its row left the question a
+    // strip a character or two wide)
+    box.classList.add("site-pick");
     box.append(tt);
     const close = el("button", "text", t("Cancel"));
     close.onclick = cancelSignIn;
     box.append(close);
+    const sites = el("div", "sites");
     for (const [id, label, host] of sub.sites) {
       const b = el("button", "text primary", t(label));
       b.dataset.site = id;
       b.title = host;
       b.onclick = () => startSignIn(sub.agent, true, id);
-      box.append(b);
+      sites.append(b);
+    }
+    box.append(sites);
+    // a plugin's other ways, after the sites: ZCode's app's own sign-in
+    // (Jinyu: use the account ZCode is signed in to), its API key
+    if (sub.plugin && sub.moved) {
+      const labels = sub.sites.map(([, label]) => label);
+      const ways = el("div", "ways");
+      sub.plugin.methods.forEach((m, i) => {
+        if (labels.some((l) => (m.label || "").includes(l))) return;
+        const b = el("button", "link", t(m.label || (m.type === "api" ? "API key" : "Browser")));
+        b.dataset.method = String(i);
+        b.onclick = () => startPluginSignIn(sub, i);
+        ways.append(b);
+      });
+      if (ways.childElementCount) box.append(ways);
     }
     return box;
   }
@@ -9097,6 +9285,21 @@ function renderSigning(sub) {
       startPluginSignIn(sub, keyWay);
     };
     acts.append(k);
+  }
+  // a moved subscription goes straight to its plugin's usual way (#777:
+  // one click, as the built-in did); ways other than that one and the key
+  // above (ZCode's app's own sign-in) are a link away
+  const others = sub.plugin && sub.moved && signing.state === "waiting"
+    ? (sub.plugin.methods || []).filter((_, i) => i !== signing.method && i !== keyWay).length : 0;
+  if (others) {
+    const acts = tt.querySelector(".acts") || tt.appendChild(el("span", "acts"));
+    const other = el("button", "link other-ways", t("Other ways to sign in…"));
+    other.onclick = () => {
+      if (signing?.id) api("signin/" + signing.id + "/cancel", {}).catch(() => {});
+      signing = { agent: sub.agent, state: "method" };
+      renderProviders();
+    };
+    acts.append(other);
   }
   if (sub.importable) {
     // an account another tool is signed in to comes in from its file
@@ -15117,6 +15320,7 @@ function renderSettings() {
   renderReplies(s, keep);
   renderRedact(s, keep);
   renderOTel(s, keep);
+  renderPort(s);
   renderLAN(s);
   renderSync();
 
@@ -15271,6 +15475,7 @@ async function renderSync(v) {
     // the other kind's server, kept from before sync moved here
     if (v.other) status += " · " + t("{kind} settings kept", { kind: v.other.kind === "s3" ? "S3" : "WebDAV" });
     if (!v.error && v.usageError) status += " · " + t("Couldn't share usage: {error}", { error: v.usageError });
+    if (v.auto === 0) status += " · " + t("only when asked");
   }
   const sub = row(t(s3 ? "S3 sync" : v.on ? "WebDAV sync" : "WebDAV or S3 sync"), status, ...(v.on
     ? [btn(t("Sync now"), async (e) => { e.target.classList.add("busy"); renderSync(await api("davsync/now", {}).catch((x) => ({ ...v, error: x.message }))); }),
@@ -15280,23 +15485,82 @@ async function renderSync(v) {
   if (v.notice) {
     const n = v.notice, r = el("div", "row pref sync-note");
     const lines = [];
-    if (n.here?.length) lines.push(t("Replaced here by newer ones from another computer: {parts}", { parts: parts(n.here) }));
+    if (n.restored) lines.push(t("Restored from the server: {parts}", { parts: parts(n.here || []) }));
+    else if (n.here?.length) lines.push(t("Replaced here by newer ones from another computer: {parts}", { parts: parts(n.here) }));
     if (n.there?.length) lines.push(t("Replaced on the server by this computer's newer ones: {parts}", { parts: parts(n.there) }));
     const who = el("div", "who");
     for (const l of lines) who.append(el("div", "sub", l));
-    who.append(el("div", "sub", t("The copies replaced are kept in the sync folder.")));
+    who.append(el("div", "sub", t(n.restored ? "This computer's setup from before is kept in the sync folder." : "The copies replaced are kept in the sync folder.")));
     const val = el("div", "val");
+    if (n.restored && v.undo) val.append(btn(t("Undo"), async (e) => {
+      e.target.classList.add("busy");
+      try { renderSync(await api("davsync/undo", {})); refreshAfterSync(); } catch (x) { e.target.classList.remove("busy"); sub.textContent = x.message; sub.classList.add("bad"); }
+    }));
     val.append(btn(t("Show"), () => api("davsync/reveal", {}).catch((e) => status(e.message, "err"))), btn(t("OK"), async () => renderSync(await api("davsync/dismiss", {}))));
     r.append(who, val);
     box.append(r);
   }
   if (syncOpen === "dav") box.append(davForm(v));
+  if (v.on) {
+    // how often it syncs by itself, or never: a free 坚果云 account is
+    // allowed only so many requests (#847)
+    const every = v.auto ?? 3;
+    row(t("Sync by itself"), every ? t("Every {n} minutes while magpie runs", { n: every }) : t("Off: only Sync now syncs"),
+      segs([[0, t("Off")], [3, t("3 min")], [15, t("15 min")], [30, t("30 min")], [60, t("1 hour")]], every, async (m) => {
+        renderSync(await api("davsync/auto", { minutes: m || -1 }).catch((x) => ({ ...v, error: x.message })));
+      }));
+    row(t("Restore from the server"), t("This computer's setup becomes the one on the server. What is here now is kept first, to undo."),
+      btn(t("Restore…"), () => askRestore(v, parts)));
+  }
 
   // export and import
   row(t("Export"), t("Everything above in one file, sealed with a passphrase, to carry to another computer"), btn(t(syncOpen === "export" ? "Close" : "Export…"), toggle("export")));
   if (syncOpen === "export") box.append(exportForm());
   row(t("Import"), t("Bring in a file exported from magpie"), btn(t(syncOpen === "import" ? "Close" : "Import…"), toggle("import")));
   if (syncOpen === "import") box.append(importForm());
+}
+
+// askRestore asks before the server's setup replaces this computer's
+// (#847); what is here is kept, and the notice it leaves can undo it.
+function askRestore(v, parts) {
+  const ed = el("div", "editor restore-ask");
+  const head = el("div", "ehead");
+  head.append(el("b", "", t("Restore from the server?")));
+  ed.append(head);
+  const goes = ["providers", "settings", "profiles"];
+  if (v.agents !== false) goes.push("agents");
+  if (v.library !== false) goes.push("library");
+  ed.append(el("p", "lib-confirm", t("This computer's {parts} become the ones on the server, as your other computers last synced them. Whatever was changed here since is replaced.", { parts: parts(goes) })));
+  ed.append(el("p", "lib-confirm", t("What is here now is sealed into the sync folder first, and Undo puts it back.")));
+  const err = el("p", "editor-error", "");
+  ed.append(err);
+  const bar = el("div", "bar");
+  const go = el("button", "text primary danger-fill", t("Restore setup"));
+  go.onclick = async (e) => {
+    e.stopPropagation();
+    go.disabled = true;
+    go.classList.add("busy");
+    try {
+      const r = await api("davsync/restore", {});
+      closeConfirmAsk();
+      renderSync(r);
+      if (r.error) return;
+      if (r.brought?.length) refreshAfterSync();
+      else status(t("This computer's setup is already the server's: nothing to restore"), "ok");
+    } catch (x) {
+      go.disabled = false;
+      go.classList.remove("busy");
+      err.textContent = x.message;
+    }
+  };
+  const cancel = el("button", "text", t("Cancel"));
+  cancel.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
+  bar.append(el("span", "grow"), cancel, go);
+  ed.append(bar);
+  confirmAsk = ed;
+  openModal(ed);
+  $("#modal").classList.add("lib");
+  cancel.focus({ preventScroll: true });
 }
 
 // refreshAfterSync: what a sync or an import brought in reaches the other
@@ -16179,6 +16443,69 @@ function renderRedactRules(s, row) {
   });
 }
 
+// renderPort: the gateway's port on this computer (Magic_zero on Discord:
+// 3425 taken by another program, or one easier to tell apart). Any port
+// from 1024 up can be typed; magpie moves its gateway there and every
+// agent it connected with it, or says why it can't (another program has
+// it). MAGPIE_ADDR, set, comes first and the field says so.
+let portDraft = { value: null, err: "" };
+// portSays is the gateway's word on a port it couldn't take, in the page's
+// language: it says the port, so it is matched rather than looked up
+function portSays(m) {
+  let x;
+  if ((x = /^port (\d+) is in use by another program/.exec(m))) return t("Port {p} is in use by another program: pick another one", { p: x[1] });
+  if ((x = /^another magpie serves the gateway at (\S+):/.exec(m))) return t("Another magpie serves the gateway at {url}: set its port there, or quit it first", { url: x[1] });
+  if (/from 1024 to 65535/.test(m)) return t("A port is a number from 1024 to 65535");
+  return t(m);
+}
+function renderPort(s) {
+  const box = $("#portList");
+  const r = el("div", "row pref port-row");
+  const who = el("div", "who");
+  who.append(el("div", "name", t("Gateway port")));
+  const sub = el("div", "sub");
+  const d = portDraft;
+  const now = s.addrEnv ? "" : String(s.port || 3425);
+  const field = input(d.value ?? now, "3425");
+  field.className = "words gateway-port";
+  field.inputMode = "numeric";
+  field.setAttribute("aria-label", t("Gateway port"));
+  const save = el("button", "text", t("Apply"));
+  if (s.addrEnv) {
+    field.value = s.addrEnv;
+    field.disabled = save.disabled = true;
+    sub.textContent = t("MAGPIE_ADDR={addr} sets the gateway’s address: unset it to set the port here", { addr: s.addrEnv });
+  } else if (d.err) {
+    sub.textContent = d.err;
+    sub.classList.add("err");
+  } else sub.textContent = t("Agents magpie connected move with it. Now {url}", { url: s.gateway || "" });
+  who.append(sub);
+  save.onclick = () => {
+    const p = Number(field.value.trim());
+    if (!Number.isInteger(p) || p < 1024 || p > 65535) {
+      d.value = field.value; d.err = t("A port is a number from 1024 to 65535");
+      return renderPort(s);
+    }
+    if (p === (s.port || 3425)) { d.value = null; d.err = ""; return renderPort(s); }
+    save.disabled = true;
+    writingPrefs(api("settings/port", { port: p }).then((res) => res.settings && (prefs = res.settings, res)))
+      .then((res) => {
+        portDraft = { value: null, err: "" };
+        const n = res.port?.moved?.length || 0;
+        if (res.port?.error) status(res.port.error, "err");
+        else status(n ? t("Gateway on port {p}; {n} agents moved with it", { p, n }) : t("Gateway on port {p}", { p }), "ok", 2500);
+        renderSettings();
+      })
+      .catch((e) => { d.value = field.value; d.err = portSays(e.message); status(d.err, "err"); renderSettings(); });
+  };
+  field.oninput = () => { d.value = field.value; };
+  field.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") save.onclick(); if (e.key === "Escape") { portDraft = { value: null, err: "" }; renderPort(s); } };
+  const val = el("div", "val");
+  val.append(field, save);
+  r.append(who, val);
+  box.replaceChildren(r); // swapped whole: the list is never laid out empty
+}
+
 // renderLAN: the gateway shared on the local network, for agents on other
 // machines. Gateway keys and connection examples live together in Gateway.
 let lanSelectedURL = "", lanProtocol = "openai";
@@ -16338,7 +16665,7 @@ async function renderUpdate(r, u) {
       if (u.gaveUp) sub.textContent += " · " + t("the gateway stayed busy for an hour, so magpie didn't restart; it updates when you restart or quit it");
       else if (busyNow) sub.textContent += " · " + busyNow;
       if (u.gaveUp) sub.classList.add("wraps");
-      btn(t("Restart to update"), () => install());
+      btn(t("Restart to update"), () => (u.error ? install() : confirmUpdate(u, () => install())));
       if (u.error && u.url) btn(t("Download"), () => (web ? window.open(u.url, "_blank", "noopener") : api("open", { url: u.url })));
       break;
     }
