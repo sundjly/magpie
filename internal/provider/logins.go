@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/plugin"
@@ -83,6 +84,10 @@ type savedLogin struct {
 	// Lapsed why the vendor last refused to (logins_on.go, keepalive.go).
 	Renewed time.Time `json:"renewed,omitzero"`
 	Lapsed  string    `json:"lapsed,omitempty"`
+	// Refused is the Claude credential Anthropic refused (its version, in
+	// claude_auth.go): Lapsed holds while the account has that one, and
+	// says nothing of the one it is refreshed or signed in to next.
+	Refused string `json:"refused,omitempty"`
 	// Hidden is the agent's own sign-in removed in magpie, with the mark
 	// of the sign-in it was (side_logins.go): it is listed and tried no
 	// more until the agent signs in anew. The agent's files stay as they are.
@@ -144,12 +149,14 @@ func writeLogins(ls []savedLogin) error {
 	if err != nil {
 		return err
 	}
+	defer Changed() // an account added, switched or gone: All builds anew
 	return writePrivate(loginsPath(), append(b, '\n'))
 }
 
 // writePrivate replaces a file readable by the user alone, atomically, so
 // an agent reading it at that moment sees either version, never half.
 func writePrivate(path string, b []byte) error {
+	defer filememo.Forget()        // read again, where a request holds it
 	path, err := edit.Target(path) // a symlink stays, its target written
 	if err != nil {
 		return err
@@ -179,6 +186,11 @@ func writePrivate(path string, b []byte) error {
 func upsertLogin(ls []savedLogin, l savedLogin) []savedLogin {
 	for i := range ls {
 		if sameLogin(ls[i], l) {
+			// a refused Claude credential stays refused while it is the
+			// one the account has
+			if l.Agent == "claude" && l.Lapsed == "" && ls[i].Refused != "" && ls[i].Refused == claudeLoginVersion(l) {
+				l.Lapsed, l.Refused = ls[i].Lapsed, ls[i].Refused
+			}
 			l.On = l.On || ls[i].On
 			l.Paused = l.Paused || ls[i].Paused
 			l.Order = ls[i].Order
@@ -315,7 +327,7 @@ func codexAuthPath() string {
 // claudeProfilePath is Claude Code's global state file, which holds the
 // signed-in account's identity next to much else.
 func claudeProfilePath() string {
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+	if dir := appdir.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
 		return filepath.Join(dir, ".claude.json")
 	}
 	home, _ := os.UserHomeDir()
@@ -595,10 +607,12 @@ func Logins(agent string) []Login {
 		first := l.Agent == "claude" && strings.EqualFold(standIn, l.User)
 		lg := Login{Agent: l.Agent, User: l.User, Plan: l.Plan, Seen: l.Seen, Active: using, On: using || first || l.On,
 			Paused: (using || first) && pausedOwn(ls, l.Agent, l.User), first: first}
+		if l.Agent == "claude" {
+			lg.Lapsed = claudeSignedOut(l)
+		}
 		if !using {
-			lg.Lapsed = l.Lapsed
-			if lg.Lapsed == "" && l.Agent == "claude" {
-				lg.Lapsed = claudeSignedOut(l)
+			if l.Agent != "claude" {
+				lg.Lapsed = l.Lapsed
 			}
 			lg.Returns = l.On && strings.EqualFold(back[l.Agent], l.User)
 		}
@@ -767,11 +781,17 @@ func switchSavedLogin(agent, user string) (from string, _ error) {
 	}
 	if agent == "claude" {
 		// as Claude Code keeps it, if it has run on the account beside the
-		// one it is signed in to
-		if c, ok := readClaudeDir(claudeAccountDir(target.User)); ok {
-			if _, err := takeClaudeDir(target, c); err != nil {
-				return "", err
+		// one it is signed in to; never one that can't be used, which
+		// Claude Code would only be refused on
+		_, changed, err := syncClaudeDir(target)
+		if err != nil {
+			return "", err
+		}
+		if why := claudeSignedOut(*target); why != "" {
+			if changed {
+				_ = writeLogins(ls)
 			}
+			return "", fmt.Errorf("%s: %s", target.User, why)
 		}
 	}
 	want := *target
@@ -821,7 +841,7 @@ func putClaudeLogin(l savedLogin) error {
 	_, loc, found := readClaudeCredential()
 	if !found {
 		// signed out: put it where Claude Code keeps it on this system
-		dir := os.Getenv("CLAUDE_CONFIG_DIR")
+		dir := appdir.Getenv("CLAUDE_CONFIG_DIR")
 		if dir == "" {
 			home, _ := os.UserHomeDir()
 			dir = filepath.Join(home, ".claude")
@@ -928,6 +948,7 @@ func ForgetAccounts() {
 
 // forgetAccountCaches makes the next look at the accounts read them afresh.
 func forgetAccountCaches() {
+	Changed() // the providers a request holds (All)
 	forgetClaudeCredential()
 	forgetClaudeStatus()
 	forgetCursorStatus()

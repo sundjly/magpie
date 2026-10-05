@@ -41,6 +41,9 @@ type groupJSON struct {
 	Shared []string `json:"shared"`
 	// Picked: the member a manual group sends every request to
 	Picked string `json:"picked,omitempty"`
+	// Patterns: its patterns, each with how many models it matches now
+	// (#766), so one that matches nothing is said on its card
+	Patterns []provider.PatternHit `json:"patterns"`
 }
 
 type memberJSON struct {
@@ -88,6 +91,7 @@ type poolJSON struct {
 	Who      []string `json:"who"`
 	Routing  string   `json:"routing"`
 	Affinity string   `json:"affinity"`
+	Sink     bool     `json:"sink,omitempty"` // provider.Provider.Sink
 	// Protocol: the one its keys are made for, when the provider's keys are
 	// made for more than one — each protocol's keys are a pool of their own
 	Protocol provider.Protocol `json:"protocol,omitempty"`
@@ -149,7 +153,8 @@ func groupsState() groupsJSON {
 		}
 	}
 	for _, g := range provider.Groups() {
-		gj := groupJSON{Group: g, Info: []memberJSON{}, Holds: []string{}, Offers: []string{}, Shared: []string{}}
+		gj := groupJSON{Group: g, Info: []memberJSON{}, Holds: []string{}, Offers: []string{}, Shared: []string{}, Patterns: []provider.PatternHit{}}
+		gj.Patterns = append(gj.Patterns, provider.PatternHits(g)...)
 		for _, e := range served {
 			if e.ID == provider.GroupPrefix+g.ID {
 				gj.Offers, gj.Shared = append(gj.Offers, e.Efforts...), append(gj.Shared, e.Shared...)
@@ -215,13 +220,13 @@ func groupsState() groupsJSON {
 			continue
 		}
 		if kind, who := onOf(p); kind == "account" && len(who) > 1 {
-			out.Pools = append(out.Pools, poolJSON{Provider: p.ID, Name: p.Name, Icon: p.Icon, Kind: kind, Who: who, Routing: p.Routing, Affinity: p.Affinity})
+			out.Pools = append(out.Pools, poolJSON{Provider: p.ID, Name: p.Name, Icon: p.Icon, Kind: kind, Who: who, Routing: p.Routing, Affinity: p.Affinity, Sink: p.Sink})
 			continue
 		}
 		pools := keyPools(p)
 		for _, kp := range pools {
 			if len(kp.Who) > 1 {
-				kp.Provider, kp.Name, kp.Icon, kp.Kind, kp.Routing, kp.Affinity = p.ID, p.Name, p.Icon, "key", p.Routing, p.Affinity
+				kp.Provider, kp.Name, kp.Icon, kp.Kind, kp.Routing, kp.Affinity, kp.Sink = p.ID, p.Name, p.Icon, "key", p.Routing, p.Affinity, p.Sink
 				if len(pools) == 1 {
 					kp.Protocol = ""
 				}
@@ -241,6 +246,11 @@ func groupRoutes(mux *http.ServeMux) {
 			provider.Group
 			From string `json:"from"` // the id the group had: another is a rename
 			On   bool   `json:"on"`   // found: magpie finds groups on its own
+			// arrange: the groups by id, in the order the Routing page
+			// lists them (#779), which /v1/models follows too
+			Order []string `json:"order"`
+			// delete: several groups at once, all or none
+			IDs []string `json:"ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			fail(rw, err)
@@ -270,9 +280,15 @@ func groupRoutes(mux *http.ServeMux) {
 				err = provider.RenameGroup(body.From, to)
 			}
 		case "delete":
-			err = provider.DeleteGroup(in.ID)
+			if len(body.IDs) > 0 {
+				err = provider.DeleteGroups(body.IDs)
+			} else {
+				err = provider.DeleteGroup(in.ID)
+			}
 		case "show":
 			err = provider.ShowGroup(in.ID)
+		case "arrange":
+			err = provider.SetGroupOrder(body.Order)
 		default:
 			http.NotFound(rw, r)
 			return

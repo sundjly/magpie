@@ -68,7 +68,13 @@ type Record struct {
 	// none for a reply that wasn't streamed (#196)
 	TTFT      int64 `json:"ttft_ms,omitempty"`
 	FirstText int64 `json:"first_text_ms,omitempty"`
-	Status    int   `json:"status"`
+	// Sent: ms from the request to its answering try going out to the
+	// vendor, its body written, as TTFT is counted: magpie's own time and
+	// the tries that failed first are before it, and TTFT-Sent is how
+	// long the vendor took to its first content. 0 where it isn't known
+	// (a reply not streamed, or a vendor magpie doesn't reach over HTTP).
+	Sent   int64 `json:"sent_ms,omitempty"`
+	Status int   `json:"status"`
 	// Error is why a call failed, in the vendor's words and cut short;
 	// ErrType what its body called the error (rate_limit_error,
 	// usage_limit_reached); RequestID the id the vendor gave the call; and
@@ -77,7 +83,9 @@ type Record struct {
 	Error     string `json:"err,omitempty"`
 	ErrType   string `json:"err_type,omitempty"`
 	RequestID string `json:"rid,omitempty"`
-	Endpoint  string `json:"ep,omitempty"`
+	// ResponseID is the response object ID actually sent to the client.
+	ResponseID string `json:"response_id,omitempty"`
+	Endpoint   string `json:"ep,omitempty"`
 	// Session is the conversation the call was part of, as its agent names
 	// it (X-Magpie-Session, or the session header Claude Code, Codex or
 	// OpenCode sends): several sessions on one model told apart
@@ -201,8 +209,15 @@ func AgentOf(ua string) string {
 	name, _, _ := strings.Cut(ua, "/")
 	name, _, _ = strings.Cut(name, " ")
 	l := strings.ToLower(name)
+	// a name first: cursor-local is its own, though Cursor's UA (cursor)
+	// begins it
 	for _, k := range knownAgents() {
-		if slices.Contains(k.Names, l) || slices.ContainsFunc(k.UA, func(p string) bool { return strings.HasPrefix(l, p) }) {
+		if slices.Contains(k.Names, l) {
+			return k.ID
+		}
+	}
+	for _, k := range knownAgents() {
+		if slices.ContainsFunc(k.UA, func(p string) bool { return strings.HasPrefix(l, p) }) {
 			return k.ID
 		}
 	}
@@ -268,6 +283,35 @@ func (t Totals) Speed() float64 {
 	return float64(t.DecodeOut) / (float64(t.DecodeMs) / 1000)
 }
 
+// A reply's speed is its output tokens over its decode window, the ms
+// from its first content to its end (#196); a window counts only when it
+// timed the writing (#731). One that is shorter than MinDecodeMs, or over
+// which the tokens would have come faster than MaxDecodeSpeed a second,
+// didn't: the reply came in one burst at its end, written before the
+// window opened — a turn that is one big tool call from Gemini, whose
+// functionCall comes whole, has its first content a millisecond before
+// its end, and 8264 tokens in 1 ms read 8,264,000 tok/s. Such a reply
+// tells no speed and is left out of the summed one, where its tokens
+// over next to no time would lift everyone's; its TTFT still counts.
+// The bounds are wide of any real stream: the fastest vendors write a few
+// thousand tokens a second, and a tenth of a second is the least a
+// stream's timing tells anything by. routing.js's speedOf has the same.
+const (
+	MinDecodeMs    = 100
+	MaxDecodeSpeed = 10000
+)
+
+// DecodeWindow is the ms a reply of out tokens, ms long with its first
+// content at ttft, took to write them: 0 when it wasn't timed, wrote
+// nothing, or came too fast to tell a speed by (above).
+func DecodeWindow(out int, ms, ttft int64) int64 {
+	w := ms - ttft
+	if out <= 0 || ttft <= 0 || w < MinDecodeMs || int64(out)*1000 > MaxDecodeSpeed*w {
+		return 0
+	}
+	return w
+}
+
 // FormatCost renders an effective-price cost, kept in USD everywhere it's
 // stored, as the CLI and TUI show it: at amountUSD's own price when
 // currency isn't "cny", else converted at rate (CNY per one USD, from
@@ -303,8 +347,8 @@ func (t *Totals) add(r Record, price *catalog.Price) {
 	if r.TTFT > 0 && !r.Failed() {
 		t.Timed++
 		t.TTFT += r.TTFT
-		if r.Output > 0 && r.Millis > r.TTFT {
-			t.DecodeMs += r.Millis - r.TTFT
+		if w := DecodeWindow(r.Output, r.Millis, r.TTFT); w > 0 {
+			t.DecodeMs += w
 			t.DecodeOut += r.Output
 		}
 	}

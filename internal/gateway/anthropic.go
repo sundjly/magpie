@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -22,9 +23,9 @@ type aBlock struct {
 	// image
 	Source *struct {
 		Type      string `json:"type"`
-		MediaType string `json:"media_type"`
-		Data      string `json:"data"`
-		URL       string `json:"url"`
+		MediaType string `json:"media_type,omitempty"`
+		Data      string `json:"data,omitempty"`
+		URL       string `json:"url,omitempty"`
 	} `json:"source,omitempty"`
 	// tool_use
 	ID    string          `json:"id,omitempty"`
@@ -78,8 +79,9 @@ type aRequest struct {
 			Schema json.RawMessage `json:"schema"`
 		} `json:"format,omitempty"`
 	} `json:"output_config,omitempty"`
-	Metadata json.RawMessage `json:"metadata,omitempty"`
-	Speed    string          `json:"speed,omitempty"` // "fast": Claude's fast mode
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
+	Speed      string          `json:"speed,omitempty"` // "fast": Claude's fast mode
+	Safeguards json.RawMessage `json:"safeguards,omitempty"`
 }
 
 func parseAnthropic(body []byte) (*Request, error) {
@@ -89,6 +91,10 @@ func parseAnthropic(body []byte) (*Request, error) {
 	}
 	r := &Request{Model: a.Model, System: stringOrText(a.System), MaxTokens: a.MaxTokens,
 		Temp: a.Temperature, TopP: a.TopP, Stop: a.StopSequences, Stream: a.Stream, Fast: a.Speed == "fast"}
+	r.Safeguards = a.Safeguards
+	if string(r.Safeguards) == "null" {
+		r.Safeguards = nil
+	}
 	if len(a.Metadata) > 0 && string(a.Metadata) != "null" {
 		r.Metadata = a.Metadata
 	}
@@ -201,10 +207,20 @@ func thinkingOffUnlessAsked(body []byte) []byte {
 var anthropicModel = regexp.MustCompile(`(?i)(?:^|[/.:-])claude-`)
 
 // alwaysThinks is a vendor refusing to turn a model's thinking off: Z.ai's
-// GLM-5.3 answers 1210, "…always engages in thinking…", and DashScope's own
-// glm-5.3 answers "The value of the enable_thinking parameter is restricted
-// to True."
-var alwaysThinks = regexp.MustCompile(`(?i)always engages in thinking|thinking (?:can ?not|can't) be (?:disabled|turned off)|enable_thinking[^"]{0,60}restricted to true`)
+// GLM-5.3 answers 1210, "…always engages in thinking…", or, in Chinese
+// (ZCode's GLM-5.3-Flash), "该模型始终支持思考，不可关闭" (#699); DashScope's
+// own glm-5.3 answers "The value of the enable_thinking parameter is
+// restricted to True."
+var alwaysThinks = regexp.MustCompile(`(?i)always engages in thinking|thinking (?:can ?not|can't) be (?:disabled|turned off)|enable_thinking[^"]{0,60}restricted to true|始终(?:支持|开启|启用)?思考|思考[^"]{0,20}(?:不可|无法|不能)关闭`)
+
+// ThinksOnlyWhenAsked is a model that takes thinking turned off on the
+// Messages API whatever its levels: one of Anthropic's own (anthropicModel,
+// or a relay's opus-5.5). Another vendor's model there takes it off only
+// when none is among its levels; without it, it always thinks, and GLM-5.3
+// turns thinking disabled away (#699).
+func ThinksOnlyWhenAsked(model string) bool {
+	return anthropicModel.MatchString(model) || claudeVersion.MatchString(strings.ToLower(model))
+}
 
 // withoutThinkingOff is body with its thinking left to the model, when it
 // says thinking is off; false when it doesn't.
@@ -222,8 +238,9 @@ func withoutThinkingOff(body []byte) ([]byte, bool) {
 }
 
 // claudeVersion finds the family's version in a Claude model id however a
-// relay spells it: claude-opus-4-6, claude-opus-5, anthropic.claude-sonnet-4.6-v1.
-var claudeVersion = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)(?:[-.](\d{1,2}))?(?:[^0-9]|$)`)
+// relay spells it: claude-opus-4-6, claude-opus-5, anthropic.claude-sonnet-4.6-v1,
+// a relay's opus-5.5, or the old order, claude-3-7-sonnet.
+var claudeVersion = regexp.MustCompile(`(?:^|[^a-z0-9])(?:claude-)?(?:opus|sonnet|haiku)-(\d{1,2})(?:[-.](\d{1,2}))?(?:[^0-9]|$)|claude-(\d+)(?:[-.](\d))?-(?:opus|sonnet|haiku)`)
 
 // adaptiveOnly is a Claude model from 4.6 on, which thinks adaptively:
 // claude-opus-5-5 refuses thinking.type=enabled with a budget ("requires
@@ -233,9 +250,48 @@ func adaptiveOnly(model string) bool {
 	if m == nil {
 		return false
 	}
-	major, _ := strconv.Atoi(m[1])
-	minor, _ := strconv.Atoi(m[2])
+	v := m[1:3]
+	if m[3] != "" {
+		v = m[3:5]
+	}
+	major, _ := strconv.Atoi(v[0])
+	minor, _ := strconv.Atoi(v[1])
 	return major > 4 || major == 4 && minor >= 6
+}
+
+// adaptiveThinking is an Anthropic request as a model that thinks only
+// adaptively takes it: thinking.type=enabled with a budget — sent by an
+// agent that doesn't know the model (its name in magpie, an alias, or a
+// group's member, mapped to the vendor's later), or by magpie fitting an
+// effort to it — goes as thinking.type=adaptive, with the budget as the
+// effort it is nearest in output_config.effort unless one is there (Keenc
+// on Discord: claude-opus-5-5 answered 400). Read off the model the body
+// is sent with, the vendor's own name; any other request, older Claudes'
+// included, goes as it came, and "disabled" stays.
+func adaptiveThinking(body []byte) []byte {
+	th := gjson.GetBytes(body, "thinking")
+	if th.Get("type").String() != "enabled" || !adaptiveOnly(gjson.GetBytes(body, "model").String()) {
+		return body
+	}
+	thinking := map[string]any{"type": "adaptive"}
+	if d := th.Get("display"); d.Exists() {
+		thinking["display"] = d.Value()
+	}
+	fields := map[string]any{"thinking": thinking}
+	if gjson.GetBytes(body, "output_config.effort").String() == "" {
+		if e := effortOfBudget(int(th.Get("budget_tokens").Int())); e != "" {
+			if e == "xhigh" {
+				e = "max" // as buildAnthropic asks it: 4.6 has no xhigh
+			}
+			oc, _ := gjson.GetBytes(body, "output_config").Value().(map[string]any)
+			if oc == nil {
+				oc = map[string]any{}
+			}
+			oc["effort"] = e
+			fields["output_config"] = oc
+		}
+	}
+	return withFields(body, fields)
 }
 
 // AdaptiveThinking is adaptiveOnly for agents told how to ask a model: a
@@ -271,9 +327,9 @@ func imageBlock(p Part) aBlock {
 	b := aBlock{Type: "image"}
 	b.Source = &struct {
 		Type      string `json:"type"`
-		MediaType string `json:"media_type"`
-		Data      string `json:"data"`
-		URL       string `json:"url"`
+		MediaType string `json:"media_type,omitempty"`
+		Data      string `json:"data,omitempty"`
+		URL       string `json:"url,omitempty"`
 	}{}
 	if p.URL != "" && p.Data == "" {
 		b.Source.Type, b.Source.URL = "url", p.URL
@@ -585,6 +641,7 @@ func stopToAnthropic(s string) string {
 
 // anthropicEncoder writes events as an Anthropic event stream.
 type anthropicEncoder struct {
+	id      string
 	w       *sseWriter
 	model   string
 	index   int
@@ -613,6 +670,7 @@ func (e *anthropicEncoder) start(ev Event) {
 	}
 	e.started = true
 	id := anthropicID(ev.MsgID)
+	e.id = id
 	model := ev.Model
 	if model == "" {
 		model = e.model
@@ -722,8 +780,12 @@ func (e *anthropicEncoder) finish() {
 	}
 	e.close()
 	res := e.col.finish()
+	delta := map[string]any{"stop_reason": stopToAnthropic(res.Stop), "stop_sequence": nil}
+	if len(res.SafeguardResults) > 0 {
+		delta["safeguard_results"] = res.SafeguardResults
+	}
 	e.w.event("message_delta", map[string]any{"type": "message_delta",
-		"delta": map[string]any{"stop_reason": stopToAnthropic(res.Stop), "stop_sequence": nil},
+		"delta": delta,
 		"usage": res.Usage.anthropic()})
 	e.w.event("message_stop", map[string]any{"type": "message_stop"})
 }
@@ -754,8 +816,12 @@ func renderAnthropic(res Result, model string) []byte {
 	if res.Model != "" {
 		model = res.Model
 	}
-	b, _ := json.Marshal(map[string]any{"id": id, "type": "message", "role": "assistant", "model": model,
-		"content": content, "stop_reason": stopToAnthropic(res.Stop), "stop_sequence": nil, "usage": res.Usage.anthropic()})
+	reply := map[string]any{"id": id, "type": "message", "role": "assistant", "model": model,
+		"content": content, "stop_reason": stopToAnthropic(res.Stop), "stop_sequence": nil, "usage": res.Usage.anthropic()}
+	if len(res.SafeguardResults) > 0 {
+		reply["safeguard_results"] = res.SafeguardResults
+	}
+	b, _ := json.Marshal(reply)
 	return b
 }
 
@@ -764,8 +830,14 @@ func renderAnthropic(res Result, model string) []byte {
 func searchResultBlock(id string, hits []Hit) map[string]any {
 	results := []map[string]any{}
 	for _, h := range hits {
+		// never the searcher's encrypted_content: it is sealed for the
+		// vendor that searched, and the client would send it to another
+		var age any
+		if h.PageAge != "" {
+			age = h.PageAge
+		}
 		results = append(results, map[string]any{"type": "web_search_result", "title": h.Title, "url": h.URL,
-			"encrypted_content": "", "page_age": nil})
+			"encrypted_content": "", "page_age": age})
 	}
 	return map[string]any{"type": "web_search_tool_result", "tool_use_id": id, "content": results}
 }

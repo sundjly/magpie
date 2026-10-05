@@ -3,11 +3,11 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
 )
 
@@ -23,7 +23,7 @@ func zed(home, cfg string) *Agent {
 	case "darwin":
 		cfg = filepath.Join(home, ".config")
 	case "windows":
-		cfg = os.Getenv("APPDATA")
+		cfg = appdir.Getenv("APPDATA")
 		if cfg == "" {
 			cfg = filepath.Join(home, "AppData", "Roaming")
 		}
@@ -38,7 +38,7 @@ func zedAt(dir string) *Agent {
 	model := pairGet(func(k string) (string, bool) { return edit.GetJSON(path, k) }, zedModel+".provider", zedModel+".model")
 	key := "zed:" + path + ":"
 	return atomic(&Agent{
-		ID: "zed", Name: "Zed", Icon: "zed", Bin: "zed", Dir: dir, Path: path,
+		ID: "zed", Name: "Zed", Icon: "zed", Bin: "zed", Dir: dir, Path: path, Spelled: prefixed,
 		UA: []string{"zed"},
 		Notice: func() string {
 			if usesMagpie(model()) && Running(`(^|/)(zed|zeditor|zed-editor)( |$)`) {

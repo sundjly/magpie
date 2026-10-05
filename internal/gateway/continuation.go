@@ -30,6 +30,22 @@ const streamRetries = 2
 // without waiting on a vendor that keeps the connection open after it.
 var errStreamCut = errors.New("stream cut mid-reply")
 
+// groupTryKey marks a try of a routing group's member. A member whose
+// stream breaks with an error mid-reply is failed as it used to be — the
+// group answers the agent's retry with another of its members (#733) —
+// while one whose connection only cut, saying nothing, is still asked to
+// go on.
+type groupTryKey struct{}
+
+func groupTry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, groupTryKey{}, true)
+}
+
+func inGroupTry(ctx context.Context) bool {
+	v, _ := ctx.Value(groupTryKey{}).(bool)
+	return v
+}
+
 // continuation is what of a translated reply the client already has, so a
 // cut reply's next try asks the model to go on from there and only what
 // is new goes to the client.
@@ -135,15 +151,18 @@ func (c *continuation) unecho(s string) string {
 // client's own protocol, as it used to.
 func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, request *Request, model string, zen *zenReply, u *Usage) (int, string) {
 	sw := newSSEWriter(w)
-	enc := encoder(from, sw, request)
+	enc := encoder(from, sw, request, u)
 	cont := &continuation{}
 	var failed, failedCode string
 	var failedStatus int
 	var cut, errSent bool
+	var empty bool // a reply in this protocol that says nothing fails (#667)
+	said, stop := false, ""
+	var kept []Event // the reply's end, while nothing is said in it
 	emit := func(ev Event) {
 		switch ev.Kind {
 		case KError:
-			if ev.Code == "" && cont.possible() {
+			if ev.Code == "" && cont.possible() && !inGroupTry(r.Context()) {
 				// held while the reply may yet go on; sent when it can't
 				failed, failedCode, failedStatus, cut = ev.Text, ev.Code, ev.Status, true
 				return
@@ -153,6 +172,17 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		case KStart, KUsage:
 			u.add(ev.Usage)
 			u.add(Usage{Served: ev.Model}) // the model the vendor says answered
+		case KStop:
+			stop = ev.Stop
+		}
+		if empty && !said {
+			switch {
+			case saysSomething(ev):
+				said = true
+			case ev.Kind == KStop, ev.Kind == KUsage:
+				kept = append(kept, ev)
+				return
+			}
 		}
 		cont.emit(enc, ev)
 	}
@@ -167,6 +197,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 	var serr error
 	for again := 0; ; again++ {
 		failed, failedCode, failedStatus, cut, serr = "", "", 0, false, nil
+		var held func() // what a textCallSee of this try holds back
 		req := request
 		if cont.resume {
 			req = cont.request(request)
@@ -180,11 +211,15 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		}
 		if err == nil {
 			u.RequestID = requestID(res.Header)
+			empty = emptyFails(actual)
 		}
 		if err == nil && res.StatusCode >= 400 {
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 			res.Body.Close()
 			failed, failedStatus = p.Explain(p.Name+": "+provider.APIError(b, res.Status), res.StatusCode, b), res.StatusCode
+			if res.StatusCode == http.StatusTooManyRequests && accountAgent(p) == "antigravity" && antigravityTurnsAway(request.System) {
+				failed += " — " + antigravityTurnedAwayHint
+			}
 			if !cont.resume {
 				if p.Preset == "openrouter" && openRouterSharedPool(b) {
 					markOpenRouterSharedPool(w)
@@ -207,8 +242,13 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				}
 			} else {
 				dec := decoder(actual)
+				attemptSee := see
+				if names := textCallNames(request.Tools); names != nil {
+					t := &textCallSee{names: names, see: see}
+					attemptSee, held = t.event, t.release
+				}
 				serr = readSSEAlive(rd, func(_, data string) error {
-					if err := dec(data, see); err != nil {
+					if err := dec(data, attemptSee); err != nil {
 						return err
 					}
 					if cut {
@@ -223,13 +263,35 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			}
 		}
 		if serr == nil && failed == "" {
+			if held != nil {
+				held()
+			}
+			if empty && !said && answersNothing(stop) {
+				// as an error it is asked again, or of another account,
+				// and an agent told it tries again rather than end its
+				// turn (#667); a reply that said nothing has nothing to
+				// go on from, so it isn't continued
+				failed = p.Name + ": " + emptyReply
+				break
+			}
+			for _, ev := range kept {
+				enc.event(ev)
+			}
 			if zen != nil {
 				zen.end(enc.event)
 			}
 			enc.finish()
 			return 200, ""
 		}
-		if !cont.again(failedStatus, failedCode, again, r.Context()) {
+		// an error the client already has ends the reply: nothing of it
+		// goes on after it (a group member's mid-reply error fails the
+		// try at once, for the group's next member, #733)
+		if errSent || !cont.again(failedStatus, failedCode, again, r.Context()) {
+			if held != nil {
+				// what was held goes as the text it is, as it used to;
+				// a reply that goes on reads it again instead
+				held()
+			}
 			break
 		}
 		enc.keepalive() // the client waits while the same conversation is asked again

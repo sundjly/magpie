@@ -55,6 +55,9 @@ type Option struct {
 
 	// own: served on the agent's own sign-in (viaMagpie), for Same
 	own bool
+	// sub: served on a subscription signed in in magpie, not a key; a
+	// Claude account only for Claude Code, which alone may use it safely
+	sub bool
 }
 
 // Field is one tunable setting of an agent. Set with an empty value puts
@@ -90,6 +93,11 @@ type Agent struct {
 	// UA is what the agent's User-Agent begins with, lower-case: how the
 	// gateway tells its requests from others'
 	UA []string
+	// ListsModels: the agent's own model menu is the gateway's /v1/models
+	// as asked with its key, so the models picked on the Agents page for it
+	// (settings.HiddenModels) are its menu, though no field of its picks
+	// among the catalog (Cursor Private Inference)
+	ListsModels bool
 	// Sync, for an agent that reads magpie's models from a file of its own
 	// rather than asking the gateway, rewrites that list as the catalog is
 	// now — where magpie wrote one; nothing else changes (see SyncCatalog).
@@ -100,6 +108,24 @@ type Agent struct {
 	// kept: the endpoint, provider and model the user had. Disconnect runs
 	// it before the fields' defaults.
 	Unwire func() error
+	// Join, for an agent that can have magpie's models in its own list
+	// while it stays on the model it was on (Codex signed in with ChatGPT),
+	// connects it so, its model left as its own last pick; false where it
+	// can't, and Connect then picks one of magpie's.
+	Join func() (bool, error)
+	// Joined reports an agent Join connected: magpie is in its config
+	// though no field is on one of magpie's models.
+	Joined func() bool
+	// Routed reports that the agent's config sends whatever model it
+	// names to magpie's gateway (Codex's openai_base_url or magpie as its
+	// provider), so a model's name the gateway takes as a routing group
+	// is that group's (#750).
+	Routed func() bool
+	// Follow, for an agent whose own picker moves its main model where
+	// magpie keeps other settings following it (Claude Code's /model and
+	// its tiers), brings those along to the model picked there. Run as the
+	// Agents page is drawn.
+	Follow func() error
 	// RenameRefs, for an agent whose config names magpie's models beyond
 	// its fields (omp's other roles and fallback chains), moves those names
 	// off provider from onto to, the rest of each kept; it answers whether
@@ -150,6 +176,13 @@ type Agent struct {
 	// names, never taken for one of magpie's models nor moved by what
 	// matches the picker (RenameRefs moves the names in it).
 	SplitSuffix func(v string) (model, suffix string, one bool)
+	// Spelled, when set, says whether a value of the agent's fields is
+	// spelled as one of magpie's there (prefixed: it starts with
+	// "magpie/", its provider in the agent): one that isn't is a model of
+	// one of the agent's own providers, never magpie's, even when magpie
+	// has a provider of the same name (OpenHanako's own
+	// deepseek/deepseek-v4-pro read as magpie's deepseek, #835).
+	Spelled func(v string) bool
 	// detect, when set, says whether the agent is here in place of looking
 	// for its files and binary: a distro's, probed once.
 	detect func() bool
@@ -380,6 +413,9 @@ func atomic(a *Agent, paths ...string) *Agent {
 	}
 	if sync := a.Sync; sync != nil {
 		a.Sync = func() error { return edit.Atomically(sync, paths...) }
+	}
+	if follow := a.Follow; follow != nil {
+		a.Follow = func() error { return edit.Atomically(follow, paths...) }
 	}
 	if unwire := a.Unwire; unwire != nil {
 		a.Unwire = func() error { return edit.Atomically(unwire, paths...) }

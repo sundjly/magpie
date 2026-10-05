@@ -1,4 +1,15 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# The recipes (clean's rm -rf too) name paths relative to the working
+# folder, so they run only in magpie's own, known by its go.mod: run from
+# another one (make -f path/to/Makefile) they would act there. make -C
+# works. go.mod is read relative to the working folder, so a path with
+# spaces (or a symlinked Makefile) changes nothing.
+ifneq ($(shell sed -n 's/^module //p' go.mod 2>/dev/null),github.com/yetone/magpie)
+  $(error run make in magpie's folder (make -C path/to/magpie), not in $(CURDIR))
+endif
+
+# A tag may hold $, ( or `, which the shell lines below would run: the
+# version keeps only what a version is spelled with.
+VERSION ?= $(or $(shell git describe --tags --always --dirty 2>/dev/null | tr -cd 'A-Za-z0-9._+-'),dev)
 LDFLAGS  = -s -w -X main.version=$(VERSION)
 TAGS     = production
 TARGETS  = darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64 android/arm64
@@ -21,7 +32,7 @@ ifeq ($(shell go env GOOS),android)
   TAGS = nogui
 endif
 
-.PHONY: build cli install test app icons release release-cli release-windows release-linux clean dev dev-once
+.PHONY: build cli install test test-ui app icons release release-cli release-windows release-linux clean dev dev-once
 
 build:
 	go build -tags "$(TAGS)" -trimpath -ldflags="$(LDFLAGS)" -o magpie .
@@ -34,6 +45,16 @@ install:
 
 test:
 	go vet -tags "$(TAGS)" ./... && go test -tags "$(TAGS)" ./...
+
+# The browser regressions under internal/gui/tests: the real pages in
+# Playwright's Chromium and WebKit; see internal/gui/tests/README.md.
+UI_TESTS = $(wildcard internal/gui/tests/*.test.cjs)
+# Files are independent and run in parallel; 1 diagnoses a flaky one.
+UI_TEST_CONCURRENCY ?= 2
+
+test-ui:
+	@test -n "$(UI_TESTS)" || { echo "no GUI tests found under internal/gui/tests" >&2; exit 1; }
+	node --test --test-concurrency=$(UI_TEST_CONCURRENCY) $(UI_TESTS)
 
 # macOS bundle: menu bar app with no Dock icon (LSUIElement).
 app: build

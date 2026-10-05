@@ -31,8 +31,8 @@ func (e Entry) Names() []string {
 
 // VisibleTo is what agent's lists are narrowed to, and whether they are.
 func VisibleTo(agent string) ([]string, bool) {
-	names, ok := settings.Load().Visible[strings.ToLower(agent)]
-	return names, ok
+	names, ok := heldSettings().Visible[strings.ToLower(agent)]
+	return slices.Clone(names), ok
 }
 
 // Shows reports whether a visibility shows e.
@@ -44,6 +44,16 @@ func Shows(names []string, e Entry) bool {
 	}
 	return false
 }
+
+// Described is set by the gateway: whether an image sent to a model that
+// can't see is described to it by one that can (Settings › Vision). Agents
+// are then told every model takes images; told a model is text-only, they
+// turn the user's image away before magpie is asked (Codex: "does not
+// support image input").
+var Described func() bool
+
+// described is Described, false before the gateway sets it.
+func described() bool { return Described != nil && Described() }
 
 // CatalogFor is the catalog as agent is shown it, and what is kept from it
 // (none when its lists aren't narrowed): its visibility's, less the models
@@ -81,7 +91,7 @@ func ListedFor(agent string) (listed, kept []Entry) {
 
 // HiddenModels are the ids of the entries taken out of agent's lists.
 func HiddenModels(agent string) map[string]bool {
-	ids := settings.Load().HiddenModels[strings.ToLower(agent)]
+	ids := heldSettings().HiddenModels[strings.ToLower(agent)]
 	out := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		out[id] = true

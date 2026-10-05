@@ -365,8 +365,10 @@ func setModelImage(ref string, images *bool) (bool, error) {
 // its models on one and others on another (01huadalang on Discord: 有的供应商
 // 一个 api 里有很多模型但是不同协议); "" leaves it to the vendor's list and
 // the URLs the provider has, as before. It must be an API the provider has
-// a URL for, and a provider of a key's: a sign-in's models are asked the
-// way its agent asks them.
+// a URL for: a preset's or a subscription's as well as a custom
+// provider's, when it has more than one (01huadalang: OpenCode Go's
+// deepseek-v4.1-flash answers on Responses too, and magpie asked it on
+// chat alone).
 func SetModelAPI(ref, api string) error {
 	return touchedIf(setModelAPI(ref, api))
 }
@@ -380,9 +382,6 @@ func setModelAPI(ref, api string) (bool, error) {
 	if proto != "" {
 		if !slices.Contains(Protocols, proto) {
 			return false, fmt.Errorf("a model's API is chat, responses or anthropic, not %q", api)
-		}
-		if p.Account != nil {
-			return false, fmt.Errorf("%s's models are asked the way its sign-in is; their API can't be set", p.ID)
 		}
 		if p.Base(proto) == "" {
 			return false, fmt.Errorf("%s has no %s URL to ask %s on: add it under More endpoints first", p.ID, proto, model)
@@ -413,10 +412,10 @@ func setModelAPI(ref, api string) (bool, error) {
 // ModelAPI is the API the user said p's model is asked on, when p has a
 // URL for it still.
 func (p Provider) ModelAPI(model string) (Protocol, bool) {
-	if p.Account != nil || len(p.Speaks()) < 2 {
+	if len(p.Speaks()) < 2 {
 		return "", false
 	}
-	proto := Protocol(settings.Load().ModelAPIs[p.ID+"/"+model])
+	proto := Protocol(heldSettings().ModelAPIs[p.ID+"/"+model])
 	if proto == "" || !slices.Contains(Protocols, proto) || p.Base(proto) == "" {
 		return "", false
 	}
@@ -613,7 +612,7 @@ func (e Entry) Label() string {
 // is that name just as they wrote it, and the vendor's keep Label's.
 func Labels(es []Entry) []string {
 	out := make([]string, len(es))
-	s := settings.Load()
+	s := heldSettings()
 	plain := s.PlainNames
 	own := !plain && s.PlainOwnNames
 	same := map[string]int{}
@@ -686,6 +685,21 @@ func SetCodexAgentsV1(on bool) error {
 		return nil
 	}
 	s.CodexAgentsV1 = on
+	if err := settings.Save(s); err != nil {
+		return err
+	}
+	catalog.Touched()
+	return nil
+}
+
+// SetFullContext turns settings.FullContext on or off: Codex and Claude
+// Code are told a model's whole window, or the working one, again.
+func SetFullContext(on bool) error {
+	s := settings.Load()
+	if s.FullContext == on {
+		return nil
+	}
+	s.FullContext = on
 	if err := settings.Save(s); err != nil {
 		return err
 	}

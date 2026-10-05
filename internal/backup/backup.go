@@ -65,7 +65,7 @@ type Bundle struct {
 	Version     int                        `json:"version"`
 	Created     time.Time                  `json:"created"`
 	App         string                     `json:"app,omitempty"` // the magpie that made it
-	Keys        bool                       `json:"keys"`          // whether credentials are included
+	Keys        bool                       `json:"keys"`          // whole-backup credential policy
 	Providers   []provider.Provider        `json:"providers"`
 	Icons       map[string][]byte          `json:"icons,omitempty"`  // pictures picked for providers, by file name
 	Groups      []provider.Group           `json:"groups,omitempty"` // the user's model groups
@@ -80,6 +80,14 @@ type Bundle struct {
 	// Order is the order the user put the providers in (#499), by id;
 	// none from a magpie before it went, or when they were never arranged.
 	Order []string `json:"order,omitempty"`
+	// GroupOrder is the order the user put the routing groups in (#779),
+	// by id; none from a magpie before it, or when never arranged.
+	GroupOrder []string `json:"groupOrder,omitempty"`
+	// Sync can carry one part's credentials without changing the others'
+	// Keys policy; these are absent from older backups and whole collects.
+	ProvidersKeys *bool `json:"providersKeys,omitempty"`
+	SettingsKeys  *bool `json:"settingsKeys,omitempty"`
+	LibraryKeys   *bool `json:"libraryKeys,omitempty"`
 }
 
 type envelope struct {
@@ -101,6 +109,35 @@ var ErrPassphrase = errors.New("wrong passphrase, or the file was changed")
 // the damaged one from this computer rather than fail on it forever.
 var ErrCorrupt = errors.New("not a magpie backup")
 
+// BundleVersion is the bundle's structure: 2 carries the per-part
+// credential markers (ProvidersKeys, SettingsKeys, LibraryKeys) as their
+// own three-state flags; 1 and before had the whole-bundle Keys alone.
+const BundleVersion = 2
+
+// Flag is a per-part credential marker as a bundle field takes one: the
+// part's own, written when a sync merged it. Absent (nil) is a whole
+// collect's or an older magpie's.
+func Flag(keys bool) *bool { return &keys }
+
+// scopedKeys is whether a part's credentials are in the bundle: the part's
+// own marker when the bundle carries one — a sync writes it for every part
+// it merges — and the whole-bundle bit for a whole collect or an older
+// file, which have no per-part ones. An older writer can also drop the markers
+// from a v2 file, so a version number alone never implies a credential scope.
+func (b Bundle) scopedKeys(part string) bool {
+	var own *bool
+	switch part {
+	case "settings":
+		own = b.SettingsKeys
+	case "library":
+		own = b.LibraryKeys
+	}
+	if own != nil {
+		return *own
+	}
+	return b.Keys
+}
+
 // Collect gathers the bundle; without keys, providers carry none, nor any
 // header that looks like one, and the library's servers no environment
 // variable or header that looks like one (their names stay).
@@ -117,6 +154,9 @@ func Collect(keys bool, app string) (Bundle, error) {
 		return b, err
 	}
 	if b.Order, err = provider.StoredOrder(); err != nil {
+		return b, err
+	}
+	if b.GroupOrder, err = provider.StoredGroupOrder(); err != nil {
 		return b, err
 	}
 	if keys {
@@ -190,7 +230,7 @@ var secretHeader = regexp.MustCompile(`(?i)auth|key|token|secret|cookie|session|
 func Secret(name string) bool { return secretHeader.MatchString(name) }
 
 func withoutKeys(p provider.Provider) provider.Provider {
-	p.Key, p.KeyName, p.Keys, p.KeyProtocol = "", "", nil, ""
+	p.Key, p.KeyName, p.Keys, p.KeyProtocol, p.KeyWeight = "", "", nil, "", 0
 	p.BalanceToken = ""
 	if len(p.Headers) > 0 {
 		h := map[string]string{}
@@ -334,6 +374,9 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		if err := provider.MirrorOrder(b.Order); err != nil {
 			return r, err
 		}
+		if err := provider.MirrorGroupOrder(b.GroupOrder); err != nil {
+			return r, err
+		}
 		if b.Searches != nil {
 			if err := provider.RestoreSearchAPIs(*b.Searches); err != nil {
 				return r, err
@@ -355,6 +398,7 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		}
 	}
 	if parts.Settings && (b.Settings != nil || b.GatewayKeys != nil) {
+		keys := b.scopedKeys("settings")
 		// the window's size, the proxy, the menu bar's usage are this machine's own
 		cur := settings.Load()
 		s := cur
@@ -362,7 +406,7 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 			s = *b.Settings
 		}
 		s.KeepOwn(cur)
-		if !b.Keys {
+		if !keys {
 			s.LANKey, s.LANKeyID = cur.LANKey, cur.LANKeyID
 			s.GitHubToken = cur.GitHubToken
 			s.OTel.Headers = nil
@@ -384,7 +428,7 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		if err := settings.Save(s); err != nil {
 			return r, err
 		}
-		if b.Keys && b.GatewayKeys != nil {
+		if keys && b.GatewayKeys != nil {
 			if err := access.Restore(*b.GatewayKeys); err != nil {
 				// Settings must be writable before replacing credentials. If the
 				// store refuses the write, restore their original association.
@@ -394,7 +438,7 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 				return r, err
 			}
 		}
-		if b.Keys && b.GatewayKeys == nil {
+		if keys && b.GatewayKeys == nil {
 			access.MigrateLegacyLANKeyBestEffort()
 		}
 		r.Settings = true
@@ -429,14 +473,15 @@ func Restore(b Bundle, parts Parts) (Result, error) {
 		}
 	}
 	if parts.Library && b.Library != nil {
-		lib := b.Library
-		if !b.Keys { // the servers' keys kept here stay
-			have, err := library.Collect()
-			if err != nil {
-				return r, err
-			}
-			lib = lib.WithSecrets(have, Secret)
+		// Even a keyed uploader can carry a redaction it downloaded and never
+		// held a value for. Fill blanks from this computer at apply time: the
+		// remote may never have held its private token. Nonempty replacements
+		// and removed entries still take effect.
+		have, err := library.Collect()
+		if err != nil {
+			return r, err
 		}
+		lib := b.Library.WithSecrets(have, Secret)
 		res, err := library.Put(lib)
 		if err != nil {
 			return r, fmt.Errorf("the library: %w", err)
