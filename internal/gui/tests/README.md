@@ -21,6 +21,14 @@ literal custom names and narrow layouts in Chinese and English on both engines.
 Sharing off keeps the original API-key field and hides the gateway-key picker;
 sharing on names the arbitrary local option separately from the Magpie key.
 
+`gateway-takeover.test.cjs` checks the Gateway card's button: with an older
+magpie serving the gateway it reads "Quit magpie {v} and take over" and posts
+`/api/gateway/take-over`; once this magpie serves it is "Restart gateway" and
+posts `/api/gateway/restart`; a magpie of the same version gets no button. A
+refusal (a program that isn't magpie on the port) is said under it with the
+program's path and pid. No click scrolls, nothing has a left border, in
+Chinese and English.
+
 `gateway-key-limit.test.cjs` checks a gateway key's own limit (#585): each
 limited key's badge and line (used, limit, left, reset, requests in flight,
 calls without a price), a spent key's "refused until", and the limit editor
@@ -28,6 +36,13 @@ under a key's row. Window, tokens, cost and cache reads are staged, marked
 unsaved and sent only by Save; Cancel drops them, a bad amount disables Save,
 and No limit + Save sends `null`. No click scrolls the page, nothing has a
 left border, and the open editor fits a 560px window, in Chinese and English.
+
+`gateway-key-models.test.cjs` checks the models a gateway key may use
+(#882): the badge on each key's row ("All models", or how many), the app's
+own menu (no native select) that stays inside a short window, picks sent
+only when it closes, and "All models" taking the restriction off. No click
+scrolls the page, nothing has a left border, and the row fits a 560px
+window, in Chinese and English.
 
 `api-key-usage.test.cjs` exercises the existing provider key list: adding,
 enabling and disabling, choosing the first key, renaming and removing.
@@ -50,7 +65,7 @@ The settings theme picker is also switched and reloaded in Chromium and
 WebKit. No separate colours are defined for gateway keys.
 
 ```sh
-node --test --test-concurrency=1 internal/gui/tests/gateway-caller-keys.test.cjs internal/gui/tests/gateway-connect-keys.test.cjs internal/gui/tests/gateway-key-limit.test.cjs internal/gui/tests/api-key-usage.test.cjs internal/gui/tests/api-key-theme.test.cjs
+node --test --test-concurrency=1 internal/gui/tests/gateway-caller-keys.test.cjs internal/gui/tests/gateway-connect-keys.test.cjs internal/gui/tests/gateway-key-limit.test.cjs internal/gui/tests/gateway-key-models.test.cjs internal/gui/tests/api-key-usage.test.cjs internal/gui/tests/api-key-theme.test.cjs
 ```
 
 ## Other Browser Regressions
@@ -64,6 +79,20 @@ the purpose while keeping the selected day and session grouping. It uses
 isolated API fixtures. Run with
 `node --test internal/gui/tests/purpose-filter.test.cjs` and the Playwright
 environment described below.
+
+`routing-purpose-state.test.cjs` covers #771's follow-ups: selected-purpose
+counts (including broken-off 200s and failures without an HTTP status, while
+excluding informational notes on successful 200s), the failed-request link,
+the latest matching story through live updates and returning to the page,
+preserving a picked request, an empty historical selection, and both ways
+to clear the compact purpose control. Unfiltered
+live counters retain gateway lifetime totals; scoped counters describe the
+completed requests kept in the selected list. Run with
+`node --test internal/gui/tests/routing-purpose-state.test.cjs`.
+
+Request-kind aliases and English labels live in `internal/usage/purpose.go`.
+After changing them, run `go generate ./internal/usage` to update
+`assets/purposes.js`; `TestPurposeAssetMatchesUsage` rejects a stale asset.
 
 `routing-sealed-task.test.cjs` checks that routing explains why an encrypted
 subagent task excludes non-ChatGPT providers and why the parent account goes
@@ -339,6 +368,17 @@ and the status line says which agent was moved to the model from one provider;
 clicked on, the found group is back. Neither click moves the page, the switch
 has no left-border accent, and every string has its Chinese.
 
+`name-suffix-where-named.test.cjs` checks the setting that says whether a
+provider's name or "· routing group" follows a name in the agents' lists (#868)
+where names are given, in Chromium and WebKit, English and Chinese. The
+provider editor's Names & levels has its three choices and says what the lists
+show. For the groups it is one setting for all of them, so it sits over the
+groups on Routing (PAMI on Discord: in one group's editor it read as that
+group's): a group's editor has no choices, only what its group will be called
+and that it is set above; a pick there posts settings/plain-names once and the
+open editor's line follows it with its unsaved name. No click scrolls, nothing
+native, no left border, and every string has its Chinese, Japanese and German.
+
 `routing-manual.test.cjs` routes a group by hand in Chromium and WebKit,
 English and Chinese (#317: pick the model, as CC Switch picks a provider). A
 manual group's card lists its models, the one every request goes to marked, and
@@ -408,6 +448,12 @@ Balance URL): the editor says so, one click moves it to `/api/user/self`
 with the quota as its field, the New-Api-User header is asked for until it
 is typed, Check balance asks as the form has it and says the fix plainly,
 and the Usage page's card does too.
+
+`balance-field-default.test.cjs` leaves a custom provider's Balance field
+empty (#881): its placeholder is the field magpie reads from a Balance URL
+whose reply it knows (new-api's `/api/usage/token` and `/api/user/self`, a
+sub2api panel's `/api/v1/user/profile`, OpenAI's `credit_grants`), following
+the URL as it is typed; any other URL keeps the example.
 
 `cli-update.test.cjs` draws the agents' CLI versions on the Agents page
 (#202) from a faked API: the version after each name, "Update to x.y.z" only
@@ -582,6 +628,12 @@ the same. Settings → Update button says which version it is hidden for, with
 Show again, and turns it off for good; the version row still offers the
 restart. No click moves the page. Panel and window, English and Chinese.
 
+`update-download-percent.test.cjs` checks the Update pill while a failed
+update downloads again (inaction on Discord): with the size known and
+nothing in yet it says 0%, with no size "Downloading…", then the percent —
+never NaN, which it said while the answer left `done` out. The click doesn't
+move the page. English and Chinese.
+
 `update-auto.test.cjs` checks Settings → Automatic updates (#472): on, every
 6 h, with nothing set; Check every saves 30 min, 1 h, 6 h or 24 h; Off is
 saved and kept through a reload, the interval staying in place, dimmed, for
@@ -737,6 +789,13 @@ row, a wider window redraws it, a metric with no price says so, and with no
 request listed there is nothing; in English and Chinese, light and dark.
 The daily chart also checks selection, gray bars on other days, filtered rows
 and CSV, an empty day, clearing a selection, keyboard input and resizing.
+
+`usage-model-at-provider.test.cjs` splits the Requests tab's chart by "Model ·
+provider" (inaction on Discord): one model at two providers is two rows of the
+ranking, each named by both with the provider's icon and its own first token,
+the faster first by Speed though fewer requests went to it. A click lists that
+provider's requests of that model (provider and model both asked for), a click
+again all of them, and the page doesn't move. English and Chinese.
 
 `usage-chart-axis.test.cjs` checks the usage chart's side labels, in the
 window's Requests tab (1180 and 560 wide) and the tray panel's Usage tab (440
@@ -969,6 +1028,16 @@ Trash lists what went and Restore posts its key; an agent whose sessions
 magpie can't delete (OpenCode) shows no delete. No left-border accent, every
 string in Chinese. Chromium and WebKit, English and Chinese, API faked.
 
+`sessions-talk.test.cjs` shows a session's conversation and carries a Pi
+session on in oh-my-pi (sxwedo, #845). Show conversation in a session's
+details reads sessions/transcript by agent and id, once, and lists the
+user's words, the model's, each tool call by name and its result, thinking
+folded; an agent magpie can't read (OpenCode) has no such button. Continue
+in is the app's menu, not a `<select>`: copy posts the `omp --fork` command,
+the terminal posts agent, id and `in: "omp"`; the details say the command.
+No click moves the page, no left-border accent, every string in Chinese,
+Japanese and German. Chromium and WebKit, English and Chinese, API faked.
+
 `sessions-usage-open.test.cjs` keeps one list of sessions (#752): each
 Sessions page row shows the tokens, cost and models Usage → Sessions showed,
 its details what each model spent and where magpie routed it, and its filter
@@ -999,6 +1068,15 @@ magpie's trash as single deletes do; a session still being written to is
 left and said so, other folders stay, and an agent magpie can't delete from
 has no boxes. No click moves the page, no left-border accent, every string
 in Chinese. Chromium and WebKit, English and Chinese, API faked.
+
+`sessions-codex-provider.test.cjs` moves Codex sessions made with another
+provider to the one Codex uses now (#887): the Codex tab says how many there
+are and which provider, tags each, and Move opens magpie's own dialog with
+each ticked; Cancel posts nothing, an unticked one isn't moved, Move posts
+sessions/codex-provider with each id and Codex's provider, and Undo posts
+each back to the provider it had. No click moves the page, no left-border
+accent, every string in Chinese, Japanese and German. Chromium and WebKit,
+English and Chinese, API faked.
 
 `sessions-toolbar.test.cjs` uses ten agents to check that fitting tabs stay
 visible at 1800px, while 900, 660 and 320px windows use a compact agent menu.
@@ -1423,12 +1501,21 @@ models" row (01huadalang on Discord: pick which provider searches for a model
 that can't). With none named it shows Automatic and magpie's own pick; its
 picker offers Automatic first, each provider that can search by its small
 model, and each of its models, including a relay said to search; the row says
-those relays are never picked automatically and why. A model picked is saved as `searcher:
+those relays require manual selection and are not automatic fallback choices.
+Costs and fallback are explained for every search provider; providers left out
+are described as unavailable in the current configuration, with both other
+search providers and configured search APIs named as alternatives.
+A model picked is saved as `searcher:
 "<provider>/<model>"`, a provider by its small model as `searcher:
 "<provider>"`, and shown; another setting saved still sends the pick; one
 named that magpie can't use (turned off) is said in the row with magpie's
 pick shown instead; Automatic sends `searcher: ""`. No click moves the page.
-English and Chinese, Chromium and WebKit, with the API faked.
+The picker is checked in English and Chinese; the help also in Japanese and
+German, at 560 and 1000 pixels in light and dark themes, including a selected
+relay and empty relay/unavailable lists. Desktop text keeps its single-line
+ellipsis and full hover title; the existing narrow-web layout is unchanged.
+Chromium and WebKit, with the API faked.
+Set `ARTIFACT_DIR` to retain screenshots of the help.
 
 `provider-file-error.test.cjs` checks a providers.json that is there but
 can't be read (#415's review): the Providers page says over the list that the
@@ -1694,3 +1781,11 @@ of its own (Cindy) on the Agents page: a line under its name says whether
 magpie is added (green once it is), its button stands where the other rows'
 model picker does, as wide and lined up with it at 960 and 700px, and a click
 opens the app's link. English and Chinese, Chromium and WebKit.
+
+`privacy-hides-accounts.test.cjs` checks that Privacy's Mask personal data
+hides the accounts on screen too (inaction on Discord): until Hide accounts is
+chosen on a computer it follows the setting, so Usage's email address is
+blurred and its button pressed; an address shown on purpose with the button
+stays shown; on Settings › Privacy, turning Mask personal data on turns Hide
+accounts on, and Privacy's own Hide accounts row says so and turns it off,
+without scrolling. English and Chinese, Chromium and WebKit.

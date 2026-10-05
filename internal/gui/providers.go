@@ -45,6 +45,11 @@ type modelJSON struct {
 	Auto     []string `json:"auto,omitempty"`      // the APIs its vendor's list says it is served on, what Auto asks it on
 	Same     string   `json:"same,omitempty"`      // the model the user said it is the same as, for the groups magpie finds (#583)
 	Merge    string   `json:"merge,omitempty"`     // what those groups merge it by when the user says nothing
+	// what it costs, USD per million tokens (#819): the price the user set
+	// for it, and its list price, its vendor's else its maker's, before the
+	// provider's price rate
+	Price *catalog.Price `json:"price,omitempty"`
+	List  *catalog.Price `json:"list,omitempty"`
 }
 
 type providerJSON struct {
@@ -141,15 +146,19 @@ type providerJSON struct {
 	// Groups are the routing groups ("group/<id>") each of its models is
 	// in, by model id: what an unlisted one is still used through, and the
 	// editor names those in none
-	Groups    map[string][]string `json:"groups,omitempty"`
-	Off       bool                `json:"off"`                // switched off: kept, but agents get none of its models
-	Contexts  map[string]int      `json:"contexts,omitempty"` // the windows the user set, "*" for all its models
-	Outputs   map[string]int      `json:"outputs,omitempty"`  // the reply limits the user set (provider.OutputsOf)
-	Fetched   *time.Time          `json:"fetched,omitempty"`  // when the list came from the vendor; the page says how long ago in its language
-	Agents    []providerAgent     `json:"agents"`             // detected agents, current ones flagged
-	Sponsored bool                `json:"sponsored"`
-	KeyList   []provider.KeyInfo  `json:"keyList"`           // its keys, in the order requests try them
-	Account   *accountJSON        `json:"account,omitempty"` // a signed-in agent, see provider.Account
+	Groups   map[string][]string `json:"groups,omitempty"`
+	Off      bool                `json:"off"`                // switched off: kept, but agents get none of its models
+	Contexts map[string]int      `json:"contexts,omitempty"` // the windows the user set, "*" for all its models
+	Outputs  map[string]int      `json:"outputs,omitempty"`  // the reply limits the user set (provider.OutputsOf)
+	Compacts map[string]int      `json:"compacts,omitempty"` // where Codex and Claude Code compact on its models (provider.CompactsOf)
+	Fetched  *time.Time          `json:"fetched,omitempty"`  // when the list came from the vendor; the page says how long ago in its language
+	// ListError is why a plugin's account has only the plugin's defaults
+	// (provider.ListError): the editor says so under its models
+	ListError string             `json:"listError,omitempty"`
+	Agents    []providerAgent    `json:"agents"` // detected agents, current ones flagged
+	Sponsored bool               `json:"sponsored"`
+	KeyList   []provider.KeyInfo `json:"keyList"`           // its keys, in the order requests try them
+	Account   *accountJSON       `json:"account,omitempty"` // a signed-in agent, see provider.Account
 	// Move is where a built-in subscription stands with the community
 	// plugin that can run it (provider.Move): set for those that have one
 	Move *moveJSON `json:"move,omitempty"`
@@ -376,11 +385,11 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Decide: p.Decide, ModelTest: p.ModelTest(), DecideTest: p.AsksDecideModels(),
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
-		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, Headers: p.Headers, Searches: p.Searches, Cline: p.IsCline(), PinUpstream: p.PinUpstream, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
+		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, Headers: p.Headers, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
 		Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Unlisted: p.Unlisted, Off: p.Off, Contexts: p.Contexts,
 		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(), PriceRate: p.PriceRate,
-		Outputs: provider.OutputsOf(p.ID),
+		Outputs: provider.OutputsOf(p.ID), Compacts: provider.CompactsOf(p.ID),
 	}
 	if out.Fallback == nil {
 		out.Fallback = []string{}
@@ -457,7 +466,8 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	}
 	seen := map[string]bool{}
 	names, kept := p.ModelNames(), p.ModelEfforts()
-	sames := settings.Load().ModelSameAs
+	held := settings.Load()
+	sames := held.ModelSameAs
 	// a list fetched before magpie kept each model's most: the one Codex
 	// CLI keeps says it
 	var most []catalog.Model
@@ -490,6 +500,16 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		}
 		j.Same = sames[p.ID+"/"+m.ID]
 		j.Merge = provider.MergeName(m.ID)
+		if mp, ok := held.ModelPrices[p.ID+"/"+m.ID]; ok {
+			if pr, bad := mp.Price(); bad == "" {
+				j.Price = &pr
+			}
+		}
+		if pr, ok := p.ListPrice(m.ID); ok {
+			j.List = &pr
+		} else if pr, ok := provider.MakerPrice(m.ID); ok {
+			j.List = &pr
+		}
 		if len(j.Efforts) == 0 {
 			j.Efforts, j.Given = provider.Levels, true
 		}
@@ -527,6 +547,7 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	if t, ok := p.Listed(); ok {
 		out.Fetched = &t
 	}
+	out.ListError = p.ListError()
 	for _, a := range agents {
 		pa := providerAgent{ID: a.ID, Name: a.Name, Icon: a.Icon, Current: a.pid == p.ID, Model: a.model}
 		if a.inGroup {
@@ -776,6 +797,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// says, by model id, "*" for all (provider.SetModelOutputs); a
 			// save that leaves it out keeps them
 			Outputs map[string]int `json:"outputs"`
+			// Compacts, for save: the thresholds the editor's Compact at
+			// says, by model id, "*" for all (provider.SetModelCompacts,
+			// #876); a save that leaves it out keeps them
+			Compacts map[string]int `json:"compacts"`
 			// Routing and Affinity, for route, affinity and save: how
 			// requests spread over its keys or accounts, and how long a
 			// conversation stays with the one that answered it. The
@@ -1026,6 +1051,12 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// after the list is fetched: a limit has to name a model it has
 			if req.Outputs != nil {
 				if err := provider.SetModelOutputs(in.ID, req.Outputs); err != nil {
+					fail(rw, err)
+					return
+				}
+			}
+			if req.Compacts != nil {
+				if err := provider.SetModelCompacts(in.ID, req.Compacts); err != nil {
 					fail(rw, err)
 					return
 				}

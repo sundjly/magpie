@@ -83,6 +83,11 @@ type Session struct {
 	Unpriced int     `json:"unpriced"` // models that spent tokens but have no known price
 	Resume   string  `json:"resume"`   // the command that picks the session up again
 	Path     string  `json:"path"`     // its (main) file
+	// Carry are the other agents that can carry the session on, reading its
+	// file as it is (carry.go)
+	Carry []Carry `json:"carry,omitempty"`
+	// Transcript says its conversation can be read (TranscriptOf)
+	Transcript bool `json:"transcript,omitempty"`
 	// WSL is the WSL distro the session ran in, its files read through
 	// \\wsl.localhost (see wsl.go); "" for this computer's own
 	WSL string `json:"wsl,omitempty"`
@@ -127,6 +132,8 @@ type state struct {
 	// Codex: the model in use, and its running total (input with cache) last seen
 	Model string  `json:"model,omitempty"`
 	Total *Tokens `json:"total,omitempty"`
+	// Codex: the model_provider its session_meta names (codex_provider.go)
+	Provider string `json:"provider,omitempty"`
 	// Pi: in a forked session, the time it was forked; the lines before
 	// it are the copy of the session it was forked from
 	Since time.Time `json:"since,omitzero"`
@@ -944,6 +951,7 @@ func assemble(fs []file, price func(string) *catalog.Price) (Session, bool) {
 	if !s.ReadOnly {
 		s.Resume = resumeCommand(s.WSL, s.Agent, s.ID, s.Cwd)
 	}
+	s.Carry, s.Transcript = carries(s), HasTranscript(s.Agent)
 	return s, true
 }
 

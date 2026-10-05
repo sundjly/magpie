@@ -51,7 +51,7 @@ type RequestPage struct {
 
 type packedRow struct {
 	Time                           time.Time
-	Text                           [27]uint32
+	Text                           [28]uint32
 	Tokens                         [5]int64
 	Millis, TTFT, FirstText, Order int64
 	Sent                           int64
@@ -76,10 +76,10 @@ type rowChunk struct {
 }
 
 // rowMsg is the Text of a row's Claude message id, after rowText's
-const rowMsg = 26
+const rowMsg = 27
 
-func rowText(r *Row) [26]*string {
-	return [26]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID}
+func rowText(r *Row) [27]*string {
+	return [27]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream}
 }
 func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	if c.dict == nil {
@@ -131,6 +131,9 @@ func (c *rowChunk) row(i int) Row {
 	r := Row{Record: Record{RouteID: p.RouteID, Time: p.Time, Input: int(p.Tokens[0]), Output: int(p.Tokens[1]), CacheRead: int(p.Tokens[2]), CacheWrite: int(p.Tokens[3]), Reasoning: int(p.Tokens[4]), Millis: p.Millis, TTFT: p.TTFT, FirstText: p.FirstText, Sent: p.Sent, Status: int(p.Status), Rejected: p.Flags&4 != 0, SessionOfficialLogin: p.Flags&8 != 0}, Cost: p.Cost, Priced: p.Flags&1 != 0, Swapped: p.Flags&2 != 0, Routed: p.Flags&32 != 0}
 	for i, s := range rowText(&r) {
 		*s = c.Strings[p.Text[i]]
+	}
+	if r.Swapped && SameSpelled(r.Model, r.Served) {
+		r.Swapped = false // kept before a name spelled otherwise was the same
 	}
 	r.Computer = c.Computer
 	return r
@@ -743,6 +746,7 @@ func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks,
 	groups := map[string]map[string]*Share{}
 	chartGroups := map[string]map[string]*Share{}
 	seriesGroups := map[string]map[string]*Share{}
+	keys := keyer{}
 	for _, d := range Dimensions {
 		groups[d] = map[string]*Share{}
 		chartGroups[d] = map[string]*Share{}
@@ -788,7 +792,7 @@ func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks,
 		}
 		if keep || f.Day != "" && chartFilter.keeps(r.Record) {
 			for _, d := range Dimensions {
-				k := r.key(d)
+				k := keys.key(r, d)
 				s := seriesGroups[d][k]
 				if s == nil {
 					s = &Share{ID: k}
@@ -819,13 +823,16 @@ func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks,
 			if d == "agent" {
 				g.Agent = ""
 			}
-			if d == "model" {
+			if d == "model" || d == "modelAt" {
 				g.Model = ""
+			}
+			if d == "modelAt" {
+				g.Provider = ""
 			}
 			if f.Day != "" {
 				g.Day = ""
 				if g.keeps(r.Record) {
-					k := r.key(d)
+					k := keys.key(r, d)
 					if chartGroups[d][k] == nil {
 						chartGroups[d][k] = &Share{ID: k}
 					}
@@ -836,7 +843,7 @@ func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks,
 			if !g.keeps(r.Record) {
 				continue
 			}
-			k := r.key(d)
+			k := keys.key(r, d)
 			s := groups[d][k]
 			if s == nil {
 				s = &Share{ID: k}
@@ -906,13 +913,9 @@ func buildRequestBlocks(p Period, f Filter, offset, limit int, gateways, chunks,
 		pt := &out.Series[i]
 		pt.addRow(r)
 		for _, d := range Dimensions {
-			k := r.key(d)
+			k := keys.key(r, d)
 			part := pt.By[d][k]
-			part.Calls++
-			part.Tokens += r.Input + r.Output + r.CacheRead + r.CacheWrite
-			if r.Priced {
-				part.Cost += r.Cost
-			}
+			part.add(r)
 			pt.By[d][k] = part
 		}
 	})
@@ -968,8 +971,11 @@ func pageFromLedger(p Period, f Filter, offset, limit int, all Ledgered) Request
 		if d == "agent" {
 			g.Agent = ""
 		}
-		if d == "model" {
+		if d == "model" || d == "modelAt" {
 			g.Model = ""
+		}
+		if d == "modelAt" {
+			g.Provider = ""
 		}
 		out.By[d] = Breakdown(all.Filtered(g).Rows, d)
 		if f.Day != "" {

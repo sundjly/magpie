@@ -694,25 +694,49 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 }
 
 // nextTurn is the conversation a request goes on from, after its last
-// reply (turnKey), and the user's messages since; "" when it isn't a new
-// turn after a reply: a first one, or tool results.
+// reply (turnKey), and the messages since; "" when it isn't a new turn
+// after a reply: a first one, or tool results for a call made before it.
+// A reply that ends a turn calls no tool, so the calls after it, and their
+// results, are the client's own: an agent's framework that ran a tool
+// itself after the reply and put it in the conversation as a call and its
+// result (Pi Team Bright's team_sync). They go to the run as the rest of
+// what was said since, where a run started anew would be told the whole
+// conversation in one message, a prefix the cache has never seen.
 func nextTurn(req *Request, owner string) (string, []Message) {
-	j := len(req.Messages) - 1
-	for j >= 0 && req.Messages[j].Role != "assistant" {
-		j--
-	}
-	if j < 0 || j == len(req.Messages)-1 {
+	msgs := req.Messages
+	if len(msgs) == 0 || msgs[len(msgs)-1].Role == "assistant" {
 		return "", nil
 	}
-	since := req.Messages[j+1:]
+	j := len(msgs) - 1
+	for j >= 0 && (msgs[j].Role != "assistant" || callsTool(msgs[j])) {
+		j--
+	}
+	if j < 0 {
+		return "", nil
+	}
+	since := msgs[j+1:]
+	calls := map[string]bool{}
 	for _, m := range since {
 		for _, p := range m.Parts {
-			if p.Kind == ToolResult {
+			switch {
+			case p.Kind == ToolCall:
+				calls[p.ID] = true
+			case p.Kind == ToolResult && !calls[p.CallID]:
 				return "", nil
 			}
 		}
 	}
-	return turnKey(owner, req, req.Messages[:j+1]), since
+	return turnKey(owner, req, msgs[:j+1]), since
+}
+
+// callsTool says m calls a tool.
+func callsTool(m Message) bool {
+	for _, p := range m.Parts {
+		if p.Kind == ToolCall {
+			return true
+		}
+	}
+	return false
 }
 
 // setEffort tells the run's Claude Code to think at effort from its next
@@ -1919,14 +1943,25 @@ func withoutBillingHeader(system string) string {
 // cch=…;), which the block after follows with no newline between.
 var billingHeader = regexp.MustCompile(`^x-anthropic-billing-header:(\s*[A-Za-z_]+=[^;\s]*;)*\s*`)
 
-// renderClaudeTurn is the user's messages in a conversation Claude Code
-// already has, as it would be told them itself.
+// renderClaudeTurn is the messages since a reply in a conversation Claude
+// Code already has, as it would be told them itself. The user's alone go
+// as they are; with the client's own calls among them (nextTurn), each is
+// labeled with who said it, as a run started anew is told the conversation
+// (renderClaudePrompt).
 func renderClaudeTurn(msgs []Message) []map[string]any {
 	var blocks []map[string]any
 	var text strings.Builder
+	labeled := hasReply(msgs)
 	for i, m := range msgs {
 		if i > 0 {
 			text.WriteString("\n\n")
+		}
+		if labeled {
+			label := "Human"
+			if m.Role == "assistant" {
+				label = "Assistant"
+			}
+			text.WriteString(label + ": ")
 		}
 		blocks = renderParts(blocks, &text, m.Parts)
 	}
@@ -2000,6 +2035,7 @@ const (
 	ambiguousCalls = "ambiguous"
 	runExpired     = "process expired"
 	noRunWaiting   = "no run waiting"
+	accountChanged = "account changed"
 )
 
 // match is findRun, and how the results found their run (byExactID,
@@ -2018,6 +2054,16 @@ func (b *subscriptionBridge) match(req *Request) (*subscriptionRun, []Part, stri
 			case p.Kind == ToolResult:
 				p.Images = slices.Clone(p.Images)
 				fresh = append(fresh, p)
+			case p.Kind == Text && len(fresh) > 0:
+				// Claude Code puts a message the user sends while a tool is
+				// running beside that tool_result (usually as a system reminder).
+				// A resumed subscription run only receives its MCP result, so keep
+				// the adjacent text with it instead of silently dropping the turn.
+				last := &fresh[len(fresh)-1]
+				if last.Text != "" && p.Text != "" {
+					last.Text += "\n\n"
+				}
+				last.Text += p.Text
 			case p.Kind == Image && len(fresh) > 0:
 				last := &fresh[len(fresh)-1]
 				last.Images = append(last.Images, p)
@@ -2513,18 +2559,17 @@ func ownerAccount(owner string) (user string, own bool) {
 }
 
 func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, usage *Usage) (int, string) {
-	start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
-		ctx = p.Via(ctx) // the account's own proxy, its CLI run's too
-		owner := p.ID + "\x00" + p.Account.User
+	owner := p.ID
+	if p.Account != nil {
+		owner += "\x00" + p.Account.User
 		if p.Account.AgentsOwn() {
-			// Claude Code's own sign-in, which a switch moves to another
-			// account: a run kept from before goes on as that one (it
-			// reads its keychain again), so the account, once saved and
-			// run in a config directory of its own, never resumes it
-			// (nil_1024: made first, a saved account's turns went on as
-			// the spent one in its Claude Code)
+			// A process in the agent's home reads that home's current sign-in.
+			// A saved account must not resume it after the sign-in moves.
 			owner += "\x00" + ownHome
 		}
+	}
+	start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+		ctx = p.Via(ctx) // the account's own proxy, its CLI run's too
 		if run, events := s.subscription.resume(req, owner); run != nil {
 			return run, events, nil
 		}
@@ -2546,13 +2591,13 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 		}
 		return s.subscription.start(ctx, req, model, dir, owner, from)
 	}
-	return s.serveSubscription(w, r, from, "Claude Code", model, body, usage, start)
+	return s.serveSubscription(w, r, from, "Claude Code", model, owner, body, usage, start)
 }
 
 // serveSubscription answers a request through an agent's own binary: a new
 // turn starts it, a request carrying tool results resumes the turn waiting
 // on them.
-func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, name, model string, body []byte, usage *Usage,
+func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, name, model, owner string, body []byte, usage *Usage,
 	start func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error)) (int, string) {
 	req, err := parse(from, body)
 	if err != nil {
@@ -2581,6 +2626,13 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 	if run != nil && !run.claimResume() {
 		msg := "the agent's turn is already being resumed"
 		return writeError(w, from, http.StatusConflict, msg), msg
+	}
+	// Tool-call IDs find the process that made them, independently of the
+	// account routing selected. Continuing a different owner's process would
+	// spend its quota and report its reply or limit against the chosen account.
+	if run != nil && run.owner != owner {
+		run.abort()
+		run, how = nil, accountChanged
 	}
 	// the client rewrote the conversation since the run's last reply, as Pi
 	// does compacting it mid-turn: the run's agent holds the one from before,

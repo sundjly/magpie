@@ -294,14 +294,26 @@ body.window .top.inrow .actions { margin-left: 0; }
 .view { flex: 1; min-height: 0; overflow-y: auto; padding: 0 12px 4px; display: flex; flex-direction: column; animation: view-in .24s var(--ease); }
 @keyframes view-in { from { opacity: 0; transform: translateY(5px); } }
 body.window .view { padding: 2px 16px 8px; }
+/* a page of rows and settings keeps to a width the eye can follow across,
+   centred in a maximized window, rather than its name at one edge and its
+   switch at the other (#860); the tables and charts of Routing, Usage and
+   Sessions take the whole width */
+body.window :is(#view-agents, #view-providers, #view-gateway, #view-library, #view-plugins, #view-settings) { padding-left: max(16px, calc(50% - 600px)); padding-right: max(16px, calc(50% - 600px)); }
 .view > .view-room { flex: none; pointer-events: none; } /* see "where the reader is" */
-.view::-webkit-scrollbar { width: 0; }
 /* Windows and Linux draw a classic scrollbar, arrows and all; a thin rounded
    thumb instead, like the overlay one macOS shows (left as it is there) */
 :where(body:not(.mac)) ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
 :where(body:not(.mac)) ::-webkit-scrollbar-thumb { background: var(--faint); border: 3px solid transparent; border-radius: 10px; background-clip: padding-box; }
 :where(body:not(.mac)) ::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
 :where(body:not(.mac)) ::-webkit-scrollbar-button, :where(body:not(.mac)) ::-webkit-scrollbar-corner { display: none; background: transparent; }
+/* a page, a dialog and a framed editor that run longer than the window
+   show where the reader is in them with a thin thumb, on the Mac too
+   (PAMI on Discord: no page had a scrollbar) — the WebView draws the
+   Mac's overlay one only while a trackpad scrolls, and a mouse never */
+body.mac :is(.view, .modal .dialog, .modal .editor.framed > .ebody)::-webkit-scrollbar { width: 8px; background: transparent; }
+body.mac :is(.view, .modal .dialog, .modal .editor.framed > .ebody)::-webkit-scrollbar-thumb { background: var(--faint); border: 2px solid transparent; border-radius: 8px; background-clip: padding-box; }
+body.mac :is(.view, .modal .dialog, .modal .editor.framed > .ebody)::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+body.mac :is(.view, .modal .dialog, .modal .editor.framed > .ebody)::-webkit-scrollbar-corner { background: transparent; }
 .list { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; flex: none; }
 body.panel .list { border: 0; border-radius: 10px; box-shadow: var(--card-edge); }
 .row { display: flex; align-items: center; gap: 9px; min-height: 40px; padding: 5px 9px 5px 11px; }
@@ -348,8 +360,8 @@ body.window .ag-handle { width: 28px; height: 28px; }
    what the logo does, and it takes no room from the row; the logo stays the
    logo. Hide is in the handle's menu and the row's right-click menu. */
 #agents > .row .ag-handle { position: relative; }
-#agents > .row .ag-handle::before { content: ""; position: absolute; left: -6px; top: 50%; width: 5px; height: 11px; margin-top: -5.5px; background: radial-gradient(circle, var(--muted) .9px, transparent 1.2px) 0 0 / 3.5px 3.75px; opacity: 0; transition: opacity .15s; }
-body.panel #agents > .row .ag-handle::before { left: -9px; }
+#agents > .row .ag-handle::before { content: ""; position: absolute; left: -7px; top: 50%; width: 6px; height: 11px; margin-top: -5.5px; background: radial-gradient(circle, var(--muted) .9px, transparent 1.2px) 0 0 / 3px 3.75px; opacity: 0; transition: opacity .15s; }
+body.panel #agents > .row .ag-handle::before { left: -10px; }
 #agents > .row:is(:hover, .dragging) .ag-handle::before, #agents > .row .ag-handle.open::before { opacity: 1; }
 #agents > .row .ag-handle:focus-visible::before { opacity: 1; }
 /* one hidden by hand reads as put away, with its way back beside its name */
@@ -453,7 +465,7 @@ body.window .agent-fold-cap { padding: 10px 14px 3px; }
 /* a provider on is moved as an agent is (#499): its logo is the handle,
    the grip in its margin drawn only with the pointer on the row */
 #providers > .row .pv-handle { position: relative; }
-#providers > .row .pv-handle::before { content: ""; position: absolute; left: -6px; top: 50%; width: 5px; height: 11px; margin-top: -5.5px; background: radial-gradient(circle, var(--muted) .9px, transparent 1.2px) 0 0 / 3.5px 3.75px; opacity: 0; transition: opacity .15s; }
+#providers > .row .pv-handle::before { content: ""; position: absolute; left: -7px; top: 50%; width: 6px; height: 11px; margin-top: -5.5px; background: radial-gradient(circle, var(--muted) .9px, transparent 1.2px) 0 0 / 3px 3.75px; opacity: 0; transition: opacity .15s; }
 #providers > .row:is(:hover, .dragging) .pv-handle::before { opacity: 1; }
 /* apart: Safari before 15.4 drops a whole selector list with :focus-visible in it */
 #providers > .row .pv-handle:focus-visible::before { opacity: 1; }
@@ -750,7 +762,7 @@ body.window .field.solo { grid-column: auto; }
    were of — by provider, agent or model — which is also the chart's legend */
 .led-dash { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
 .led-dash[hidden] { display: none; }
-.led-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.led-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
 .led-strip .blk { min-width: 0; padding: 11px 15px 10px; }
 .led-strip .blk + .blk { border-left: 1px solid var(--line-2); }
 .led-strip .k { display: block; font-size: 11px; color: var(--muted); }
@@ -761,9 +773,11 @@ body.window .field.solo { grid-column: auto; }
 .led-strip .meter { height: 5px; margin-top: 8px; border-radius: 3px; background: var(--pill); overflow: hidden; }
 .led-strip .meter i { display: block; height: 100%; border-radius: 3px; background: var(--green); }
 .led-trend { padding: 10px 14px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
-.led-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.led-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin-bottom: 8px; }
 .led-bar .grow { flex: 1; }
 .led-by { font-size: 11.5px; color: var(--muted); }
+/* "Split by" and its choices wrap together, under the metrics when narrow */
+.led-split { display: flex; align-items: center; gap: 8px; }
 .led-body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 272px; gap: 18px; }
 .led-chart { min-width: 0; }
 .led-chart .plot { position: relative; height: 236px; }
@@ -772,6 +786,8 @@ body.window .field.solo { grid-column: auto; }
 .led-chart .axis { fill: var(--muted); font-size: 10.5px; }
 .led-chart .hot { fill: var(--pill); }
 .led-chart rect.col { transition: opacity .12s; }
+/* a speed chart's column is all the replies', each one told apart a mark on it */
+.led-chart rect.col.all { fill-opacity: .55; }
 .led-chart .led-day { cursor: pointer; outline: none; }
 .led-chart .led-day:focus-visible { stroke: var(--accent); stroke-width: 1; }
 .led-chart .tip { position: absolute; top: 2px; z-index: 2; min-width: 172px; max-width: 260px; padding: 8px 10px 7px; background: var(--pop-bg); border-radius: 9px; box-shadow: var(--shadow); font-size: 11.5px; pointer-events: none; }
@@ -820,8 +836,9 @@ body.window .field.solo { grid-column: auto; }
   .led-body { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .led-rail { display: none; }
   .led-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .led-strip .blk:nth-child(3) { border-left: 0; }
+  .led-strip .blk:nth-child(odd) { border-left: 0; }
   .led-strip .blk:nth-child(n + 3) { border-top: 1px solid var(--line-2); }
+  .led-strip .blk:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
 /* over the requests: their sum, and at its right the request archive's switch */
 .led-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin: 0 2px 7px; min-width: 0; }
@@ -868,6 +885,14 @@ body.window .field.solo { grid-column: auto; }
 #ledRoute[hidden] { display: none; }
 #ledRouteClear { font-size: 18px; padding: 2px 6px; }
 .led .model, .led .where { max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+/* a window too narrow for every column leaves out those the row's details
+   say (#860), and narrows the names */
+.led.tight .lc-opt, .led:not(.tight) .led-dl .lc-opt { display: none; }
+.led.tight .led-dl .lc-opt { display: block; }
+.led.tight .model, .led.tight .where { max-width: 160px; }
+.led.tight th, .led.tight td { padding-left: 6px; padding-right: 6px; }
+.led-tight { font-size: 11.5px; color: var(--muted); }
+.led-tight[hidden] { display: none; }
 .led .where { color: var(--fg-2); }
 .led .where-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .led .source-badges { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 4px; }
@@ -1590,6 +1615,9 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .gw .name .state { margin-left: 8px; font-size: 11px; font-weight: 500; color: var(--green); }
 .gw .dot:not(.on) ~ .who .state { color: var(--amber); }
 .gw .sub.old { white-space: normal; overflow: visible; text-overflow: clip; }
+.gw .sub.err { color: var(--red); overflow-wrap: anywhere; }
+/* the take-over / restart button, its words in line with the text above */
+.gw .gw-fix { display: inline-block; margin: 4px 0 0 -7px; white-space: normal; text-align: left; }
 .gw .url { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: 6px; background: var(--pill); box-shadow: inset 0 0 0 1px var(--line-2); flex: none; transition: background .12s, box-shadow .12s; }
 .gw .url:hover { background: var(--pill-hover); box-shadow: inset 0 0 0 1px var(--line); }
 .gw .url code { color: var(--fg-2); font-size: 11px; }
@@ -1725,11 +1753,13 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .badge.mapi-tag { background: var(--accent-soft); color: var(--accent); letter-spacing: .02em; text-transform: none; }
 .mchip .badge { margin: 0 -3px 0 1px; padding: 0 4px; font-size: 9px; line-height: 14px; }
 .row.model .name .badge { margin-left: 6px; padding: 0 4px; font: 600 9px/14px var(--font); }
-.row.model .minfo { display: inline-flex; align-items: center; gap: 4px; flex: none; margin-left: 8px; cursor: help; }
-.row.model .minfo .badge { display: inline-flex; align-items: center; padding: 0 5px; font: 600 9.5px/16px var(--font); letter-spacing: .02em; text-transform: none; background: var(--pill); color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); vertical-align: 0; }
-.row.model .minfo .mi-ctx { font-variant-numeric: tabular-nums; }
-.row.model .minfo .mi-img { padding: 0 4px; }
-.row.model .minfo .mi-img svg { display: block; }
+/* the chips a model is summed up in, where a list of models is read: the
+   Gateway page's list, and a routing group's members in its editor */
+.row.model .minfo, .rt-gedit .fbrow .minfo { display: inline-flex; align-items: center; gap: 4px; flex: none; margin-left: 8px; cursor: help; }
+.row.model .minfo .badge, .rt-gedit .fbrow .minfo .badge { display: inline-flex; align-items: center; padding: 0 5px; font: 600 9.5px/16px var(--font); letter-spacing: .02em; text-transform: none; background: var(--pill); color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); vertical-align: 0; }
+.row.model .minfo .mi-ctx, .rt-gedit .fbrow .minfo .mi-ctx { font-variant-numeric: tabular-nums; }
+.row.model .minfo .mi-img, .rt-gedit .fbrow .minfo .mi-img { padding: 0 4px; }
+.row.model .minfo .mi-img svg, .rt-gedit .fbrow .minfo .mi-img svg { display: block; }
 .provider .pswitch { margin-left: 8px; }
 .editor .off-note { grid-column: 1 / -1; }
 .uses { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: none; }
@@ -1850,6 +1880,9 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 #gatewayKeys .klf-err { color: var(--red); }
 #gatewayKeys .klf .klf-period { width: 100%; max-width: none; height: 28px; justify-content: space-between; color: var(--fg); }
 @media (max-width: 520px) { #gatewayKeys .klf { grid-template-columns: 1fr; } }
+/* the models a key may use (#882): a long model's id is cut, and the
+   badge gives way first on a narrow window */
+#gatewayKeys .amodels.key-models { display: inline-block; flex: 0 1 auto; min-width: 24px; max-width: 180px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; }
 /* the Settings row's picker: the key row's badge, always shown */
 .row.pref .proto.pick { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 3px; height: 24px; padding: 0 6px 0 9px; font: inherit; font-size: 12px; color: var(--fg-2); border: 0; border-radius: 7px; background: var(--pill); white-space: nowrap; cursor: default; transition: background .12s, color .12s; }
 .row.pref .proto.pick svg { opacity: .7; transition: transform .15s var(--ease); }
@@ -1906,6 +1939,13 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 /* a plugin's ways to sign in: the question keeps the row, the choices
    wrap beneath it at whatever length the plugin names them */
 .signing.plugin-ask { flex-wrap: wrap; }
+/* ZCode's site step: the question keeps the row, the sites one group
+   beneath it and the plugin's other ways a line of links under them */
+.signing.site-pick { flex-wrap: wrap; row-gap: 8px; }
+.signing.site-pick .sites, .signing.site-pick .ways { flex-basis: 100%; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.signing.site-pick .ways { gap: 2px 10px; margin: -3px 0 0 -4px; }
+.signing.site-pick .sites button, .signing.site-pick .ways button { height: auto; min-height: 26px; max-width: 100%; white-space: normal; text-align: left; line-height: 1.3; overflow-wrap: anywhere; }
+.signing.site-pick .ways .link { color: var(--fg-2); }
 .signing.plugin-ask .choices { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
 .signing.plugin-ask .choices button { height: auto; min-height: 26px; max-width: 100%; padding: 4px 10px; white-space: normal; text-align: left; line-height: 1.3; overflow-wrap: anywhere; }
 /* an import: what is pasted is sign-ins, so it is masked */
@@ -2115,7 +2155,10 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .editor .more summary::before { content: "▸"; font-size: 10px; color: var(--faint); }
 .editor .more[open] summary::before { content: "▾"; }
 .editor .more summary:hover { color: var(--fg); }
-.editor .more .inner { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px 14px; align-items: start; padding-top: 8px; }
+/* its labels are longer (Anthropic 地址, Responses-URL): their column takes
+   the longest, on one line, rather than wrap a last 址 under it (#875) */
+.editor .more .inner { display: grid; grid-template-columns: minmax(72px, max-content) minmax(0, 1fr); gap: 10px 14px; align-items: start; padding-top: 8px; }
+.editor .more .inner label { white-space: nowrap; }
 .editor .warnbox { grid-column: 1 / -1; font-size: 12px; line-height: 1.5; color: var(--fg); background: color-mix(in srgb, var(--amber) 12%, transparent); border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent); border-radius: 8px; padding: 8px 10px; }
 .editor .warnbox.soft { background: none; color: var(--amber); border: 0; padding: 0 0 0 86px; }
 .editor.import .mchips .mchip { cursor: default; }
@@ -2235,6 +2278,9 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .mnames { display: grid; gap: 4px; max-height: 240px; overflow-y: auto; padding: 1px; }
 .mnames[hidden] { display: none; }
 .mnames > .hint { font-size: 11px; color: var(--faint); }
+/* how the agents' lists will call them, and the setting that says so (#868) */
+.msuffix { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 2px 8px 4px; font-size: 12px; }
+.msuffix .hint { font-size: 11px; color: var(--faint); overflow-wrap: anywhere; }
 .mname { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
 .mname .mwho { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 0; }
 .mname .mwho input { flex: 1; min-width: 0; max-width: 220px; height: 25px; }
@@ -2243,6 +2289,10 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .mname .msame { display: flex; align-items: center; gap: 6px; flex: 0 1 230px; min-width: 0; font-size: 11.5px; color: var(--muted); }
 .mname .msame span { flex: none; }
 .mname .msame input { flex: 1; min-width: 0; height: 25px; font-size: 11.5px; }
+.mname .mprice { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; flex: 1 1 100%; min-width: 0; font-size: 11.5px; color: var(--muted); }
+.mname .mprice > span { flex: none; }
+.mname .mpart { display: flex; align-items: center; gap: 4px; flex: none; }
+.mname .mpart input { width: 72px; height: 25px; font-size: 11.5px; }
 .mname .mlevels { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 11.5px; }
 .editor .mname label.tick { gap: 4px; }
 .mname .text { flex: none; padding: 2px 7px; font-size: 11.5px; }
@@ -2291,6 +2341,10 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .proxy-segs input.proxy:focus, input.words:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 .proxy-segs input.proxy::placeholder, input.words::placeholder { color: var(--faint); }
 input.words { width: 240px; max-width: 100%; }
+/* Settings → Long conversations: 272K or the size typed, beside it (#876) */
+.compact-at { display: flex; align-items: center; gap: 8px; margin-left: auto; flex: none; }
+.row.pref .compact-at .segs { margin-left: 0; }
+input.words.compact-num { flex: none; width: 76px; font-variant-numeric: tabular-nums; }
 /* the masking rules' add row: its words in full, then on a line of their
    own a name, prefix or regex, the match taking the room left, Add */
 .row.pref.rule-row { flex-wrap: wrap; row-gap: 8px; }
@@ -2300,7 +2354,7 @@ input.words { width: 240px; max-width: 100%; }
 .row .sub.wraps { white-space: normal; overflow-wrap: anywhere; }
 .prefs .val.rule-add { flex: 1 1 100%; max-width: none; margin-left: 0; gap: 6px; }
 input.words.rule-kind { flex: none; width: 110px; }
-input.words.rule-match { flex: 1 1 auto; width: auto; min-width: 0; }
+input.words.gateway-port { flex: none; width: 110px; font-variant-numeric: tabular-nums; }input.words.rule-match { flex: 1 1 auto; width: auto; min-width: 0; }
 input.words.search-key, input.words.search-url { flex: 1 1 120px; width: auto; min-width: 0; }
 /* a search API's key, shown: selectable, and broken anywhere rather than widening the row */
 .search-api .sub.revealed { font-family: var(--code); overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
@@ -2410,7 +2464,6 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
   box-shadow: 0 0 0 1px var(--line), 0 24px 60px rgba(0, 0, 0, .32), 0 2px 8px rgba(0, 0, 0, .12);
 }
 .modal .dialog.swap { animation: content-in .22s var(--ease); }
-.modal .dialog::-webkit-scrollbar { width: 0; }
 /* In a dialog the editor's head and buttons stay put and only the fields
    between them scroll; both bars are the same height, their contents
    centred in it. */
@@ -2420,7 +2473,6 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
   flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
   display: grid; grid-template-columns: inherit; gap: 10px 14px; align-items: start; padding: 14px 18px;
 }
-.modal .editor.framed > .ebody::-webkit-scrollbar { width: 0; }
 .modal .editor.framed > .ehead, .modal .editor.framed > .bar { flex: none; min-height: 48px; margin: 0; padding: 0 18px; }
 .modal .editor.framed > .ehead { border-bottom: 1px solid var(--line-2); }
 .modal .editor.framed > .bar { border-top: 1px solid var(--line-2); }
@@ -2428,10 +2480,11 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
 /* what's new after an update: each release's notes, one under another,
    divided by a hairline, the text selectable */
 .modal .editor.whatsnew > .ebody { gap: 0; }
-.whatsnew .wn-rel { grid-column: 1 / -1; min-width: 0; }
+.whatsnew .wn-rel, .whatsnew .wn-list { grid-column: 1 / -1; min-width: 0; }
 .whatsnew .wn-rel + .wn-rel { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line-2); }
 .whatsnew .wn-ver { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .whatsnew .wn-ver b { font-weight: 600; }
+.whatsnew .wn-since { margin-left: 10px; font-size: 12px; color: var(--muted); }
 .whatsnew .wn-notes { font-size: 12.5px; line-height: 1.55; color: var(--fg-2); overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
 .whatsnew .wn-h { margin: 10px 0 2px; font-size: 12px; font-weight: 600; color: var(--fg); }
 .whatsnew .wn-h1, .whatsnew .wn-h2 { font-size: 12.5px; }
@@ -2588,9 +2641,11 @@ body.panel .modal { padding: 16px 12px; }
 .accts.sorting > [data-account-id] { animation: none; transition: transform .16s cubic-bezier(.22, 1, .36, 1); }
 .accts.sorting > .dragging { position: relative; z-index: 2; background: var(--card-2); box-shadow: 0 0 0 1px var(--line); cursor: grabbing; transition: none; will-change: transform; }
 .accts[aria-busy=true] > [data-account-id] { cursor: progress; }
-/* the Usage page's cards, dragged by their logos: a grip by the logo on hover */
+/* the Usage page's cards, dragged by their logos: a grip by the logo on hover.
+   A grip's box holds both its columns of dots whole, 3px apart: at 5px wide
+   with 3.5px between them the right column was cut in half (Hu9956, #842) */
 .subscription-head .us-handle { position: relative; width: 24px; height: 24px; margin: -4px -3px; }
-.subscription-head .us-handle::before { content: ""; position: absolute; left: -7px; top: 50%; width: 5px; height: 11px; margin-top: -5.5px; background: radial-gradient(circle, var(--muted) .9px, transparent 1.2px) 0 0 / 3.5px 3.75px; opacity: 0; transition: opacity .15s; }
+.subscription-head .us-handle::before { content: ""; position: absolute; left: -8px; top: 50%; width: 6px; height: 11px; margin-top: -5.5px; background: radial-gradient(circle, var(--muted) .9px, transparent 1.2px) 0 0 / 3px 3.75px; opacity: 0; transition: opacity .15s; }
 .subscription-card:is(:hover, .dragging) .us-handle::before, .us-handle:focus-visible::before { opacity: 1; }
 .subscription-usage.sorting { user-select: none; -webkit-user-select: none; }
 .subscription-usage.sorting > .subscription-card { transition: transform .22s cubic-bezier(.22, 1, .36, 1); }
@@ -2774,6 +2829,17 @@ body.window .row.agent .who.with-models { flex-wrap: wrap; row-gap: 0; }
 .am-reset:hover:not(:disabled) { color: var(--accent); }
 .am-reset:disabled { color: var(--faint); cursor: default; }
 .am-dot { color: var(--faint); }
+/* Codex's list in the order it shows it (#855): the whole list, dragged by
+   any row; its grip shows only on the row under the pointer */
+.pop.am-pop.ordering .am-search, .pop.am-pop.ordering .am-rail { display: none; }
+.am-order { padding-top: 4px; }
+.am-rows.am-order .am-mr { padding-left: 14px; cursor: grab; user-select: none; -webkit-user-select: none; }
+.am-or .grip { flex: none; width: 6px; height: 11px; margin-right: -4px; background: radial-gradient(circle, var(--muted) .9px, transparent 1.2px) 0 0 / 3px 3.75px; opacity: 0; transition: opacity .15s; }
+.am-or:is(:hover, :focus-visible, .dragging) .grip { opacity: 1; }
+@media (hover: none) { .am-or .grip { opacity: 1; } }
+.am-or .ix { flex: none; min-width: 16px; font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; text-align: right; }
+.am-order.sorting .am-or { transition: transform .22s cubic-bezier(.22, 1, .36, 1); cursor: grabbing; }
+.am-order .am-or.dragging { position: relative; z-index: 2; transition: none; background: var(--pop-bg); box-shadow: 0 6px 18px rgba(20, 22, 30, .12), 0 0 0 1px var(--line); }
 
 /* ---- an agent's switch onto magpie ---------------------------------------- */
 /* the rows drawn again under the line said beneath each name had WebKit's
@@ -2818,6 +2884,8 @@ body.window .row + .row.agent.conn > .who { min-height: 41px; } /* the line abov
 .ag-quiet.accent { color: var(--accent); }
 .ag-link:focus-visible, .ag-quiet:focus-visible, .ag-add:focus-visible { outline: 1.5px solid var(--accent); outline-offset: 1px; }
 .row.agent.conn > .ag-link { margin-left: auto; }
+.row.agent.conn > .ag-show { margin-left: auto; align-self: center; }
+.row.agent.conn > .ag-show + .ag-link { margin-left: 8px; }
 .row.agent.conn > .fields + .ag-link { margin-left: 0; }
 .row.agent.conn > .ag-conn { margin-left: 4px; align-self: center; cursor: pointer; }
 .row.agent.conn > .ag-link + .ag-conn { margin-left: 4px; }

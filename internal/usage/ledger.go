@@ -109,7 +109,7 @@ func (f Filter) keeps(r Record) bool {
 		return false
 	}
 	if q := strings.ToLower(strings.TrimSpace(f.Query)); q != "" {
-		return slices.ContainsFunc([]string{r.Requested, r.Model, r.Served, r.Provider, r.Host, r.Session, r.Effort, r.SessionProvider, r.SessionAccount, r.ProviderKeyID, r.ProviderKeyName, r.Account(), r.CallerKeyID, r.CallerKeyName}, func(s string) bool {
+		return slices.ContainsFunc([]string{r.Requested, r.Model, r.Served, r.Upstream, r.Provider, r.Host, r.Session, r.Effort, r.SessionProvider, r.SessionAccount, r.ProviderKeyID, r.ProviderKeyName, r.Account(), r.CallerKeyID, r.CallerKeyName}, func(s string) bool {
 			return strings.Contains(strings.ToLower(s), q)
 		})
 	}
@@ -390,7 +390,7 @@ func NewPricer() func([]Record) Totals {
 var CSVHeader = []string{"time", "agent", "requested_model", "provider", "host", "model", "served_model", "swapped",
 	"effort", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "reasoning_tokens",
 	"cost_usd", "duration_ms", "ttft_ms", "status", "error", "session", "kind", "provider_key_id", "provider_key_name", "provider_account", "route_id",
-	"request_id", "endpoint", "error_message", "error_type", "source", "rejected", "session_provider", "session_account", "session_official_login", "caller_key_id", "caller_key_name", "response_id"}
+	"request_id", "endpoint", "error_message", "error_type", "source", "rejected", "session_provider", "session_account", "session_official_login", "caller_key_id", "caller_key_name", "response_id", "upstream"}
 
 // WriteCSV writes rows as CSV, a header first: times in RFC 3339 with
 // their offset, the cost in USD at the effective price (empty when unknown), error
@@ -416,7 +416,7 @@ func WriteCSV(w io.Writer, rows []Row) error {
 		cw.Write([]string{r.Time.Format(time.RFC3339), r.Agent, r.Requested, r.Provider, r.Host, r.Model, r.Served,
 			strconv.FormatBool(r.Swapped), r.Effort, n(r.Input), n(r.Output), n(r.CacheWrite), n(r.CacheRead), n(r.Reasoning),
 			cost, strconv.FormatInt(r.Millis, 10), ttft, n(r.Status), strconv.FormatBool(r.Failed()), r.Session, r.Kind, r.ProviderKeyID, r.ProviderKeyName, r.Account(), routeID,
-			r.RequestID, r.Endpoint, r.Error, r.ErrType, r.Source, strconv.FormatBool(r.IsRejected()), r.SessionProvider, r.SessionAccount, strconv.FormatBool(r.SessionOfficialLogin), r.CallerKeyID, r.CallerKeyName, r.ResponseID})
+			r.RequestID, r.Endpoint, r.Error, r.ErrType, r.Source, strconv.FormatBool(r.IsRejected()), r.SessionProvider, r.SessionAccount, strconv.FormatBool(r.SessionOfficialLogin), r.CallerKeyID, r.CallerKeyName, r.ResponseID, r.Upstream})
 	}
 	cw.Flush()
 	return cw.Error()
@@ -516,8 +516,14 @@ func (t *Totals) addRow(r Row) {
 }
 
 // Dimensions are what calls are told apart by: the provider they went to,
-// the agent that made them, the model.
-var Dimensions = []string{"provider", "agent", "model"}
+// the agent that made them, the model, and the model at the provider it
+// went to ("modelAt"), so one model's speed at each provider can be compared
+// (inaction on Discord).
+var Dimensions = []string{"provider", "agent", "model", "modelAt"}
+
+// ModelAtKey is a call's "modelAt": its provider's id and its model, as
+// "provider/model" (a provider's id has no "/").
+func ModelAtKey(provider, model string) string { return provider + "/" + model }
 
 // key is the row's part of a dimension: its provider's id, its agent, its model.
 func (r Row) key(by string) string {
@@ -526,6 +532,8 @@ func (r Row) key(by string) string {
 		return r.Provider
 	case "agent":
 		return r.Agent
+	case "modelAt":
+		return ModelAtKey(r.Provider, r.Model)
 	case "computer":
 		if r.Computer == "" {
 			return ThisComputer
@@ -533,6 +541,23 @@ func (r Row) key(by string) string {
 		return r.Computer
 	}
 	return r.Model
+}
+
+// keyer is Row.key for many rows, made once for each provider and model:
+// a "modelAt" is a string built of two, which a page of thousands of rows
+// would otherwise build again for each.
+type keyer map[[2]string]string
+
+func (m keyer) key(r Row, by string) string {
+	if by != "modelAt" {
+		return r.key(by)
+	}
+	k, ok := m[[2]string{r.Provider, r.Model}]
+	if !ok {
+		k = r.key(by)
+		m[[2]string{r.Provider, r.Model}] = k
+	}
+	return k
 }
 
 // AllTokens is what went in and out and through the cache.
@@ -549,11 +574,12 @@ type Share struct {
 func Breakdown(rows []Row, by string) []Share {
 	at := map[string]*Share{}
 	var out []*Share
+	keys := keyer{}
 	for _, r := range rows {
 		if r.IsRejected() {
 			continue
 		}
-		k := r.key(by)
+		k := keys.key(r, by)
 		s := at[k]
 		if s == nil {
 			s = &Share{ID: k}
@@ -582,6 +608,29 @@ type Part struct {
 	Calls  int     `json:"calls"`
 	Tokens int     `json:"tokens"`
 	Cost   float64 `json:"cost"`
+	// how fast its replies came, as Totals has it: a chart of speed says
+	// each one's at each point (#860)
+	Timed     int   `json:"timed,omitempty"`
+	TTFT      int64 `json:"ttft_ms,omitempty"`
+	DecodeMs  int64 `json:"decode_ms,omitempty"`
+	DecodeOut int   `json:"decode_out,omitempty"`
+}
+
+// add counts a row in the part.
+func (p *Part) add(r Row) {
+	p.Calls++
+	p.Tokens += r.Input + r.Output + r.CacheRead + r.CacheWrite
+	if r.Priced {
+		p.Cost += r.Cost
+	}
+	if r.TTFT > 0 && !r.Failed() {
+		p.Timed++
+		p.TTFT += r.TTFT
+		if w := DecodeWindow(r.Output, r.Millis, r.TTFT); w > 0 {
+			p.DecodeMs += w
+			p.DecodeOut += r.Output
+		}
+	}
 }
 
 // SeriesPoint is a point of the timeline with its calls told apart, by each
@@ -619,6 +668,7 @@ func LedgerSeries(p Period, rows []Row) (bucket string, pts []SeriesPoint) {
 		}
 	}
 	kept := map[string]map[string]bool{}
+	keys := keyer{}
 	for _, d := range Dimensions {
 		kept[d] = map[string]bool{}
 		for i, s := range Breakdown(rows, d) {
@@ -640,15 +690,10 @@ func LedgerSeries(p Period, rows []Row) (bucket string, pts []SeriesPoint) {
 			continue
 		}
 		pts[i].addRow(r)
-		tokens := r.Input + r.Output + r.CacheRead + r.CacheWrite
 		for _, d := range Dimensions {
-			if k := r.key(d); kept[d][k] {
+			if k := keys.key(r, d); kept[d][k] {
 				part := pts[i].By[d][k]
-				part.Calls++
-				part.Tokens += tokens
-				if r.Priced {
-					part.Cost += r.Cost
-				}
+				part.add(r)
 				pts[i].By[d][k] = part
 			}
 		}

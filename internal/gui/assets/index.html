@@ -167,8 +167,7 @@
         <div class="led-bar">
           <div class="segs" id="ledMetric"></div>
           <span class="grow"></span>
-          <span class="led-by" data-t>Split by</span>
-          <div class="segs" id="ledSplit"></div>
+          <span class="led-split"><span class="led-by" data-t>Split by</span><span class="segs" id="ledSplit"></span></span>
         </div>
         <div class="led-body">
           <div class="led-chart" id="ledChart"></div>
@@ -259,7 +258,7 @@
         <div id="codexAgentsV1Segs"></div>
       </div>
       <div class="row pref">
-        <div class="who"><div class="name" data-t>Long conversations</div><div class="sub" data-t>Codex and Claude Code compact a conversation at 272K tokens on a model with a larger window; in Claude Code a Claude model runs to its own window, 1M for a [1m] one, as Anthropic runs it. The model’s full window lets any conversation grow further, with every turn slower and costlier</div></div>
+        <div class="who"><div class="name" data-t>Long conversations</div><div class="sub" data-t>Codex and Claude Code compact a conversation at 272K tokens, or the size typed here, on a model with a larger window, unless its provider has a Compact at of its own; in Claude Code a Claude model runs to its own window, 1M for a [1m] one, as Anthropic runs it. The model’s full window lets any conversation grow further, with every turn slower and costlier</div></div>
         <div id="fullContextSegs"></div>
       </div>
       <div class="row pref" id="codexTitlesRow">
@@ -322,6 +321,10 @@
         <div class="who"><div class="name" data-t>Low balance alert</div><div class="sub" id="balanceAlertSub"></div></div>
         <div id="balanceAlertSegs" class="warm-at"></div>
       </div>
+      <div class="row pref" id="resetReminderRow">
+        <div class="who"><div class="name" data-t>Reset reminder</div><div class="sub" id="resetReminderSub"></div></div>
+        <div id="resetReminderSegs"></div>
+      </div>
     </div>
     <div class="row-head warm-head"><div class="warm-tabs" id="warmTabs" role="tablist">
       <button type="button" role="tab" id="warmTab-codex" data-warm="codex" aria-controls="codexWarmList">Codex</button>
@@ -380,6 +383,8 @@
     </div>
     <div class="row-head"><span class="label">GitHub</span></div>
     <div class="list prefs" id="githubList"></div>
+    <div class="row-head"><span class="label" data-t>Gateway</span></div>
+    <div class="list prefs" id="portList"></div>
     <div class="row-head"><span class="label" data-t>Local network</span></div>
     <div class="list prefs" id="lanList"></div>
   </section>
@@ -438,6 +443,7 @@
 <script src="compat.js"></script>
 <script src="i18n.js"></script>
 <script src="caller-keys.js"></script>
+<script src="purposes.js"></script>
 <script src="app.js"></script>
 <script src="routing.js"></script>
 <script src="library.js"></script>
