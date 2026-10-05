@@ -325,7 +325,7 @@ button.rt-session { cursor: pointer; }
 .rt-pick .ic, .rt-pick .ic-stack { width: 13px; height: 13px; flex: none; }
 .rt-pick .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rt-pick small { color: var(--faint); font-size: 10.5px; white-space: nowrap; }
-.rt-pick.on { color: var(--fg); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); cursor: default; }
+.rt-pick.on { color: var(--fg); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .rt-pick.on .dot { background: var(--accent); box-shadow: none; }
 .rt-pick.off { opacity: .55; }
 .rt-pick:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
@@ -342,7 +342,7 @@ button.rt-session { cursor: pointer; }
 .rt-ghidden .rt-gremoved:hover, .rt-ghidden .rt-gremoved.open { color: var(--fg-2); }
 .rt-gsel { display: flex; align-items: center; gap: 10px; padding: 8px 12px 8px 14px; }
 .rt-gsel .rt-gremove.armed { font-weight: 600; }
-.rt-group.rt-gpick { cursor: default; }
+.rt-group.rt-gpick { cursor: pointer; }
 .rt-group.rt-gpick.on { background: var(--card-2); }
 .rt-gedit { cursor: default; }
 .rt-gedit .ehead.fold { cursor: pointer; }

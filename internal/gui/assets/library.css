@@ -68,7 +68,7 @@ body.window .lib-head { top: -2px; margin: -2px -16px 0; padding: 8px 16px 4px; 
 
 /* rows */
 .lib-list .row { min-height: 50px; padding: 7px 10px 7px 12px; gap: 11px; }
-.lib-row.click { cursor: default; transition: background .14s var(--ease); }
+.lib-row.click { cursor: pointer; transition: background .14s var(--ease); }
 .lib-row.click:hover { background: var(--card-2); }
 /* a long name, link or description breaks anywhere rather than pushing
    the row wider than the list (#257) */
@@ -246,7 +246,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-filter { height: 26px; margin: 0 4px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font-size: 12px; outline: none; }
 .lib-filter:focus { border-color: var(--accent); }
 .lib-picks { display: flex; flex-direction: column; max-height: 300px; overflow-y: auto; }
-.lib-pick { display: flex; align-items: flex-start; gap: 10px; padding: 7px 6px; border-radius: 8px; cursor: default; }
+.lib-pick { display: flex; align-items: flex-start; gap: 10px; padding: 7px 6px; border-radius: 8px; cursor: pointer; }
 .lib-pick:hover:not(.dim) { background: var(--pill); }
 .lib-pick.dim { opacity: .55; }
 .lib-pick input { margin: 2px 0 0; accent-color: var(--fg); flex: none; }
@@ -432,7 +432,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-tag.lib-dot::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
 .lib-projopts { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 12px 8px 49px; border-top: 1px solid var(--line-2); background: var(--card-2); }
 .lib-projopts .note { font-size: 11px; color: var(--faint); line-height: 1.45; min-width: 0; flex: 1 1 220px; }
-.lib-projcopy { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-2); cursor: default; }
+.lib-projcopy { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-2); cursor: pointer; }
 .lib-project .lib-projskill { border-top: 1px solid var(--line-2); }
 .lib-projfoot { margin: 0; padding: 8px 12px 10px 49px; border-top: 1px solid var(--line-2); }
 .lib-projfoot + .lib-projfoot { border-top: 0; padding-top: 0; }
