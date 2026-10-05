@@ -175,6 +175,9 @@ type agentJSON struct {
 	// Joined: connected with its own models still in its list (Codex
 	// signed in with ChatGPT, agent.Agent.Join)
 	Joined bool `json:"joined,omitempty"`
+	// CLIMissing: its settings are here, its CLI isn't (#843), which
+	// the row says, and Install another agent offers it again
+	CLIMissing bool `json:"cliMissing,omitempty"`
 }
 
 // clientJSON is an agent, or another client the gateway knows, as a
@@ -662,6 +665,12 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	// the agents' CLIs: their versions and the newest (#202), as far as
 	// they're known within a moment — the rest are asked on meanwhile, and
 	// pending says to ask again soon
+	// the Agents page's refresh: looks for the agents on this machine again,
+	// the answers kept a while because asking was slow forgotten (#844)
+	mux.HandleFunc("POST /api/agents/rescan", func(rw http.ResponseWriter, r *http.Request) {
+		agent.Rescan()
+		writeJSON(rw, state())
+	})
 	mux.HandleFunc("GET /api/agents/cli", func(rw http.ResponseWriter, r *http.Request) {
 		clis, pending := agent.CLIs(3 * time.Second)
 		writeJSON(rw, map[string]any{"agents": clis, "pending": pending})
@@ -1337,6 +1346,7 @@ func state() stateJSON {
 		if a.Launch != nil {
 			aj.Launch = a.Launch()
 		}
+		aj.CLIMissing = a.CLIMissing()
 		s.Agents = append(s.Agents, aj)
 	}
 	if ps, err := profile.Load(); err == nil {

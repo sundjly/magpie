@@ -1445,6 +1445,14 @@ const CLI_SPIN = "M13.5 8a5.5 5.5 0 1 1-5.5-5.5";
 
 function cliTag(a) {
   const box = el("span", "ag-cli");
+  // its settings are here, its CLI isn't: uninstalled, its folder left
+  // behind (#843); Install another agent has it again
+  if (a.cliMissing) {
+    const m = el("span", "ag-missing", t("CLI not found"));
+    m.title = t("{agent}'s settings are still here ({path}), but its command-line program isn't found: it may have been uninstalled. Install another agent, below the list, has its install command.", { agent: a.name, path: a.path });
+    box.append(m);
+    return box;
+  }
   const c = cliInfo[a.id];
   if (!c?.version) return box;
   const v = el("span", "ag-ver", c.version);
@@ -1637,7 +1645,9 @@ function paintInstalls() {
   if (mode === "panel" || !list) return;
   let box = $("#agentsInstall");
   const here = new Set((state?.agents || []).map((a) => a.id));
-  const items = installInfo.filter((x) => !here.has(x.id));
+  // one listed above by its settings alone, its CLI gone (#843), is
+  // offered again too
+  const items = installInfo.filter((x) => x.missing || !here.has(x.id));
   if (!items.length) { box?.remove(); return; }
   if (!box) {
     box = el("section", "ag-install");
@@ -1665,7 +1675,15 @@ function paintInstalls() {
       const r = el("div", "ag-install-row");
       r.dataset.id = x.id;
       const who = el("div", "ag-install-who");
-      who.append(icon(x.icon || x.id), el("b", "", x.name));
+      // one whose settings are left (#843) says so under its name
+      const name = el("span", "ag-install-name");
+      name.append(el("b", "", x.name));
+      if (x.missing) {
+        const m = el("span", "ag-install-missing", t("CLI not found"));
+        m.title = t("{agent}'s settings are still here, but its command-line program isn't found", { agent: x.name });
+        name.append(m);
+      }
+      who.append(icon(x.icon || x.id), name);
       const cmds = el("div", "ag-install-cmds");
       for (const c of x.commands) {
         const line = el("div", "ag-install-cmd");
@@ -11384,6 +11402,7 @@ function setPanelTab(tab) {
   // the card under the tab picked glides to it, as on every other pill
   slide(tabs, "ptabs");
   panelAge();
+  syncTitle();
   window.panelRoutingShown?.();
   // the tab remembered is drawn as the page loads, before what the tab is drawn with,
   // further down, is set: a microtask later, when all of it is
@@ -16679,6 +16698,7 @@ function show(v) {
   if (v === "library") window.loadLibrary?.()?.then(back);
   if (v === "plugins") window.loadPlugins?.()?.then(back);
   if (v === "sessions") window.loadSessionsPage?.()?.then(back);
+  syncTitle();
   syncURL();
 }
 
@@ -16704,21 +16724,65 @@ function openSettings() {
 }
 $("#prefs").onclick = () => { openSettings(); $("#prefs").blur(); };
 
+// The header's refresh reads again what the page shown draws (#844): on
+// Agents it looks for the agents on this computer again (one just installed
+// or removed, or its settings changed outside magpie), on Usage it reads the
+// usage and the allowances now, and elsewhere it refreshes the model lists.
+// A newer magpie is looked for on its own, and from Settings › About's Check.
+function refreshKind() {
+  if (mode === "panel") return { agents: "agents", usage: "allowances", stats: "requests" }[panelTab] || "models";
+  return { agents: "agents", usage: "usage" }[view] || "models";
+}
+// syncTitle: the refresh's tooltip says what it reads on the page shown.
+// Called from setPanelTab as the page loads, before this part of it has run.
+function syncTitle() {
+  const b = $("#sync");
+  if (!b) return;
+  b.dataset.enTitle = {
+    agents: "Look for agents on this computer again: one just installed or removed, or its settings changed",
+    usage: "Read the usage again now",
+    allowances: "Read the allowances again now",
+    requests: "Read the requests again now",
+    models: "Refresh model lists (models.dev and every vendor)",
+  }[refreshKind()];
+  b.title = t(b.dataset.enTitle);
+  b.setAttribute("aria-label", b.title);
+}
+async function refreshPage(kind) {
+  switch (kind) {
+    case "agents":
+      state = await api("agents/rescan", {});
+      renderAgents();
+      await Promise.all([loadInstalls(), loadCLIs()]);
+      return t("Agents looked for again");
+    case "usage":
+      await refreshUsage(true);
+      return t("Usage refreshed");
+    case "allowances":
+      await loadQuotas(true);
+      return t("Allowances refreshed");
+    case "requests":
+      await loadPanelUse();
+      return t("Usage refreshed");
+  }
+  state = await api("sync", {});
+  renderAgents();
+  if (providers) await loadProviders();
+  return t("Model lists refreshed");
+}
+syncTitle();
+
 $("#sync").onclick = async () => {
   const b = $("#sync");
   if (b.classList.contains("spin")) return;
   b.classList.add("spin");
-  // a newer magpie is looked for too: the Update pill beside it shows once
-  // it's in (inaction on Discord looked for it here, not in Settings)
-  api(updatePath("update/check"), {}).then(renderUpdateBadge, () => {});
+  const kind = refreshKind();
   try {
-    state = await api("sync", {});
-    renderAgents();
-    if (providers) await loadProviders();
-    status(t("Model lists refreshed"), "ok");
+    status(await refreshPage(kind), "ok");
   } catch (e) {
-    status(t("Sync failed: {e}", { e: e.message }), "err");
+    status(kind === "models" ? t("Sync failed: {e}", { e: e.message }) : e.message, "err");
   } finally {
+    b.blur();
     // stop at the end of a turn, not wherever the reply caught it (#16).
     // The turn itself is told to be the last, so it ends on the compositor's
     // clock: waiting for animationiteration and then dropping the class
