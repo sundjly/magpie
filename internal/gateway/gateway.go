@@ -1442,7 +1442,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		shown = nil // nobody else to stay away from
 	}
 	link := s.titlePrompts.observe(r, body, metadata, call.Kind, start)
-	tr := s.trace.begin(Route{TitleLink: link, Pinned: pin, Time: start, Agent: call.Agent, Session: sessionOf(r.Header), ParentSession: titleParentSession(r.Header, metadata, call.Kind), Kind: call.Kind, For: call.For, Model: call.Model, Effort: requestEffort(from, body), Provider: p.ID, Group: group, Rule: hit, Nested: nested, SealedTask: sealedTask, LeadAccount: leadAccount, Affinity: shown, Order: pl.order, Left: pl.left})
+	tr := s.trace.begin(Route{imageTurn: drawingTurnID(metadata.Turn), imageCaller: codexTurnKey(r, call.Agent), TitleLink: link, Pinned: pin, Time: start, Agent: call.Agent, Session: sessionOf(r.Header), ParentSession: titleParentSession(r.Header, metadata, call.Kind), Kind: call.Kind, For: call.For, Model: call.Model, Effort: requestEffort(from, body), Provider: p.ID, Group: group, Rule: hit, Nested: nested, SealedTask: sealedTask, LeadAccount: leadAccount, Affinity: shown, Order: pl.order, Left: pl.left})
 	if telemetry != nil {
 		telemetry.routeID = tr.ID
 	}
@@ -1589,6 +1589,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 		}
 		s.trace.update(tr, func(t *Route) {
+			t.imageProvider = c.p.ID
 			t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Effort: sent, Picked: picked, Fixed: fixed, Fast: fast, Start: began})
 		})
 		held := false    // answered as its vendor did a moment ago, without asking
@@ -1606,6 +1607,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// a stream that fails before anything is said is let go at
 			// once (hw.stop), not read on until the vendor hangs up
 			ctx, stop := context.WithCancel(r.Context())
+			if isGroup {
+				ctx = groupTry(ctx)
+			}
 			hw.stop = stop
 			if autoPicks(c) {
 				// the reply names the pick it went as last (#256: it
@@ -2335,6 +2339,7 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	ctx = p.Via(ctx)
 	body = deepseekToolPatterns(p, to, body)
 	body = toolOneOfAsAnyOf(p, to, body)
+	body = kimiToolEnumTypes(p, to, body)
 	body = clinePin(p, to, body)
 	if to == provider.Anthropic {
 		body = s.bodyBetas(p, body)
@@ -2966,7 +2971,14 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 			// about
 			body = rewriteModel(body, wire)
 		}
-		res, err := s.forward(ctx, p, to, pathOf(to), p.Prepare(body), in)
+		path := pathOf(to)
+		if req.Resume && to == provider.Chat && chatPrefill(p.Host(), model) == "prefix" {
+			// DeepSeek serves its prefix mode under /beta, beside the /v1
+			// the base carries
+			p.Chat = strings.TrimSuffix(p.Chat, "/v1")
+			path = "/beta" + path
+		}
+		res, err := s.forward(ctx, p, to, path, p.Prepare(body), in)
 		if err != nil || res.StatusCode < 400 {
 			if dropped && err == nil {
 				// it was the key: not sent there again
@@ -3353,6 +3365,9 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	stream := request.Stream
 	request.Stream = true
+	if stream {
+		return s.streamTranslated(w, r, p, from, to, request, model, zen, u)
+	}
 	res, actual, err := s.forwardTranslated(r.Context(), p, to, request, model, r.Header)
 	if err != nil {
 		return writeError(w, from, 502, p.Name+": "+err.Error()), err.Error()
@@ -3393,72 +3408,6 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		}
 		t := &textCallSee{names: names, see: see}
 		return t.event, t.release
-	}
-	if stream {
-		sw := newSSEWriter(w)
-		enc := encoder(from, sw, request, u)
-		var failed string
-		said, stop := false, ""
-		var kept []Event // the reply's end, while nothing is said in it
-		see := zenSee(zen, func(ev Event) {
-			switch ev.Kind {
-			case KError:
-				failed = ev.Text
-			case KStart, KUsage:
-				u.add(ev.Usage)
-				u.add(Usage{Served: ev.Model}) // the model the vendor says answered
-			case KStop:
-				stop = ev.Stop
-			}
-			if empty && !said {
-				switch {
-				case saysSomething(ev):
-					said = true
-				case ev.Kind == KStop, ev.Kind == KUsage:
-					kept = append(kept, ev)
-					return
-				}
-			}
-			enc.event(ev)
-		})
-		see, held := written(see)
-		serr := readSSEAlive(rd, func(_, data string) error {
-			u.add(Usage{Upstream: upstreamOf([]byte(data))})
-			return dec(data, see)
-		}, func() {
-			// the provider's keepalives aren't events to translate: while
-			// it is heard from, the client hears from magpie (#436)
-			if failed == "" && sw.quiet() >= keepaliveGap {
-				enc.keepalive()
-			}
-		})
-		held()
-		if serr != nil && failed == "" {
-			// the upstream died mid-reply: say so in the client's own
-			// protocol instead of finishing as if all went well
-			failed = cutMidReply(p.Name, serr)
-			enc.event(Event{Kind: KError, Text: failed})
-		}
-		if failed == "" && empty && !said && answersNothing(stop) {
-			// as an error it is asked again, or of another account, and
-			// an agent told it tries again rather than end its turn
-			failed = p.Name + ": " + emptyReply
-			enc.event(Event{Kind: KError, Text: failed})
-		}
-		if failed != "" {
-			// the same refusal as the 429's, said inside the reply
-			markAntigravityRefused(w, p, request.System, failed)
-		}
-		if failed == "" {
-			for _, ev := range kept {
-				enc.event(ev)
-			}
-			if zen != nil {
-				zen.end(enc.event)
-			}
-			enc.finish()
-		}
-		return 200, failed
 	}
 	var col collector
 	see, held := written(zenSee(zen, col.add))

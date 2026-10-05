@@ -6185,6 +6185,18 @@ function cancelEdit(keep) {
   editing = null; draft = null; importing = null; importingApps = null; renderProviders();
 }
 
+// priceTypedError: a model with no list price given only part of its
+// price in Names & levels (its input and output both needed) holds the
+// Save, its empty box focused, rather than the part typed being dropped.
+function priceTypedError(ed) {
+  const id = Object.keys(draft?.priceTyped || {}).find((x) => !draft.chosen?.length || draft.chosen.includes(x));
+  if (id === undefined) return false;
+  const row = [...ed.querySelectorAll(".mname")].find((r) => r.querySelector("code")?.textContent === id);
+  [...(row?.querySelectorAll(".mprice input") || [])].find((i) => i.value.trim() === "" && !i.placeholder)?.focus({ preventScroll: true });
+  editorError(t("{id} has no list price: give its input and output prices", { id }), "warn");
+  return true;
+}
+
 // modelPrefsOfDraft: the names, levels and images staged in the editor's
 // Names & levels, for its Save, or nothing when none changed.
 function modelPrefsOfDraft() {
@@ -7070,6 +7082,7 @@ function drawEditor(p, presetID) {
       if (maxConcurrency === undefined) return concurrencyError(ed);
       const priceRate = priceRateOfDraft();
       if (priceRate === undefined) return priceRateError(ed);
+      if (priceTypedError(ed)) return;
       saveBtn.classList.add("busy"); providerAction("save", { id: p.id, models: chosenIds(), unlisted: draft.unlisted, fallback: draft.fallback, contexts: cx.map, outputs: ox.map, compacts: cpx.map, proxy, accountProxies: own.map, maxConcurrency, priceRate, modelPrefs: modelPrefsOfDraft(), pinUpstream: !!draft.pinUpstream, ...routingOfDraft(p) }, t("{name} saved", { name: p.name })); };
     bar.append(cancel, saveBtn);
     ed.append(bar);
@@ -7410,6 +7423,7 @@ function drawEditor(p, presetID) {
     if (body.maxConcurrency === undefined) return concurrencyError(ed);
     body.priceRate = priceRateOfDraft();
     if (body.priceRate === undefined) return priceRateError(ed);
+    if (p && priceTypedError(ed)) return;
     if (draft.balanceToken) body.balanceToken = draft.balanceToken;
     else if (draft.clearBalanceToken) body.clearBalanceToken = true;
     if (team) {
@@ -8436,7 +8450,8 @@ function renderModels(p) {
       priceBox.append(el("span", "", t("Price, $ / 1M tokens")));
       const cells = parts.map(([k, l]) => {
         const box = el("label", "mpart");
-        const i = input(priceNow() ? shown(priceNow()[k]) : "", m.list ? shown(m.list[k]) : "", "number");
+        const typed = draft.priceTyped?.[id];
+        const i = input(typed ? typed[parts.findIndex(([x]) => x === k)] : priceNow() ? shown(priceNow()[k]) : "", m.list ? shown(m.list[k]) : "", "number");
         i.inputMode = "decimal";
         i.min = "0";
         i.step = "any";
@@ -8453,6 +8468,7 @@ function renderModels(p) {
         const v = cells.map((c) => c.value.trim());
         const x = pref();
         delete x.price; delete x.ownPrice;
+        if (draft.priceTyped) delete draft.priceTyped[id];
         if (v.every((s) => s === "")) {
           if (m.price) x.ownPrice = true;
           drawReset();
@@ -8461,6 +8477,16 @@ function renderModels(p) {
         const price = {};
         for (const [i, [k]] of parts.entries()) {
           const n = v[i] === "" ? m.list?.[k] ?? (k.startsWith("cache") ? 0 : NaN) : Number(v[i]);
+          // a model with no list price is given its input and output one
+          // box at a time: what is typed stays, waiting for the other, and
+          // the Save asks for it (PAMI on Discord: each box typed was
+          // emptied again, so a price could never be set)
+          if (Number.isNaN(n) && v[i] === "" && v.every((s) => s === "" || (Number.isFinite(Number(s)) && Number(s) >= 0))) {
+            (draft.priceTyped = draft.priceTyped || {})[id] = v;
+            status(t("{id} has no list price: give its input and output prices", { id: m.id }), "warn");
+            drawReset();
+            return;
+          }
           if (!Number.isFinite(n) || n < 0) {
             status(Number.isNaN(n) && v[i] === "" ? t("{id} has no list price: give its input and output prices", { id: m.id }) : t("A price is a number of dollars, 0 or more"), "err");
             showPrice();
@@ -8531,6 +8557,7 @@ function renderModels(p) {
       reset.title = t("Its own name, every reasoning level it has, whether it sees images, the API it is asked on, the model it is the same as, and its list price");
       reset.onclick = () => {
         prefs[id] = {};
+        if (draft.priceTyped) delete draft.priceTyped[id];
         if (m.default) prefs[id].name = "";
         if (m.kept?.length) prefs[id].efforts = [];
         if (m.imageSet) prefs[id].ownImages = true;
@@ -8548,10 +8575,10 @@ function renderModels(p) {
       const drawReset = () => {
         const x = prefs[id];
         if (x && !Object.keys(x).length) delete prefs[id];
-        unsaved.hidden = !prefs[id];
+        unsaved.hidden = !prefs[id] && !draft.priceTyped?.[id];
         // staged back to its own already, there is nothing to restore
         const images = prefs[id]?.ownImages ? false : prefs[id]?.images !== undefined ? prefs[id].images !== !!m.ownImages : !!m.imageSet;
-        const custom = nameNow() !== "" || (prefs[id]?.efforts ? prefs[id].efforts.length > 0 : !!m.kept?.length) || images || apiNow() !== "" || sameNow() !== "" || priceNow() !== null;
+        const custom = nameNow() !== "" || (prefs[id]?.efforts ? prefs[id].efforts.length > 0 : !!m.kept?.length) || images || apiNow() !== "" || sameNow() !== "" || priceNow() !== null || !!draft.priceTyped?.[id];
         reset.hidden = !custom;
       };
       row.append(unsaved, reset);
@@ -13337,7 +13364,9 @@ function ledMoney(v) {
 const LED_METRICS = [["tokens", "Tokens"], ["cost", "Cost"], ["calls", "Requests"]];
 // the window's chart can also say how fast the replies came (#860)
 const LED_TREND = [...LED_METRICS, ["speed", "Speed"]];
-const LED_SPLITS = [["model", "Model"], ["provider", "Provider"], ["agent", "Agent"]];
+// "modelAt" is a model at the provider it went to, so one model's speed at
+// each provider is ranked side by side (inaction on Discord)
+const LED_SPLITS = [["model", "Model"], ["modelAt", "Model · provider"], ["provider", "Provider"], ["agent", "Agent"]];
 const LED_SHOWN = 7; // told apart in a chart; the rest are "Other"
 const allTokens = (x) => x.input + x.output + x.cache_read + x.cache_write;
 // how fast the timed replies of a point, a share or a part wrote, in tokens
@@ -13696,10 +13725,17 @@ function drawLedTrend() {
   });
   rank.chart = chart;
   if (!rank.rail) ledRail($("#ledRail"), rank);
-  const picked = ledSplit === "provider" ? ledProvider : ledSplit === "agent" ? ledAgent : ledModel;
+  const picked = ledSplit === "provider" ? ledProvider : ledSplit === "agent" ? ledAgent
+    : ledSplit === "modelAt" ? (ledProvider && ledModel ? ledProvider + "/" + ledModel : "") : ledModel;
   drawLedRank(rank, l, ledSplit, ledMetric, picked, (x) => {
     // a click lists only that one's requests; on the one listed, all again
-    if (ledSplit === "provider") ledProvider = ledProvider === x.id ? "" : x.id;
+    if (ledSplit === "modelAt") {
+      // provider/model: both filters, the provider's id has no "/"
+      const q = $("#ledQ"), cut = x.id.indexOf("/"), off = picked === x.id;
+      ledProvider = off ? "" : x.id.slice(0, cut);
+      ledModel = off ? "" : x.id.slice(cut + 1);
+      ledQuery = ledModel; q.value = ledQuery;
+    } else if (ledSplit === "provider") ledProvider = ledProvider === x.id ? "" : x.id;
     else if (ledSplit === "agent") ledAgent = ledAgent === x.id ? "" : x.id;
     else { const q = $("#ledQ"); ledModel = ledModel === x.id ? "" : x.id; ledQuery = ledModel; q.value = ledQuery; }
     ledOffset = 0;
@@ -15424,6 +15460,8 @@ function applyPrefs(s, rate) {
     }
   }
   applyPrefs.ready = true;
+  // accounts hidden while personal data is masked, until chosen otherwise
+  window.hideAccounts?.follow(!!s.redactPersonal);
   // this browser's choice from before it was a setting, carried over once
   let kept = null;
   try { kept = localStorage.getItem("magpie.quotaLeft"); localStorage.removeItem("magpie.quotaLeft"); } catch {}
@@ -16146,8 +16184,9 @@ const IN_USE = "|*";
 // (or "routing group") after it, all but the names the user gave models
 // and the groups they made (#92), or none (#335). Set on its own, so the
 // agents are told. Offered on Settings and where names are given, the
-// provider's Names & levels and a group's editor (#868: an agent's narrow
-// menu cut "· routing group" short, and the setting wasn't found);
+// provider's Names & levels and over Routing's groups (#868: an agent's
+// narrow menu cut "· routing group" short, and the setting wasn't found;
+// in one group's editor it read as that group's, PAMI on Discord);
 // drawn(mode) redraws the place it was picked in.
 function suffixMode(s = prefs || {}) { return s.plainNames ? "off" : s.plainOwnNames ? "own" : "on"; }
 function suffixSegs(drawn) {
@@ -16723,7 +16762,14 @@ function renderRedact(s, keep) {
   row(t("Mask secrets"), t("API keys, private keys, tokens and passwords go to vendors as placeholders, and come back as they were"),
     onOff(s.redact, (redact) => savePrefs({ ...keep, redact })));
   row(t("Mask personal data"), t("Emails, phone numbers, ID and bank card numbers too"),
-    onOff(s.redactPersonal, (redactPersonal) => savePrefs({ ...keep, redactPersonal })));
+    onOff(s.redactPersonal, (redactPersonal) => {
+      // turned on, the accounts on screen are hidden too
+      if (redactPersonal) window.hideAccounts?.set(true);
+      savePrefs({ ...keep, redactPersonal });
+    }));
+  // Routing's and Usage's Hide accounts, here too, where privacy is looked for
+  if (window.hideAccounts) row(t("Hide accounts"), t("Email addresses and account names on Usage and Routing are blurred, for a screenshot to share"),
+    onOff(window.hideAccounts.on(), (on) => { window.hideAccounts.set(on); renderSettings(); }));
   const words = (s.redactWords || []).join(", ");
   const i = input(words, t("names, codenames, hosts"));
   i.className = "words";
@@ -17851,8 +17897,12 @@ window.noteAccounts = noteAccounts;
   // itself watched, so it can't set itself off again
   const OBS = { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["title"] };
   const SKIP = new Set(["SCRIPT", "STYLE", "OPTION", "TEXTAREA"]);
-  let masked = false;
-  try { masked = localStorage.getItem("magpie.maskEmails") === "1"; } catch {}
+  // chosen is the Hide accounts choice made on this computer; until one is,
+  // the accounts are hidden while Privacy masks personal data, which is
+  // where one who wants them kept out of sight turns it on (inaction on
+  // Discord: another computer with it on still showed the addresses)
+  let masked = false, chosen = null;
+  try { chosen = localStorage.getItem("magpie.maskEmails"); masked = chosen === "1"; } catch {}
   // the pages it hides on: Routing's and Usage's, each with its button; in
   // the tray panel, the whole of it, as the window's setting says
   const targets = mode === "panel" ? [["#view-agents", null]] : [["#view-routing", "#rtMask"], ["#view-usage", "#usageMask"]];
@@ -17938,14 +17988,22 @@ window.noteAccounts = noteAccounts;
   });
   function setMasked(on, keep) {
     masked = on;
-    if (!keep) try { localStorage.setItem("magpie.maskEmails", on ? "1" : "0"); } catch {}
+    if (!keep) { chosen = on ? "1" : "0"; try { localStorage.setItem("magpie.maskEmails", chosen); } catch {} }
     for (const set of pages) set(on);
   }
+  // Settings' Privacy has the same switch, and the settings follow
+  window.hideAccounts = {
+    on: () => masked,
+    set: (on) => setMasked(on),
+    follow: (personal) => { if (chosen === null && personal !== masked) setMasked(personal, true); },
+  };
   // turned in the window: the tray panel (or another window) follows
   window.addEventListener("storage", (e) => {
-    if (e.key === "magpie.maskEmails" && (e.newValue === "1") !== masked) setMasked(e.newValue === "1", true);
+    if (e.key !== "magpie.maskEmails") return;
+    chosen = e.newValue;
+    if ((e.newValue === "1") !== masked) setMasked(e.newValue === "1", true);
   });
-  setMasked(masked);
+  setMasked(masked, true);
 })();
 
 // Opened on a magpie://import link: fetch what it describes (once — the

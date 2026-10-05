@@ -368,6 +368,17 @@ and the status line says which agent was moved to the model from one provider;
 clicked on, the found group is back. Neither click moves the page, the switch
 has no left-border accent, and every string has its Chinese.
 
+`name-suffix-where-named.test.cjs` checks the setting that says whether a
+provider's name or "· routing group" follows a name in the agents' lists (#868)
+where names are given, in Chromium and WebKit, English and Chinese. The
+provider editor's Names & levels has its three choices and says what the lists
+show. For the groups it is one setting for all of them, so it sits over the
+groups on Routing (PAMI on Discord: in one group's editor it read as that
+group's): a group's editor has no choices, only what its group will be called
+and that it is set above; a pick there posts settings/plain-names once and the
+open editor's line follows it with its unsaved name. No click scrolls, nothing
+native, no left border, and every string has its Chinese, Japanese and German.
+
 `routing-manual.test.cjs` routes a group by hand in Chromium and WebKit,
 English and Chinese (#317: pick the model, as CC Switch picks a provider). A
 manual group's card lists its models, the one every request goes to marked, and
@@ -779,6 +790,13 @@ request listed there is nothing; in English and Chinese, light and dark.
 The daily chart also checks selection, gray bars on other days, filtered rows
 and CSV, an empty day, clearing a selection, keyboard input and resizing.
 
+`usage-model-at-provider.test.cjs` splits the Requests tab's chart by "Model ·
+provider" (inaction on Discord): one model at two providers is two rows of the
+ranking, each named by both with the provider's icon and its own first token,
+the faster first by Speed though fewer requests went to it. A click lists that
+provider's requests of that model (provider and model both asked for), a click
+again all of them, and the page doesn't move. English and Chinese.
+
 `usage-chart-axis.test.cjs` checks the usage chart's side labels, in the
 window's Requests tab (1180 and 560 wide) and the tray panel's Usage tab (440
 and 340 wide): for tokens, cost in dollars and in yuan, and requests, small and
@@ -1050,6 +1068,15 @@ magpie's trash as single deletes do; a session still being written to is
 left and said so, other folders stay, and an agent magpie can't delete from
 has no boxes. No click moves the page, no left-border accent, every string
 in Chinese. Chromium and WebKit, English and Chinese, API faked.
+
+`sessions-codex-provider.test.cjs` moves Codex sessions made with another
+provider to the one Codex uses now (#887): the Codex tab says how many there
+are and which provider, tags each, and Move opens magpie's own dialog with
+each ticked; Cancel posts nothing, an unticked one isn't moved, Move posts
+sessions/codex-provider with each id and Codex's provider, and Undo posts
+each back to the provider it had. No click moves the page, no left-border
+accent, every string in Chinese, Japanese and German. Chromium and WebKit,
+English and Chinese, API faked.
 
 `sessions-toolbar.test.cjs` uses ten agents to check that fitting tabs stay
 visible at 1800px, while 900, 660 and 320px windows use a compact agent menu.
@@ -1754,3 +1781,11 @@ of its own (Cindy) on the Agents page: a line under its name says whether
 magpie is added (green once it is), its button stands where the other rows'
 model picker does, as wide and lined up with it at 960 and 700px, and a click
 opens the app's link. English and Chinese, Chromium and WebKit.
+
+`privacy-hides-accounts.test.cjs` checks that Privacy's Mask personal data
+hides the accounts on screen too (inaction on Discord): until Hide accounts is
+chosen on a computer it follows the setting, so Usage's email address is
+blurred and its button pressed; an address shown on purpose with the button
+stays shown; on Settings › Privacy, turning Mask personal data on turns Hide
+accounts on, and Privacy's own Hide accounts row says so and turns it off,
+without scrolling. English and Chinese, Chromium and WebKit.
