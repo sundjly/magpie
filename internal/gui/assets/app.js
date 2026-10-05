@@ -94,6 +94,10 @@ async function api(path, body) {
   }
   if (!res.ok) {
     const err = new Error(data?.error || `${res.status} ${res.statusText}`);
+    if (data?.code === "runtime_unavailable") {
+      err.code = data.code;
+      if (data.offline === "stage" || data.offline === "disconnect") err.offline = data.offline;
+    }
     if (data?.why) err.why = data.why; // a failed move's reason, said in the reader's language
     throw err;
   }
@@ -295,6 +299,9 @@ function renderAgents() {
       c.append(svg(CHEV, 11, 1.7));
       b.append(c);
       b.dataset.key = f.key;
+      const fieldState = a.native?.fields?.[f.key];
+      if (fieldState?.detail) b.title += "\n" + t(fieldState.detail);
+      if (fieldState?.status === "unavailable") b.classList.add("drifted");
       b.onclick = (ev) => openPicker(a, f, b, ev);
       return b;
     };
@@ -803,6 +810,7 @@ const CONNECTED_HOW = {
 };
 function connectedSaid(a, c) {
   const plain = t("{agent} is connected to magpie", { agent: a.name });
+  if (a.native && c?.how === "joined") return t("{agent} is connected to magpie", { agent: a.name });
   if (c?.how === "joined") return t("{agent} is connected to magpie · it stays on its own last pick; magpie's models join its {cmd}", { agent: a.name, cmd: PICKS_IN[a.id] || "/model" });
   const now = state.agents.find((x) => x.id === a.id);
   const f = now && startField(now);
@@ -958,6 +966,11 @@ function connectLine(a, kind) {
     return line;
   }
   if (kind === "empty") { say(t("Add a key or a subscription first; then there are models to connect")); return line; }
+  if (!a.wired && a.native && a.native.provider !== "disconnected") {
+    say(t(a.native.detail), "bad");
+    if (a.native.provider === "invalid") line.append(driftFix(a, "Reconnect"));
+    return line;
+  }
   if (!a.wired) {
     const src = a.source || "";
     if (a.id === "agy") say(t("Not connected · once connected, start it with magpie's command"));
@@ -966,6 +979,10 @@ function connectLine(a, kind) {
     else if (src === "key") say(t("Not connected · now on an API key of its own"));
     else if (src.startsWith("providers:")) say(t("Not connected · now has {n} providers of its own", { n: src.slice(10) }));
     else say(t("Not connected · {agent} uses its own settings", { agent: a.name }));
+    return line;
+  }
+  if (a.native) {
+    say(connectSaid(a), "on");
     return line;
   }
   if (a.drift) {
@@ -1052,7 +1069,7 @@ function startField(a) {
 // offers magpie's models alone.
 function startButton(a, f, fieldBtn) {
   const b = fieldBtn(f, "ag-start");
-  if (!a.wired && f.key !== "model" && !f.options.some((o) => o.direct)) {
+  if (!a.wired && !a.native && f.key !== "model" && !f.options.some((o) => o.direct)) {
     b.replaceChildren(el("span", "v empty", t("Pick a model")));
     const c = el("span", "chev");
     c.append(svg(CHEV, 11, 1.7));
@@ -1277,6 +1294,9 @@ function connectPanel(a, { fields, fieldBtn }) {
     }
     kv(t("New sessions"), line(fields));
   }
+  if (a.native) for (const [key, detail] of Object.entries(a.native.fields || {})) {
+    if (detail.detail) { const f = a.fields.find((x) => x.key === key); kv(t(f?.label || key), line(t(detail.detail))); }
+  }
   if (CONNECT_COST[a.id]) kv(t("Once connected"), line(t(CONNECT_COST[a.id])));
   if (a.launch) {
     const cp = el("button", "ag-quiet", t("Copy"));
@@ -1317,7 +1337,7 @@ function connectPanel(a, { fields, fieldBtn }) {
     diff.replaceChildren(changesList(changes));
   };
   if (previews[a.id]) fill(previews[a.id]);
-  loadPreview(a).then(fill, () => {});
+  loadPreview(a).then((preview) => fill(preview.changes), () => {});
   return box;
 }
 
@@ -1325,7 +1345,7 @@ async function loadPreview(a) {
   const r = await api("agents/preview/" + a.id);
   if (r?.error) throw new Error(r.error);
   previews[a.id] = r?.changes || [];
-  return previews[a.id];
+  return { changes: previews[a.id], revision: typeof r?.revision === "string" ? r.revision : "" };
 }
 
 // changesList: what disconnecting does to each file, line by line
@@ -1383,28 +1403,44 @@ function askDisconnect(a) {
   };
   if (previews[a.id]) show(previews[a.id]);
   else body.append(el("div", "ag-diff-loading", t("Reading what changes…")));
-  loadPreview(a).then(show, () => show(null));
+  let previewBlocked = !!a.native, revision = "", offline = false;
+  loadPreview(a).then((preview) => {
+    show(preview.changes);
+    revision = preview.revision;
+    previewBlocked = !!a.native && !revision;
+    go.disabled = previewBlocked;
+  }, (err) => { if (!a.native) { show(null); return; } previewBlocked = true; go.disabled = true; body.replaceChildren(el("p", "lib-confirm", t(err.message))); });
   ed.append(body);
   if (a.id === "codex") ed.append(el("p", "ag-note", t("magpie's provider table stays, so sessions opened on magpie's models still open")));
   const bar = el("div", "bar");
   const go = el("button", "text primary danger-fill", t("Disconnect and restore"));
+  go.disabled = previewBlocked;
   go.onclick = async (e) => {
     e.stopPropagation();
+    if (previewBlocked) return;
     go.disabled = true;
     go.classList.add("busy");
     try {
-      state = await api("agents/disconnect/" + a.id, {});
+      state = await api("agents/" + (offline ? "disconnect-offline/" : "disconnect/") + a.id, offline ? { revision } : {});
       closeConfirmAsk();
       delete previews[a.id];
       if (agentExpanded === a.id) agentExpanded = null;
       renderAgents();
-      const msg = t("{agent} no longer goes through magpie; its own settings are back", { agent: a.name });
+      const msg = t(offline ? "Saved settings restored; magpie was removed from {agent}" : "{agent} no longer goes through magpie; its own settings are back", { agent: a.name });
       if (state.notice) status(`${msg}. ${t(state.notice)}`, "warn", 9000);
       else status(msg, "ok");
     } catch (err) {
       go.disabled = false;
       go.classList.remove("busy");
-      status(err.message, "err");
+      if (!offline && err.code === "runtime_unavailable" && err.offline === "disconnect" && revision) {
+        offline = true;
+        head.querySelector("b").textContent = t("Restore saved settings and remove magpie?");
+        ed.querySelector(".lib-confirm").textContent = t("Restore saved settings and remove magpie without contacting Aside? Close Aside first if it is running.");
+        go.textContent = t("Restore saved settings and remove magpie");
+        cancel.focus({ preventScroll: true });
+        return;
+      }
+      status(t(err.message), "err");
     }
   };
   const cancel = el("button", "text", t("Cancel"));
@@ -3927,6 +3963,7 @@ async function commit(value) {
     return;
   }
   if (value === field.value) return;
+  if (agent.native) return setPick(agent, field, value, opt);
   // a pick that takes a connected agent off magpie (its Default, or a
   // model of its own asked of its vendor directly) is asked first, as the
   // switch's off is: it moved Claude Code under Not set up at a click
@@ -3941,7 +3978,7 @@ async function commit(value) {
 // directly (Claude Code's own, which unroutes it). From one of its own
 // models already, the pick doesn't move it off magpie.
 function leavesMagpie(a, field, value, opt) {
-  if (!a?.wired || !connectable(a) || field !== (startField(a) || connectField(a))) return false;
+  if (a?.native || !a?.wired || !connectable(a) || field !== (startField(a) || connectField(a))) return false;
   if (optionFor(field, field.value)?.direct) return false;
   return value === "" || !!opt?.direct;
 }
@@ -3988,6 +4025,25 @@ async function setPick(agent, field, value, opt) {
   // seconds (every agent's lists are read again for it). The answer then
   // draws what the config really says; a refused pick puts the old one back.
   const was = field.value;
+  if (agent.native) {
+    try { state = await api("set", { agent: agent.id, field: field.key, value }); renderAgents(); }
+    catch (err) {
+      if (err.code === "runtime_unavailable" && err.offline === "stage") {
+        const ed = el("div", "editor disconnect-ask");
+        ed.append(el("p", "lib-confirm", t("Aside is unavailable. Save this model for its next start?")));
+        const bar = el("div", "bar"), cancel = el("button", "text", t("Cancel")), save = el("button", "text primary", t("Save for next start"));
+        cancel.onclick = () => closeConfirmAsk();
+        save.onclick = async () => {
+          save.disabled = true;
+          try { state = await api("agents/stage/" + agent.id, { field: field.key, value }); closeConfirmAsk(); renderAgents(); }
+          catch (err) { save.disabled = false; status(t(err.message), "err"); }
+        };
+        bar.append(cancel, save); ed.append(bar); confirmAsk = ed; openModal(ed);
+        cancel.focus({ preventScroll: true });
+      } else status(t(err.message), "err");
+    }
+    return;
+  }
   const leaving = leavesMagpie(agent, field, value, opt);
   const seq = commit.seq = (commit.seq || 0) + 1;
   field.value = value;
@@ -4612,8 +4668,10 @@ function askForgetAccount(x) {
     e.stopPropagation();
     go.disabled = true;
     go.classList.add("busy");
-    await providerAction("forget", { id: x.provider }, t("{name} signed out", { name: x.agentName }));
-    closeConfirmAsk();
+    // failed, the ask stays with the error in it rather than close over it
+    // (#874: the error showed for a blink as the ask closed)
+    if (await providerAction("forget", { id: x.provider }, t("{name} signed out", { name: x.agentName }))) closeConfirmAsk();
+    else go.disabled = false;
   };
   const cancel = el("button", "text", t("Cancel"));
   cancel.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
@@ -7360,11 +7418,27 @@ function contextPicks(p, cx) {
 // may hold, over what the vendor or models.dev says, one for all of them
 // and model=size for one, as the context window is set (ARNO on Discord: a
 // model's maxTokens was wrong, and only its window could be set here).
+// The usual sizes sit under it, one click each, as under the window (#875).
 function outputField() {
   const ox = input(draft.outputs || "", t("e.g. 32k · or gpt-6=128k, comma separated"));
   ox.classList.add("outputs");
-  ox.oninput = () => { draft.outputs = ox.value; };
-  return field(t("Max output"), ox, t("The most a reply may hold, told to the agents as their max tokens; empty leaves it to the vendor and models.dev"));
+  const sizes = [8e3, 16e3, 32e3, 64e3, 128e3].map((n) => contextsText({ "*": n }));
+  const row = el("div", "cxpicks");
+  const same = (a, b) => JSON.stringify(parseContexts(a).map || {}) === JSON.stringify(parseContexts(b).map || {});
+  const light = () => {
+    for (const [i, b] of [...row.children].entries()) b.classList.toggle("on", !!ox.value.trim() && same(ox.value, sizes[i]));
+  };
+  for (const v of sizes) {
+    const b = el("button", "cxpick", v.toUpperCase());
+    b.type = "button";
+    b.onclick = () => { ox.value = v; draft.outputs = v; light(); };
+    row.append(b);
+  }
+  ox.oninput = () => { draft.outputs = ox.value; light(); };
+  light();
+  const wrap = el("div", "cxfield");
+  wrap.append(ox, row);
+  return field(t("Max output"), wrap, t("The most a reply may hold, told to the agents as their max tokens; empty leaves it to the vendor and models.dev"));
 }
 
 function outputError(ed, v) {
@@ -8177,6 +8251,8 @@ function renderModels(p) {
   // saved on its own, every one rewriting the agents' files, so picking a
   // model's levels lagged a click behind (ARNO on Discord).
   const drawNames = () => {
+    // drawn again, the list stays where it was scrolled to
+    const top = names.scrollTop;
     names.replaceChildren();
     names.hidden = naming !== p.id;
     if (names.hidden) return;
@@ -8241,6 +8317,56 @@ function renderModels(p) {
       same.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") same.blur(); else if (e.key === "Escape") { same.value = sameNow(); same.blur(); } };
       sameBox.append(el("span", "", t("Same as")), same);
       row.append(sameBox);
+      // what it costs the user, in dollars per million tokens, as the
+      // Usage page counts it (#819: only `magpie model price` set it):
+      // each box shows its list price until a price is given, a part left
+      // empty is the list's, and every part empty is its list price again
+      const parts = [["input", "Input"], ["output", "Output"], ["cache_read", "Cache read"], ["cache_write", "Cache write"]];
+      const priceNow = () => prefs[id]?.ownPrice ? null : prefs[id]?.price ?? m.price ?? null;
+      const shown = (n) => String(Math.round(n * 1e6) / 1e6);
+      const priceBox = el("div", "mprice");
+      priceBox.title = t("What {id} costs, in US dollars per million tokens, as the Usage page counts it; empty: its list price, shown greyed. A price set here isn't multiplied by the provider's price rate", { id: m.id });
+      priceBox.append(el("span", "", t("Price, $ / 1M tokens")));
+      const cells = parts.map(([k, l]) => {
+        const box = el("label", "mpart");
+        const i = input(priceNow() ? shown(priceNow()[k]) : "", m.list ? shown(m.list[k]) : "", "number");
+        i.inputMode = "decimal";
+        i.min = "0";
+        i.step = "any";
+        i.dataset.part = k;
+        i.setAttribute("aria-label", t(l));
+        i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") i.blur(); };
+        i.onchange = () => takePrice();
+        box.append(el("span", "", t(l)), i);
+        priceBox.append(box);
+        return i;
+      });
+      const showPrice = () => { const pr = priceNow(); cells.forEach((c, i) => { c.value = pr ? shown(pr[parts[i][0]]) : ""; }); };
+      const takePrice = () => {
+        const v = cells.map((c) => c.value.trim());
+        const x = pref();
+        delete x.price; delete x.ownPrice;
+        if (v.every((s) => s === "")) {
+          if (m.price) x.ownPrice = true;
+          drawReset();
+          return;
+        }
+        const price = {};
+        for (const [i, [k]] of parts.entries()) {
+          const n = v[i] === "" ? m.list?.[k] ?? (k.startsWith("cache") ? 0 : NaN) : Number(v[i]);
+          if (!Number.isFinite(n) || n < 0) {
+            status(Number.isNaN(n) && v[i] === "" ? t("{id} has no list price: give its input and output prices", { id: m.id }) : t("A price is a number of dollars, 0 or more"), "err");
+            showPrice();
+            drawReset();
+            return;
+          }
+          price[k] = n;
+        }
+        if (!m.price || parts.some(([k]) => m.price[k] !== price[k])) x.price = price;
+        showPrice();
+        drawReset();
+      };
+      row.append(priceBox);
       const [img, imgCb] = tick(t("Accepts images"), imagesNow());
       img.title = t("Whether agents are told {id} can see images", { id: m.id });
       imgCb.onchange = () => {
@@ -8295,7 +8421,7 @@ function renderModels(p) {
       const unsaved = el("span", "hint munsaved", t("unsaved"));
       unsaved.title = t("Made when the provider is saved; Cancel drops it");
       const reset = el("button", "text action", t("Restore default"));
-      reset.title = t("Its own name, every reasoning level it has, whether it sees images, the API it is asked on, and the model it is the same as");
+      reset.title = t("Its own name, every reasoning level it has, whether it sees images, the API it is asked on, the model it is the same as, and its list price");
       reset.onclick = () => {
         prefs[id] = {};
         if (m.default) prefs[id].name = "";
@@ -8307,6 +8433,8 @@ function renderModels(p) {
         if (m.api) prefs[id].api = "";
         if (m.same) prefs[id].same = "";
         same.value = sameNow();
+        if (m.price) prefs[id].ownPrice = true;
+        showPrice();
         if (apiSeg) { for (const b of apiSeg.querySelectorAll(".opt")) b.classList.toggle("on", b.dataset.api === apiNow()); slide(apiSeg, "api"); }
         drawReset();
       };
@@ -8316,13 +8444,14 @@ function renderModels(p) {
         unsaved.hidden = !prefs[id];
         // staged back to its own already, there is nothing to restore
         const images = prefs[id]?.ownImages ? false : prefs[id]?.images !== undefined ? prefs[id].images !== !!m.ownImages : !!m.imageSet;
-        const custom = nameNow() !== "" || (prefs[id]?.efforts ? prefs[id].efforts.length > 0 : !!m.kept?.length) || images || apiNow() !== "" || sameNow() !== "";
+        const custom = nameNow() !== "" || (prefs[id]?.efforts ? prefs[id].efforts.length > 0 : !!m.kept?.length) || images || apiNow() !== "" || sameNow() !== "" || priceNow() !== null;
         reset.hidden = !custom;
       };
       row.append(unsaved, reset);
       drawReset();
       names.append(row);
     }
+    names.scrollTop = top;
   };
   // every model at once (those the filter shows, when there is one), or none
   const bulk = el("div", "mbulk");
@@ -10733,6 +10862,7 @@ async function providerAction(action, body, okMsg, base = "provider/") {
     state = await api("state");
     renderAgents();
     saidMoved(okMsg);
+    return true;
   } catch (e) {
     // a Remove may have gone through before what failed: the list as it is
     // now, and the editor of a provider gone closes, rather than stay open
@@ -16105,6 +16235,7 @@ function renderAlerts(s, keep) {
   };
   sub("#usageAlertSub", t("A notification when a 5-hour, weekly or monthly window reaches this share used, once each time it runs"));
   sub("#balanceAlertSub", t("A notification when a balance falls to this amount, in its own currency or credits, once until it is topped up"));
+  sub("#resetReminderSub", t("A notification this long before a weekly or monthly window renews with under 85% of it used, or before unused resets expire"));
   const field = (box, value, label, unit, ok, save) => {
     box.replaceChildren();
     if (value) {
@@ -16129,6 +16260,12 @@ function renderAlerts(s, keep) {
   field($("#balanceAlertSegs"), s.balanceAlert || 0, t("Amount"), "", (n) => Number.isFinite(n) && n > 0,
     (n) => savePrefs({ ...keep, balanceAlert: n }))
     .append(segs([["off", t("Off")], ["on", t("On")]], s.balanceAlert ? "on" : "off", (v) => savePrefs({ ...keep, balanceAlert: v === "on" ? s.balanceAlert || 5 : 0 })));
+  // the reset reminder (#720): Off, or how many hours before
+  const hours = [12, 24, 48];
+  const r = s.resetReminder || 0;
+  const opts = [["0", t("Off")], ...hours.map((h) => [String(h), t("{n} h before", { n: h })])];
+  if (r && !hours.includes(r)) opts.push([String(r), t("{n} h before", { n: r })]);
+  $("#resetReminderSegs").replaceChildren(segs(opts, String(r), (v) => savePrefs({ ...keep, resetReminder: Number(v) })));
 }
 
 // renderCodexTitles: where Codex's requests for a thread's title go (#705)
@@ -16362,7 +16499,7 @@ function renderSearcher(s, keep, box) {
   const icOf = (id) => choices.find((x) => x.id === id.split("/")[0])?.icon;
   const r = el("div", "row pref searcher-row");
   const who = el("div", "who");
-  const sub = el("div", "sub", t("When a model can't search the web, this provider searches for it, and gives it what it found"));
+  const sub = el("div", "sub", t("When a model can't search the web directly, the selected provider searches for it and returns the results. Searches may use the service's quota or incur charges; if a search fails, magpie tries other available sources."));
   if (v && s.searchUnused) {
     const why = { gone: t("it is no longer in magpie"), off: t("it is turned off"), cant: t("it can't search the web by itself"), nomodel: t("it lists no model") }[s.searchUnused] || s.searchUnused;
     sub.append(" · ", el("span", "warn searcher-unused", t("{who} isn't used: {why}, so magpie picks one", { who: named(v), why })));
@@ -16374,11 +16511,10 @@ function renderSearcher(s, keep, box) {
   if (googles.length) sub.append(" · ", el("span", "searcher-own",
     t("{names} search for their own models first, with Gemini's Google Search", { names: googles.join(", ") })));
   if (s.searchRelays?.length) sub.append(" · ", el("span", "searcher-relays",
-    t("Relays said to search ({names}) are never picked automatically: they would spend the relay's quota on other models' searches; if one refuses magpie's own request, magpie falls back", { names: s.searchRelays.join(", ") })));
-  // only a provider that searches by itself can search for another
-  // model; the rest are left out of the picker, and the row says so (#825)
+    t("These relays must be selected manually and are not used for automatic selection or fallback: {names}.", { names: s.searchRelays.join(", ") })));
+  // Being left out can also mean no usable model, not just no search support.
   if (s.searchLeftOut?.length) sub.append(" · ", el("span", "searcher-left-out",
-    t("Only providers that search the web by themselves are offered (Claude, Codex and Grok accounts; the APIs of Anthropic, OpenAI, DeepSeek, xAI, Zhipu and OpenRouter; Gemini on a Google sign-in; a Kimi Code plan). {names} can't, so for their models the search APIs below search", { names: s.searchLeftOut.length > 6
+    t("These providers can't be selected to search for other models with the current configuration: {names}. Their models can still get search results through other available search providers or configured search APIs.", { names: s.searchLeftOut.length > 6
       ? t("{names} and {n} more", { names: s.searchLeftOut.slice(0, 5).join(", "), n: s.searchLeftOut.length - 5 })
       : s.searchLeftOut.join(", ") })));
   who.append(el("div", "name", t("Searches for other models")), sub);
@@ -16870,7 +17006,7 @@ function prefsKeep(s) {
     memberModel: !!s.memberModel,
     noUpdatePill: !!s.noUpdatePill, noAutoUpdate: !!s.noAutoUpdate, updateEvery: s.updateEvery || 360,
     trayUsage: s.trayUsage || "", trayUsageEvery: s.trayUsageEvery || 3, trayNoLogos: !!s.trayNoLogos, trayNoBird: !!s.trayNoBird, vision: s.vision || "", imageGen: s.imageGen || "", searcher: s.searcher || "", currency: s.currency || "usd",
-    chineseUnits: !!s.chineseUnits, usageAlert: s.usageAlert || 0, balanceAlert: s.balanceAlert || 0 };
+    chineseUnits: !!s.chineseUnits, usageAlert: s.usageAlert || 0, balanceAlert: s.balanceAlert || 0, resetReminder: s.resetReminder || 0 };
 }
 
 // savePrefs sends what the page was drawn with (prefsBase) and the choice
