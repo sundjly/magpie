@@ -65,6 +65,20 @@ isolated API fixtures. Run with
 `node --test internal/gui/tests/purpose-filter.test.cjs` and the Playwright
 environment described below.
 
+`routing-purpose-state.test.cjs` covers #771's follow-ups: selected-purpose
+counts (including broken-off 200s and failures without an HTTP status, while
+excluding informational notes on successful 200s), the failed-request link,
+the latest matching story through live updates and returning to the page,
+preserving a picked request, an empty historical selection, and both ways
+to clear the compact purpose control. Unfiltered
+live counters retain gateway lifetime totals; scoped counters describe the
+completed requests kept in the selected list. Run with
+`node --test internal/gui/tests/routing-purpose-state.test.cjs`.
+
+Request-kind aliases and English labels live in `internal/usage/purpose.go`.
+After changing them, run `go generate ./internal/usage` to update
+`assets/purposes.js`; `TestPurposeAssetMatchesUsage` rejects a stale asset.
+
 `routing-sealed-task.test.cjs` checks that routing explains why an encrypted
 subagent task excludes non-ChatGPT providers and why the parent account goes
 first (#619). It also checks plain tasks, old traces, direct model requests,
@@ -1433,12 +1447,21 @@ models" row (01huadalang on Discord: pick which provider searches for a model
 that can't). With none named it shows Automatic and magpie's own pick; its
 picker offers Automatic first, each provider that can search by its small
 model, and each of its models, including a relay said to search; the row says
-those relays are never picked automatically and why. A model picked is saved as `searcher:
+those relays require manual selection and are not automatic fallback choices.
+Costs and fallback are explained for every search provider; providers left out
+are described as unavailable in the current configuration, with both other
+search providers and configured search APIs named as alternatives.
+A model picked is saved as `searcher:
 "<provider>/<model>"`, a provider by its small model as `searcher:
 "<provider>"`, and shown; another setting saved still sends the pick; one
 named that magpie can't use (turned off) is said in the row with magpie's
 pick shown instead; Automatic sends `searcher: ""`. No click moves the page.
-English and Chinese, Chromium and WebKit, with the API faked.
+The picker is checked in English and Chinese; the help also in Japanese and
+German, at 560 and 1000 pixels in light and dark themes, including a selected
+relay and empty relay/unavailable lists. Desktop text keeps its single-line
+ellipsis and full hover title; the existing narrow-web layout is unchanged.
+Chromium and WebKit, with the API faked.
+Set `ARTIFACT_DIR` to retain screenshots of the help.
 
 `provider-file-error.test.cjs` checks a providers.json that is there but
 can't be read (#415's review): the Providers page says over the list that the

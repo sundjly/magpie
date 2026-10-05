@@ -59,9 +59,7 @@
       s.classList.add("rt-errs");
       s.title = t("Show the latest request that failed");
       s.addEventListener("click", () => {
-        // the same "bad" the rows and the story tell: a reply that broke
-        // off, not a 200 with a note of magpie's own (Codex's titles off)
-        const r = listed().find((x) => x.done && outcome(x)[1] === "bad");
+        const r = listed().find(failedRoute);
         if (r) pick(r);
       });
     }
@@ -131,7 +129,7 @@
   purposeClear.onclick = () => {
     closeProtoMenu();
     purpose = "";
-    steady(renderHist);
+    steady(followListed);
     purposePick.focus({ preventScroll: true });
   };
   filters.append(dayBar, groupBar);
@@ -648,6 +646,7 @@
 
   const routes = new Map(); // id → the latest of each route
   let seq = 0, mine = true, loaded = false, daysAt = 0;
+  let traceTotals = { requests: 0, rerouted: 0, errors: 0 };
   let offMsg = ""; // why the trace can't be watched here, when it can't
   // the request the window was opened on (?req=), from the tray panel
   let wanted = document.body.classList.contains("window") && Number(params.get("req")) || 0;
@@ -800,8 +799,16 @@
   // group's models on one provider go over the same keys, and are two seats
   // — as is one model a group has twice, each at an effort of its own
   const seat = (x) => x.id + "\u0000" + (x.model || "") + (x.fixed ? ":" + x.fixed : "");
-  // tried is the seat a try went to
-  const tried = (r, tr) => r.order.find((x) => seat(x) === seat(tr)) || r.order.find((x) => x.id === tr.id);
+  // tried is the seat a try went to. A try's fixed is the effort it was
+  // sent at by force — the member's own, or one its agent asked in the
+  // model's id (a Claude Code tier at high) — where its seat's is the
+  // member's own only, so a member following the group's effort is found by
+  // its key and model (#865)
+  const tried = (r, tr) => r.order.find((x) => seat(x) === seat(tr))
+    || r.order.find((x) => x.id === tr.id && (x.model || "") === (tr.model || ""))
+    || r.order.find((x) => x.id === tr.id);
+  // tryseat is the seat of the row a try went to: its row is keyed by it
+  const tryseat = (r, tr) => seat(tried(r, tr) || tr);
   const setOf = (r) => r.order.map(seat).sort().join("\n");
   // whole fills in the lists a route's JSON can leave null: a route the
   // gateway weighed no seats for has "order": null, and the page reads
@@ -816,8 +823,9 @@
   // playing, and each agent's latest while it lingers, a few agents at most
   function staged() {
     if (pinned) return [pinned];
+    if (day && !rp) return [];
     const n = now(), last = new Map(), map = src();
-    const rs = [...map.values()].sort((a, b) => a.id - b.id);
+    const rs = [...map.values()].filter(matchesPurpose).sort((a, b) => a.id - b.id);
     for (const r of rs) last.set(r.agent, r);
     const out = rs.filter((r) => playing.has(r.id) || (last.get(r.agent) === r && (!r.done || at(r.time) + (r.ms || 0) > n - LINGER)));
     const c = cur && map.get(cur.id);
@@ -1025,7 +1033,7 @@
     hubText();
     const n = now(), rs = staged();
     const trying = new Set(), busy = new Set();
-    for (const r of rs) for (const tr of r.tries) if (!tr.done) { trying.add(seat(tr)); busy.add(r.agent); }
+    for (const r of rs) for (const tr of r.tries) if (!tr.done) { trying.add(tryseat(r, tr)); busy.add(r.agent); }
     const onWire = new Set();
     for (const f of flying.values()) { onWire.add(f.id); busy.add(f.agent); }
     for (const [id, row] of rows) {
@@ -1033,8 +1041,8 @@
       const r = src().get(row.rid) || pinned || cur, answered = new Set(), rests = new Map(), gave = new Map();
       for (const w of r.order) if (w.rest) rests.set(w.id, w.rest);
       for (const tr of r.tries) {
-        if (tr.done && tryOk(tr)) answered.add(seat(tr));
-        else if (tr.done && !tr.rest && !tr.again) gave.set(seat(tr), tr); // the error the agent got
+        if (tr.done && tryOk(tr)) answered.add(tryseat(r, tr));
+        else if (tr.done && !tr.rest && !tr.again) gave.set(tryseat(r, tr), tr); // the error the agent got
         if (tr.rest) rests.set(tr.id, tr.rest);
       }
       for (const tr of r.tries) if (tr.done && tryOk(tr)) rests.delete(tr.id); // it answered: whatever rest it began in is over
@@ -1113,7 +1121,7 @@
       }
       if (pinned && !rp) {
         const live = el("button", "text", t("Back to live"));
-        live.onclick = () => { if (day) lookAt(""); else { pinned = null; cur = newest(); sync(true); renderAll(); } };
+        live.onclick = () => { if (day) lookAt(""); else { pinned = null; followListed(); } };
         logHead.append(live);
       }
     }
@@ -1179,6 +1187,7 @@
       if (tr.done && tryOk(tr) && tr.swapped) items.push([swapWhy(tr), "swap", tr]);
       // another magpie's routing group named the member it routed to
       else if (tr.done && tryOk(tr) && tr.routed) items.push([routedWhy(tr), "aside", tr]);
+      if (tr.done && tryOk(tr) && tr.upstream) items.push([upstreamWhy(tr), "aside upstream-said", tr]);
     });
     if (r.done && !r.tries.length) items.push([t("Nothing was tried: {error}", { error: r.error || r.status }), "bad"]);
     const key = JSON.stringify([r.kind, items.map(([s, c, tr]) => [s, c, tr?.model, tr?.served]), r.order.map(logoOf)]);
@@ -1232,27 +1241,16 @@
   // for it, so a list of Luna calls under a Sol composer reads as it is.
   // A web search is magpie's own, run for a model that can't search on the
   // model it searches with (a DeepSeek chat showing GPT calls, #314)
-  const KIND = {
-    guardian: "Approval check", auto_review: "Approval check", guardian_review: "Approval check",
-    review: "Review", compact: "Compaction",
-    memory_consolidation: "Memory", memgen: "Memory", memory: "Memory",
-    thread_title: "Title", thread_title_reconsideration: "Title", title_generation: "Title", title: "Title",
-    collab_spawn: "Subagent", thread_spawn: "Subagent", agent_job: "Subagent",
-    luna_reserve: "Luna Reserve",
-    ambient_suggestions: "Suggestions", ambient_suggestion_safety: "Suggestions",
-    web_search: "Web search",
-    vision: "Image description",
-  };
-  const kindName = (k) => Object.hasOwn(KIND, k) ? t(KIND[k]) : k;
+  const knownKind = (k) => Object.hasOwn(REQUEST_KINDS, k) ? REQUEST_KINDS[k] : null;
+  const kindName = (k) => knownKind(k) ? t(knownKind(k).name) : k;
   window.kindName = kindName; // the Usage page's Requests say it too (#714)
-  // One filter for aliases with the same meaning; unknown names remain literal.
-  // Match usage.PurposeOf without changing the kind kept on any request.
-  const purposeOf = (kind) => !kind ? "unmarked" : "kind:" + (Object.keys(KIND).find((k) => KIND[k] === KIND[kind]) || kind);
+  // The catalog is generated from usage.PurposeKinds; unknown names stay literal.
+  const purposeOf = (kind) => !kind ? "unmarked" : knownKind(kind)?.purpose || "kind:" + kind;
   const purposeOptions = (ids, selected) => [...new Set([...ids, ...(selected ? [selected] : [])])].sort().map((id) => {
     const kind = id.slice(5);
     return { v: id, name: id === "unmarked" ? t("Unmarked") : kindName(kind), note: id === "unmarked"
       ? t("No purpose was recorded; this may be a conversation turn or an older record.")
-      : Object.hasOwn(KIND, kind) ? "" : t("Unrecognized request purpose") };
+      : knownKind(kind) ? "" : t("Unrecognized request purpose") };
   });
   window.purposeOf = purposeOf;
   window.purposeOptions = purposeOptions;
@@ -1269,7 +1267,7 @@
     k.title = swapWhy(tr);
     return k;
   }
-  const swapWhy = (tr) => t("The vendor was asked for {sent}, and its reply says {served} answered it: another model, not just {sent} under a dated name.", { sent: tr.model, served: tr.served });
+  const swapWhy = (tr) => t("The vendor was asked for {sent}, but its reply says {served} answered: likely another model. The same model under a dated name or spelled otherwise isn't marked.", { sent: tr.model, served: tr.served });
   window.swapWhy = swapWhy; // the Usage page's Requests say it too
   // a try that asked a remote magpie for one of its routing groups: the
   // reply names the member the group routed to, which is the group
@@ -1281,12 +1279,20 @@
   }
   const routedWhy = (tr) => t("{sent} is a routing group of the remote magpie, and it routed the request to {served}: the group picking one of its models, not the vendor swapping the model.", { sent: tr.model, served: tr.served });
   window.routedWhy = routedWhy;
+  // the provider an aggregator (OpenRouter …) said answered behind it:
+  // DeepInfra, Novita… (leslie_luo on Discord)
+  function upstreamTag(tr) {
+    const k = el("span", "upstream", t("Upstream: {upstream}", { upstream: tr.upstream }));
+    k.title = upstreamWhy(tr);
+    return k;
+  }
+  const upstreamWhy = (tr) => t("The aggregator passed the request on to {upstream}, as its reply says: the provider that actually answered it.", { upstream: tr.upstream });
   function kindWhy(r) {
     const agent = agentName(r.agent);
-    if (KIND[r.kind] === "Subagent") return r.group
+    if (purposeOf(r.kind) === "kind:collab_spawn") return r.group
       ? t("{agent} requested a subagent; magpie selects its model within this routing group.", { agent })
       : t("{agent} requested a subagent on {model}.", { agent, model: r.model });
-    if (KIND[r.kind] === "Suggestions") return t("{agent} drafted the suggested prompts on its home page by itself, in the background, searching the project's files and connected apps, and checked them for safety. Not a turn of the conversation; Codex's Settings › Configuration › Suggested prompts turns it off.", { agent });
+    if (purposeOf(r.kind) === "kind:ambient_suggestions") return t("{agent} drafted the suggested prompts on its home page by itself, in the background, searching the project's files and connected apps, and checked them for safety. Not a turn of the conversation; Codex's Settings › Configuration › Suggested prompts turns it off.", { agent });
     if (r.kind === "luna_reserve") return t("{agent} sent this turn on Luna Reserve, which it turns to once the plan's own allowance is used up; it picks the model itself.", { agent });
     if (r.kind === "web_search") return r.for
       ? t("magpie ran this web search for {agent}'s {model}, which can't search the web by itself: {searcher} searched, and {model} goes on answering once it has what was found. Not a turn of the conversation.", { agent: agentName(r.for.agent), model: r.for.model, searcher: r.model })
@@ -1328,7 +1334,37 @@
   // listed: the requests the list shows, newest first — the gateway's last
   // few, or a day the history keeps
   const allListed = () => (day ? past : [...routes.values()]).slice().sort((a, b) => b.id - a.id);
-  const listed = () => allListed().filter((r) => !purpose || purposeOf(r.kind) === purpose);
+  const matchesPurpose = (r) => !purpose || purposeOf(r.kind) === purpose;
+  const listed = () => allListed().filter(matchesPurpose);
+  // Match the rows and story: a broken-off 200 fails, an informational note
+  // on an answered request (such as Codex titles being off) does not.
+  const failedRoute = (r) => r.done && outcome(r)[1] === "bad";
+  function renderStats(rs) {
+    const scoped = !!(day || purpose), done = rs.filter((r) => r.done);
+    const counts = scoped ? {
+      requests: done.length,
+      rerouted: done.reduce((n, r) => n + r.tries.filter((tr, i) => tr.rest && i < r.tries.length - 1).length, 0),
+      errors: done.filter(failedRoute).length,
+    } : traceTotals;
+    [counts.requests, counts.rerouted, counts.errors].forEach((n, i) => setText(statB[i], String(n)));
+    stats.title = t(scoped ? "Counts for the requests in this list" : "Counts since the gateway started");
+    const failed = rs.some(failedRoute), btn = statB[2].parentElement;
+    btn.setAttribute("aria-disabled", String(!failed));
+    btn.title = t(failed ? "Show the latest request that failed" : "No failed request in this list");
+  }
+  // Follow the newest matching request unless the reader picked one still in
+  // this list. Stop old flights before the scope changes, including replays.
+  function followListed() {
+    if (rp) endReplay(true);
+    stopPlays();
+    if (pinned && !listed().some((r) => r.id === pinned.id)) pinned = null;
+    cur = pinned || newest();
+    if (day) pinned = cur;
+    capQ = [];
+    if (cur) { sync(true); say(affWhy(cur, true) || ruleWhy(cur, true) || firstWhy(cur)); }
+    else empty();
+    renderAll();
+  }
   const dayName = (d) => {
     const x = new Date(d + "T12:00:00"), n = new Date(), y = new Date(n.getTime() - 864e5);
     return x.toDateString() === n.toDateString() ? t("today") : x.toDateString() === y.toDateString() ? t("yesterday")
@@ -1349,10 +1385,7 @@
     past = [];
     if (d) await loadDays(d);
     pinned = null;
-    const r = d ? listed()[0] : newest();
-    if (r && d) pick(r);
-    else if (r) { stopPlays(); cur = r; sync(true); say(affWhy(r, true) || ruleWhy(r, true) || firstWhy(r)); }
-    renderAll();
+    followListed();
   }
   function renderDays() {
     const b = (d, label, n) => {
@@ -1460,12 +1493,14 @@
         return s;
       }, { cost: 0, tokens: 0, priced: 0, unpriced: 0, running: 0 });
       setText(x.arrow, g.key ? open ? "▾" : "▸" : "");
-      // A memory worker has its own ID and can process earlier chats. Label
-      // memory-only groups without renaming a chat that also made memory calls.
-      const memory = g.r.agent === "codex" && g.rows.every((r) => ["memory_consolidation", "memgen", "memory"].includes(r.kind));
-      const name = g.rows.find((r) => r.sessionTitle)?.sessionTitle || (memory ? t("Background memory task") : "");
+      // Background workers have their own IDs. Label groups made entirely
+      // for one purpose without renaming a chat that also made helper calls.
+      const memory = g.r.agent === "codex" && g.rows.every((r) => purposeOf(r.kind) === "kind:memory_consolidation");
+      const suggestions = g.r.agent === "codex" && g.rows.every((r) => purposeOf(r.kind) === "kind:ambient_suggestions");
+      const name = g.rows.find((r) => r.sessionTitle)?.sessionTitle || (memory ? t("Background memory task") : suggestions ? t("Background prompt suggestions") : "");
       setText(x.name, g.key ? agentName(g.r.agent) + " · " + (name || groupSession(g.r)) : t("No session ID"));
       const purpose = memory ? t("Codex is organizing memories from earlier chats in the background. This can continue after a chat finishes.") + "\n"
+        : suggestions ? kindWhy(g.r) + "\n"
         : g.rows.some((r) => r.parentMatched) ? t("Title requests were automatically matched using the prompt and the applied chat title.") + "\n" : "";
       x.name.title = g.key ? (name ? name + "\n" : "") + purpose + t("Session id") + ": " + groupSession(g.r) : t("These requests did not provide a session ID; they are not treated as one conversation.");
       const bits = [t(g.rows.length === 1 ? "{n} request" : "{n} requests", { n: g.rows.length }), t("{n} tokens", { n: tokens(total.tokens) })];
@@ -1482,6 +1517,7 @@
   }
   function renderHist() {
     const rs = listed();
+    renderStats(rs);
     const all = allListed();
     hist.hidden = !all.length && !day && !days.length && !purpose;
     const opts = purposeOptions(all.map((r) => purposeOf(r.kind)), purpose);
@@ -1494,7 +1530,7 @@
     const label = purpose ? t("Purpose: {name}", { name: selected?.name || purpose }) : t("Purpose filter");
     setText(purposeLabel, label);
     purposePick.setAttribute("aria-label", label);
-    purposePick.title = t("Filter the request list by purpose") + (purpose ? "\n" + label : "");
+    purposePick.title = t("Filter routing by purpose") + (purpose ? "\n" + label : "");
     purposePick.onclick = (e) => {
       e.stopPropagation();
       if (purposePick.classList.contains("open")) return closeProtoMenu();
@@ -1503,7 +1539,7 @@
         ...o, literalName: true, title: o.note || o.v, note: "",
       })), purpose, (v) => {
         purpose = v;
-        steady(renderHist);
+        steady(followListed);
         purposePick.focus({ preventScroll: true });
       }, "Purpose", "rt-purpose-menu", "right");
     };
@@ -1552,7 +1588,7 @@
       // all the row says, and its titles
       const title = reqTitle(r, how, tr);
       const sig = JSON.stringify([lang, said, how, title, r.time, r.agent, agentName(r.agent), ag?.icon, r.model, r.provider, r.kind, r.effort,
-        tr?.effort, tr?.picked, tr?.fixed, tr?.fast, tr?.swapped && tr.done && tryOk(tr) ? [tr.model, tr.served] : 0, tr?.routed && tr.done && tryOk(tr) ? tr.served : 0, meta, routeCost(r)]);
+        tr?.effort, tr?.picked, tr?.fixed, tr?.fast, tr?.swapped && tr.done && tryOk(tr) ? [tr.model, tr.served] : 0, tr?.routed && tr.done && tryOk(tr) ? tr.served : 0, tr?.done && tryOk(tr) ? tr.upstream : 0, meta, routeCost(r)]);
       ids.add(r.id);
       let x = reqRows.get(r.id);
       if (!x || x.sig !== sig) {
@@ -1613,6 +1649,7 @@
     }
     if (tr?.swapped && tr.done && tryOk(tr)) to.append(swapTag(tr, true)); // beside the model asked for
     else if (tr?.routed && tr.done && tryOk(tr)) to.append(routedTag(tr));
+    if (tr?.upstream && tr.done && tryOk(tr)) to.append(upstreamTag(tr));
     const info = el("span", "meta");
     info.append(el("span", "", meta.join(" · ")), el("span", "cost", routeCost(r)));
     info.lastChild.title = r.priced ? costNote() : t("No known price or token counts for this request");
@@ -1746,7 +1783,7 @@
     if (!shown()) return;
     render(); renderLog(); renderHist();
   }
-  const newest = () => [...routes.values()].reduce((a, b) => (!a || b.id > a.id ? b : a), null);
+  const newest = () => (day ? past : [...routes.values()]).filter(matchesPurpose).reduce((a, b) => (!a || b.id > a.id ? b : a), null);
 
   // ---------- playing a request ----------
 
@@ -1826,9 +1863,9 @@
           await until(() => g !== gen || rt().tries.length > i || rt().done);
           continue;
         }
-        const row = rows.get(seat(r.tries[i]));
+        const row = rows.get(tryseat(r, r.tries[i]));
         if (!row) { i++; continue; }
-        flying.set(dot, { id: seat(r.tries[i]), agent: r.agent });
+        flying.set(dot, { id: tryseat(r, r.tries[i]), agent: r.agent });
         if (!carrier) carrier = bird("req");
         if (from) tick(hub);
         const ws = wiresTo(row);
@@ -2050,6 +2087,7 @@
     pinned = b || null;
     cur = b || newest();
     if (cur) { sync(true); renderAll(); }
+    else empty();
   }
   rSpeed.onclick = () => { if (rp) { rp.speed = rp.speed >= 8 ? 1 : rp.speed * 2; replayBar(rp, 1); } };
   rStop.onclick = () => endReplay(true);
@@ -2098,9 +2136,10 @@
   function resume() {
     stopPlays();
     if (!loaded) return;
-    if (!pinned && !rp) cur = newest() || cur;
+    if (!pinned && !rp) cur = newest();
     if (cur) sync(true);
-    const live = pinned ? [] : [...src().values()].filter((r) => !r.done).sort((a, b) => a.id - b.id).slice(-LIVE);
+    else empty();
+    const live = pinned || day ? [] : [...src().values()].filter((r) => !r.done && matchesPurpose(r)).sort((a, b) => a.id - b.id).slice(-LIVE);
     for (const r of live) play(r.id);
     renderAll();
   }
@@ -2165,7 +2204,7 @@
 
   function empty() {
     offline("");
-    what.replaceChildren(el("b", "", t("Waiting for a request")));
+    what.replaceChildren(el("b", "", t(purpose || day ? "No requests match these filters." : "Waiting for a request")));
     mode.textContent = t("Send one from any agent routed through magpie and it plays here as it happens: who routing put first and why, each try, and what each answered.");
     for (const a of agents.values()) a.wire.remove();
     agents.clear();
@@ -2180,7 +2219,7 @@
     subs.clear();
     chip.hidden = true;
     hubText();
-    list.replaceChildren(el("li", "idle", t("No request yet")));
+    list.replaceChildren(el("li", "idle", t(purpose || day ? "No requests match these filters." : "No request yet")));
     say(t("Every request an agent sends to magpie shows up here, routed for real."));
     log.hidden = true;
     renderHist(); // none live, but the days the history keeps are still there to look at
@@ -2196,9 +2235,7 @@
         skew = at(d.now) - Date.now();
         mine = d.mine;
         hubText();
-        statB[0].textContent = d.totals.requests;
-        statB[1].textContent = d.totals.rerouted;
-        statB[2].textContent = d.totals.errors;
+        traceTotals = d.totals || traceTotals;
         if (!mine) {
           const gw = providers?.gateway;
           offMsg = !gw?.running ? "The gateway isn't running, so nothing is routed."
@@ -2238,9 +2275,14 @@
         } else {
           if (cur && routes.has(cur.id) && !rp) cur = routes.get(cur.id);
           if (pinned && routes.has(pinned.id)) pinned = routes.get(pinned.id);
+          if (!pinned && !rp) {
+            cur = newest();
+            if (cur) sync();
+            else empty();
+          }
           // played only in sight: coming back into it plays those still
           // under way, not all that came meanwhile (#302)
-          const go = !pinned && !rp && shown() ? fresh : [];
+          const go = !pinned && !rp && !day && shown() ? fresh.filter((id) => matchesPurpose(routes.get(id))) : [];
           for (const id of go) playing.set(id, gen);
           if (go.length) sync(); // the stage once for them all (#308)
           for (const id of go) play(id, true);
@@ -2767,11 +2809,22 @@
       idHint.textContent = t("Agents pick it as {id}", { id: "group/" + idOf() }) +
         (g && idOf() !== g.id ? " · " + t("an agent set to {id} needs setting again", { id: "group/" + g.id }) : "");
     };
-    name.oninput = () => { d.name = name.value; showId(); };
+    // what the agents' lists will call it, and the setting that says
+    // whether "· routing group" follows the name (#868: an agent's narrow
+    // menu cut it to "· rou…"); a group saved here is one the user made
+    const sfxSaid = el("span", "hint");
+    const sayLabel = (mode) => {
+      sfxSaid.textContent = t("Agents’ lists show “{label}”", { label: (d.name.trim() || t("New group")) + ((mode || suffixMode()) === "on" ? " · routing group" : "") });
+    };
+    name.oninput = () => { d.name = name.value; showId(); sayLabel(); };
     const nw = el("div");
     nw.append(name);
     if (!g) nw.append(idHint);
     ed.append(el("label", "", t("Name")), nw);
+    const sw = el("div", "gsuffix");
+    sw.append(suffixSegs(sayLabel), sfxSaid);
+    sayLabel();
+    ed.append(el("label", "", t("In agents’ lists")), sw);
     if (idIn) {
       idIn.oninput = () => { d.id = idIn.value; showId(); };
       idIn.onblur = () => { d.id = idIn.value = idOf(); showId(); };
@@ -3631,6 +3684,7 @@
       if (model) to.append(el("span", "pr-m", model));
       if (tr?.swapped && tr.done) to.append(swapTag(tr, true));
       else if (tr?.routed && tr.done) to.append(routedTag(tr));
+      if (tr?.upstream && tr.done) to.append(upstreamTag(tr));
     }
     const meta = [];
     if (r.tries.length > 1) meta.push(t("{n} tries", { n: r.tries.length }));

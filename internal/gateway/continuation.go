@@ -326,6 +326,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					attemptSee, held = t.event, t.release
 				}
 				serr = readSSEAlive(rd, func(_, data string) error {
+					u.add(Usage{Upstream: upstreamOf([]byte(data))})
 					if err := dec(data, attemptSee); err != nil {
 						return err
 					}
