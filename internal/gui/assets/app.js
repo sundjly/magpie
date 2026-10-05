@@ -5389,12 +5389,17 @@ function modelInfo(m) {
     box.append(el("span", "badge mi-effort", effortSpan(levels)));
     lines.push(t("Reasoning: {levels}", { levels: levels.map((l) => t(l)).join(", ") }));
   } else lines.push(t("Reasoning levels: none known"));
+  // nothing read of its images either way: magpie counts it text-only for a
+  // describer (gateway.blindTo), which is not the same as its list saying so,
+  // so it is not called text-only here either. Only a model that carries the
+  // flag is unknown; one magpie has an answer for carries no such key at all.
+  const imgUnknown = m.imagesUnknown === true;
   if (m.images) {
     const c = el("span", "badge mi-img");
     c.append(svg(IMAGE_GLYPH, 11, 1.4));
     box.append(c);
   }
-  lines.push(t(m.images ? (m.group ? "Accepts images (every model in it does)" : "Accepts images") : "Text only"));
+  lines.push(t(imgUnknown ? "Images: not known" : m.images ? (m.group ? "Accepts images (one of its models does)" : "Accepts images") : "Text only"));
   if (m.context) {
     box.append(el("span", "badge mi-ctx", ctxShort(m.context)));
     lines.push(t(m.group ? "Context: {n} tokens (the largest of its models')" : "Context: {n} tokens", { n: m.context.toLocaleString() }));
@@ -8695,7 +8700,8 @@ function renderModels(p) {
   if (noTest) { testAll.disabled = true; testAll.title = noTest; }
   foot.append(testAll);
   foot.append(rename);
-  if (p.fetched) foot.append(el("span", "hint", t("vendor list · {when}", { when: ago(p.fetched) })));
+  // a plugin's list that failed is its defaults, not the vendor's
+  if (p.fetched && !p.listError) foot.append(el("span", "hint", t("vendor list · {when}", { when: ago(p.fetched) })));
   // a signed-in account's list, until the vendor gives one, is magpie's own
   else if (p.models.length) foot.append(el("span", "hint", t(p.account ? "magpie's list · Refresh asks the vendor" : decideOnly(p) ? "Jev's names · Refresh asks the vendor" : "from models.dev · Refresh asks the vendor")));
   if (p.fetched && !p.account) {
@@ -8710,6 +8716,9 @@ function renderModels(p) {
     foot.append(forget);
   }
   box.append(foot);
+  // a plugin whose list failed shows its defaults (Cursor's Auto alone):
+  // why, rather than a short list that looks like the account's
+  if (p.listError) box.append(el("div", "hint model-hint warn list-error", t("{p} couldn't list its models: {error}", { p: p.name, error: p.listError })));
   const why = el("div", "hint");
   const [tk, cb] = tick(t("Only through routing groups"), !!draft.unlisted);
   cb.onchange = () => { draft.unlisted = cb.checked; draw(); };
