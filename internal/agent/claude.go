@@ -422,10 +422,18 @@ func claudeIn(at place) *Agent {
 			forget(compactKey)
 			return nil
 		}
-		if settings.Load().FullContext || claudeModel(mainModel()) {
+		// a threshold the user set on the main model or its provider comes
+		// first (#876), a Claude model's included; then the one for every
+		// model (settings.Compact), none under Full window
+		main := mainModel()
+		n := provider.CompactSet(main)
+		if n == 0 && !claudeModel(main) {
+			n = settings.Load().Compact()
+		}
+		if n == 0 {
 			return dropCompact()
 		}
-		w := strconv.Itoa(settings.WorkingWindow)
+		w := strconv.Itoa(n)
 		stash(map[string]string{compactKey: w})
 		if env(claudeCompactEnv) == w {
 			return nil
@@ -572,7 +580,7 @@ func claudeIn(at place) *Agent {
 				return err
 			}
 			keys := []string{"model"}
-			if env("ANTHROPIC_AUTH_TOKEN") == gateway.Token {
+			if ourKey(env("ANTHROPIC_AUTH_TOKEN")) {
 				// magpie's, left at a gateway address since changed
 				for _, k := range claudeEnv {
 					keys = append(keys, "env."+k)
@@ -651,7 +659,7 @@ func claudeIn(at place) *Agent {
 		}
 		kvs := []edit.KV{
 			{Path: "env.ANTHROPIC_BASE_URL", Value: at.gw()},
-			{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: gateway.Token},
+			{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: at.gwKey()},
 			{Path: "env.ANTHROPIC_SMALL_FAST_MODEL", Value: tiers["haiku"]},
 			{Path: "model", Value: main},
 		}
@@ -1042,7 +1050,7 @@ func claudeIn(at place) *Agent {
 				return "Claude Code's managed settings (" + at.native(managed) + ") set ANTHROPIC_BASE_URL to " + u + ", which wins over magpie's"
 			}
 			return wiringOff("Claude Code", path, func(k string) (string, bool) { return edit.GetJSON(path, "env."+k) },
-				"ANTHROPIC_BASE_URL", at.gw(), "ANTHROPIC_AUTH_TOKEN", gateway.Token)
+				"ANTHROPIC_BASE_URL", at.gw(), "ANTHROPIC_AUTH_TOKEN", at.gwKey())
 		},
 		// every prompt typed into Claude Code goes into history.jsonl
 		LastUsed: func() time.Time {
