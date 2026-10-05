@@ -286,6 +286,8 @@ type settingsJSON struct {
 	Version string `json:"version"`
 	Dir     string `json:"dir"`     // where magpie keeps its files, as shown
 	Gateway string `json:"gateway"` // the local endpoint
+	// MAGPIE_ADDR, when it sets the gateway's address over Settings' port
+	AddrEnv string `json:"addrEnv,omitempty"`
 	// Dir is the data folder beside a portable magpie (#508)
 	Portable bool `json:"portable,omitempty"`
 	// Mac apps that explicitly handle .command files, for resumed sessions.
@@ -426,6 +428,7 @@ func searchState(s *settingsJSON) {
 
 func settingsState() settingsJSON {
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
+	s.AddrEnv = os.Getenv("MAGPIE_ADDR")
 	s.LANKey = "" // the retained credential belongs on disk, not in UI state
 	// the GitHub token, masked, and where the library's requests take one
 	// from: Settings, or the environment variable named
@@ -837,13 +840,14 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// its own. The per-model maps are carried whole rather than named one
 		// by one, so a map added later is not silently dropped here.
 		//
-		// HiddenModels is the other way round — keyed by agent, not by
-		// "<provider>/<model>" — so it is not one of them, and belongs to the
-		// Agents page.
-		in.Visible, in.HiddenModels = cur.Visible, cur.HiddenModels
+		// HiddenModels and OrderedModels are the other way round — keyed by
+		// agent, not by "<provider>/<model>" — so they are not among them,
+		// and belong to the Agents page.
+		in.Visible, in.HiddenModels, in.OrderedModels = cur.Visible, cur.HiddenModels, cur.OrderedModels
 		settings.CarryPerModel(&in, &cur)
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.LANKeyID = cur.LANKeyID
+		in.Port = cur.Port // set on its own (port below), which moves the gateway
 		in.GitHubToken = cur.GitHubToken                 // set on its own (github-token below), never sent to the page
 		in.RequestArchive = cur.RequestArchive           // the Gateway page's, set on its own
 		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB // in settings.json only
@@ -1180,6 +1184,21 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			}
 		}
 		writeJSON(rw, settingsState())
+	})
+	// the gateway's port (Magic_zero on Discord), set on its own: it moves
+	// the gateway and every agent connected to it
+	mux.HandleFunc("POST /api/settings/port", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Port int }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		res, err := setPort(in.Port)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, map[string]any{"settings": settingsState(), "port": res})
 	})
 	// the user's own masking rules, all of them each time: set on their own,
 	// so a pattern that doesn't compile is said and the rest are kept (#195)
