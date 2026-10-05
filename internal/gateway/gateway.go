@@ -2855,7 +2855,14 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 			// about
 			body = rewriteModel(body, wire)
 		}
-		res, err := s.forward(ctx, p, to, pathOf(to), p.Prepare(body), in)
+		path := pathOf(to)
+		if req.Resume && to == provider.Chat && chatPrefill(p.Host(), model) == "prefix" {
+			// DeepSeek serves its prefix mode under /beta, beside the /v1
+			// the base carries
+			p.Chat = strings.TrimSuffix(p.Chat, "/v1")
+			path = "/beta" + path
+		}
+		res, err := s.forward(ctx, p, to, path, p.Prepare(body), in)
 		if err != nil || res.StatusCode < 400 {
 			if dropped && err == nil {
 				// it was the key: not sent there again

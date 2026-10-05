@@ -1,12 +1,17 @@
 package gateway
 
 // A translated reply whose stream the upstream cut off mid-way — the
-// connection lost, an error out of nowhere (vk-relay's relays drop Kimi
-// and DeepSeek streams mid-reply every so often) — is asked of the same
+// connection lost, an error out of nowhere — is asked of the same
 // conversation again, with what the client already has of the reply sent
 // back for the model to go on from: the client reads one reply that
 // finished, not one cut short, and the turn doesn't fail the way it used
-// to. Only a reply no tool call of has begun goes on: a call's arguments
+// to. Only where the upstream goes on from a reply's part sent back (an
+// Anthropic Messages upstream natively, a Chat one in its vendor's own
+// prefill mode — prefillHow): one that answers the message again from
+// the start instead, as most Chat APIs do, would splice a reworded
+// re-answer onto the part the client has, with no error to tell anything
+// went wrong, so there the reply ends with the error, as it used to.
+// Only a reply no tool call of has begun goes on: a call's arguments
 // can't be prefilled, so one begun ends the reply as it used to. A
 // refusal isn't asked again.
 
@@ -14,10 +19,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -46,34 +53,95 @@ func inGroupTry(ctx context.Context) bool {
 	return v
 }
 
+// prefillHow is how the upstream a reply is translated to goes on from
+// the part of it the client has, sent back as the conversation's last
+// assistant message: an Anthropic Messages upstream natively, a Chat one
+// only in its vendor's own mode for it (chatPrefill). "" where the
+// upstream answers the message again from the start instead — most Chat
+// APIs — and a cut reply ends with the error there, as it used to: the
+// client can't tell a reworded re-answer from the reply's own rest.
+func prefillHow(p provider.Provider, to provider.Protocol, model string) string {
+	switch to {
+	case provider.Anthropic:
+		return "anthropic"
+	case provider.Chat:
+		return chatPrefill(p.Host(), model)
+	}
+	return ""
+}
+
+// chatPrefill is the prefill mode of a Chat upstream at host serving
+// model: DeepSeek's prefix (its own API, where the mode is served under
+// /beta, with "prefix": true on the message) or Kimi's partial
+// ("partial": true). Partial is a field of the message itself and prefix
+// a path the relay forwards, so a relay on this machine or the LAN
+// serving one of their models is taken to front the vendor, as
+// geminiCompat takes one to front Gemini. "" elsewhere.
+func chatPrefill(host, model string) string {
+	h := strings.ToLower(host)
+	switch {
+	case h == "api.deepseek.com" || strings.HasSuffix(h, ".deepseek.com"):
+		return "prefix"
+	case strings.Contains(h, "moonshot") || strings.Contains(h, "kimi"):
+		return "partial"
+	}
+	if s, _, err := net.SplitHostPort(h); err == nil {
+		h = s
+	}
+	h = strings.Trim(h, "[]")
+	if h != "localhost" && !strings.HasSuffix(h, ".local") {
+		if ip := net.ParseIP(h); ip == nil || !ip.IsLoopback() && !ip.IsPrivate() {
+			return ""
+		}
+	}
+	switch m := strings.ToLower(model); {
+	case strings.Contains(m, "deepseek"):
+		return "prefix"
+	case strings.Contains(m, "kimi"):
+		return "partial"
+	}
+	return ""
+}
+
 // continuation is what of a translated reply the client already has, so a
 // cut reply's next try asks the model to go on from there and only what
 // is new goes to the client.
 type continuation struct {
 	think, text strings.Builder // thinking and text the client has
 	tools       bool            // a tool call was begun: the reply can't go on
+	mode        string          // how the upstream goes on from a prefill (prefillHow), "" where it can't
 	resume      bool            // this try is a continuation
 	echo        string          // the text it was prefilled with: a full echo of it is dropped
 	seen        string          // what of a possible echo has come
 }
 
-// possible says whether the reply can go on: the client has something of
-// it, and no tool call of it was begun.
+// possible says whether the reply can go on: the upstream goes on from a
+// prefill at all, the client has something of it, and no tool call of it
+// was begun.
 func (c *continuation) possible() bool {
-	return !c.tools && (c.think.Len() > 0 || c.text.Len() > 0)
+	return c.mode != "" && !c.tools && (c.think.Len() > 0 || c.text.Len() > 0)
 }
 
 // again says whether the cut reply goes on with another try, and readies
 // it: not the vendor's refusal (code), nor the request itself turned away
-// (a 400 the same ask gets again), the tries not up, the client still
-// there.
+// (a 400 the same ask gets again, a 404 — the mode's endpoint isn't
+// there), the tries not up, the client still there.
 func (c *continuation) again(status int, code string, again int, ctx context.Context) bool {
 	if code != "" || status == http.StatusBadRequest || status == http.StatusUnprocessableEntity ||
-		again >= streamRetries || ctx.Err() != nil || !c.possible() {
+		status == http.StatusNotFound || again >= streamRetries || ctx.Err() != nil || !c.possible() {
 		return false
 	}
-	c.resume, c.echo, c.seen = true, c.text.String(), ""
+	c.resume, c.echo, c.seen = true, c.prefillText(), ""
 	return true
+}
+
+// prefillText is the reply's text as the prefill carries it: trailing
+// whitespace trimmed, which an Anthropic upstream turns the whole request
+// away for (400 "final assistant content cannot end with trailing
+// whitespace") — the client has it already, so the reply loses nothing,
+// and the model goes on from its last word.
+func (c *continuation) prefillText() string {
+	return strings.TrimRightFunc(c.text.String(), unicode.IsSpace)
 }
 
 // request is orig with what the client has of the reply sent back as the
@@ -84,7 +152,7 @@ func (c *continuation) request(orig *Request) *Request {
 	if s := c.think.String(); s != "" {
 		parts = append(parts, Part{Kind: Thinking, Text: s})
 	}
-	if s := c.text.String(); s != "" {
+	if s := c.prefillText(); s != "" {
 		parts = append(parts, Part{Kind: Text, Text: s})
 	}
 	r.Messages = append(slices.Clone(orig.Messages), Message{Role: "assistant", Parts: parts})
@@ -152,13 +220,14 @@ func (c *continuation) unecho(s string) string {
 func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, request *Request, model string, zen *zenReply, u *Usage) (int, string) {
 	sw := newSSEWriter(w)
 	enc := encoder(from, sw, request, u)
-	cont := &continuation{}
+	cont := &continuation{mode: prefillHow(p, to, model)}
 	var failed, failedCode string
 	var failedStatus int
 	var cut, errSent bool
 	var empty bool // a reply in this protocol that says nothing fails (#667)
 	said, stop := false, ""
-	var kept []Event // the reply's end, while nothing is said in it
+	var kept []Event       // the reply's end, while nothing is said in it
+	var before, this Usage // what the tries before this one billed, and this try
 	emit := func(ev Event) {
 		switch ev.Kind {
 		case KError:
@@ -169,9 +238,18 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			}
 			failed, failedCode, failedStatus = ev.Text, ev.Code, ev.Status
 			errSent = true
-		case KStart, KUsage:
+		case KStart:
+			// the tries are each billed, so their usages are summed into
+			// the reply's — the client's and the ledger's (a cut try's is
+			// only what it said before the cut)
+			this = ev.Usage
+			ev.Usage = ev.Usage.plus(before, false)
 			u.add(ev.Usage)
 			u.add(Usage{Served: ev.Model}) // the model the vendor says answered
+		case KUsage:
+			this.add(ev.Usage)
+			ev.Usage = ev.Usage.plus(before, true)
+			u.add(ev.Usage)
 		case KStop:
 			stop = ev.Stop
 		}
@@ -294,6 +372,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			}
 			break
 		}
+		before, this = before.plus(this, false), Usage{}
 		enc.keepalive() // the client waits while the same conversation is asked again
 		select {
 		case <-time.After(retryPause << again):

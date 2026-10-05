@@ -261,10 +261,24 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 			if len(calls) > 0 {
 				am["tool_calls"] = calls
 			}
-			// a reply cut short and sent back to go on from (Resume) has its
-			// reasoning with it when the model reads reasoning_content back,
-			// so the going on picks the thought up where it was cut
-			if think != "" && (replay || r.Resume && i == len(r.Messages)-1 && reasoningBack(model)) {
+			// a reply cut short and sent back to go on from (Resume) is marked
+			// with the upstream's own prefill mode — DeepSeek's prefix, Kimi's
+			// partial (continuation.go; an upstream without one is never asked
+			// to go on) — and its reasoning goes with it where the upstream
+			// reads reasoning_content back, so the going on picks the thought
+			// up where it was cut
+			if r.Resume && i == len(r.Messages)-1 {
+				mode := chatPrefill(host, model)
+				switch mode {
+				case "prefix":
+					am["prefix"] = true
+				case "partial":
+					am["partial"] = true
+				}
+				if think != "" && mode != "" {
+					am["reasoning_content"] = think
+				}
+			} else if think != "" && replay {
 				am["reasoning_content"] = think
 			}
 			msgs = append(msgs, am)
@@ -397,16 +411,6 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	}
 	b, _ := json.Marshal(out)
 	return b
-}
-
-// reasoningBack is a model that reads a reply's reasoning back as
-// reasoning_content and goes on from it: Kimi's thinking models, as
-// DeepSeek's do (replay above names those by host). It names the model
-// however it is reached, for a reply cut short sent back to go on from
-// (Request.Resume); a vendor that doesn't read it turns the request away,
-// and the reply ends as it used to.
-func reasoningBack(model string) bool {
-	return strings.Contains(strings.ToLower(model), "kimi")
 }
 
 // pairToolMessages mends the tool exchange of a Chat request's messages
