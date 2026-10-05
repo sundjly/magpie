@@ -15,8 +15,11 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"slices"
@@ -43,6 +46,17 @@ type candidate struct {
 	// rank is its place in its provider's own list of accounts or keys,
 	// the order the provider's page shows and a drag sets (#217)
 	rank int
+	// capped is set on an account left out as held at its usage cap
+	capped *capHold
+}
+
+// capHold is how an account is held at its usage cap: the cap, the share
+// of the fullest window at or past it, and when the last such window
+// renews (zero when one doesn't say).
+type capHold struct {
+	cap  int
+	used float64
+	back time.Time
 }
 
 // label names a candidate in a call's record: the provider, and the key
@@ -161,6 +175,18 @@ func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (ou
 			barred = append(barred, c)
 			return true
 		})
+		// an account at its usage cap is used up for routing until the
+		// window it filled renews: never tried, so groups, fallbacks and
+		// the other accounts take the request (provider/account_caps.go)
+		all = slices.DeleteFunc(all, func(c candidate) bool {
+			h := capHeld(p, c.p, model, time.Now())
+			if h == nil {
+				return false
+			}
+			c.capped = h
+			barred = append(barred, c)
+			return true
+		})
 		// an account whose plan lacks the model (a Free one behind a Plus)
 		// would only answer 400; it is tried only when none lists it
 		for _, c := range all {
@@ -276,7 +302,7 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 		cs, wg := weigh(q, cs, m, from)
 		for i, c := range cs {
 			w := weighed(c, q, wg, fallback, from)
-			w.Turn = i == 0 && q.Routing == provider.Rotate && len(cs) > 1
+			w.Turn = i == 0 && (q.Routing == provider.Rotate || q.Routing == provider.Weighted) && len(cs) > 1
 			pl.order = append(pl.order, w)
 		}
 		pl.order = append(pl.order, asideOf(aside, q, fallback, from)...)
@@ -315,6 +341,9 @@ func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider
 	var asides []candidate
 	var wAsides []Weighed
 	out := planLevel(g, ms, 0, from, &pl, &asides, &wAsides)
+	if sinks(g.Sink, g.Routing) {
+		out, pl.order = sinkPlanned(out, pl.order)
+	}
 	out, pl.order = append(out, asides...), append(pl.order, wAsides...)
 	if len(out) == 0 {
 		return nil, pl
@@ -412,6 +441,7 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 			}
 			w := weighed(c, u.m.Provider, wg, false, from)
 			w.Routing, w.Via = g.Routing, u.m.Groups()
+			w.Sunk = nil // weighed as the group's, whose own Sink tells
 			w.Turn = i == 0 && g.Routing == provider.Rotate && len(weighedHeads) > 1
 			pl.order = append(pl.order, w)
 			out = append(out, c)
@@ -434,7 +464,7 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 		cs, wg := weigh(m.Provider, keys(m), m.Model, from)
 		for k, c := range cs {
 			w := weighed(c, m.Provider, wg, false, from)
-			w.Turn = k == 0 && m.Provider.Routing == provider.Rotate && len(cs) > 1
+			w.Turn = k == 0 && (m.Provider.Routing == provider.Rotate || m.Provider.Routing == provider.Weighted) && len(cs) > 1
 			w.Via = m.Groups()
 			pl.order = append(pl.order, w)
 		}
@@ -444,13 +474,61 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 	return out
 }
 
+// capHeld is how the account acct of p is held at its usage cap for
+// model at now, nil when it has no cap or is below it. Its windows are
+// those last read (allowances), as smart routing weighs them.
+func capHeld(p, acct provider.Provider, model string, now time.Time) *capHold {
+	if acct.Account == nil {
+		return nil
+	}
+	cap := p.AccountCap(acct.Account.User)
+	if cap <= 0 {
+		return nil
+	}
+	held, used, back := allowances(acct.Account.UsageAgent())[acct.Account.User].CapHeld(model, cap, now)
+	if !held {
+		return nil
+	}
+	return &capHold{cap: cap, used: used, back: back}
+}
+
+// cappedError says why a request for model went nowhere when every account
+// that could take it is held at its usage cap, as the vendor's own refusal
+// would when all are used up; the soonest one is back is the wait.
+func cappedError(model string, ws []Weighed, now time.Time) (string, time.Time) {
+	var held []string
+	var soonest time.Time
+	for _, w := range ws {
+		if w.Capped == 0 {
+			continue
+		}
+		s := fmt.Sprintf("%s (%s) is at %.0f%% of a usage window, past its %d%% cap", w.Name, w.Who, w.Used, w.Capped)
+		if w.CapBack != nil {
+			s += ", until " + w.CapBack.Local().Format("Jan 2 15:04")
+			if soonest.IsZero() || w.CapBack.Before(soonest) {
+				soonest = *w.CapBack
+			}
+		}
+		held = append(held, s)
+	}
+	return fmt.Sprintf("usage cap reached: every account that serves %q is held at the usage cap set on it in magpie — %s. magpie uses it again once that window renews; raise or lift the cap in magpie (Providers → the account's cap, or magpie provider account-cap)", model, strings.Join(held, "; ")), soonest
+}
+
 // barredOf is how the trace tells the accounts or keys the user set not
 // to serve the model: left out, as those not listing it are.
 func barredOf(cs []candidate, q provider.Provider, fallback bool, from provider.Protocol, via []string) []Weighed {
 	var out []Weighed
 	for _, c := range cs {
 		w := weighed(c, q, weighing{}, fallback, from)
-		w.Unlisted, w.Barred, w.Via = true, true, via
+		w.Unlisted, w.Via = true, via
+		if h := c.capped; h != nil {
+			w.Capped, w.Used = h.cap, h.used
+			if !h.back.IsZero() {
+				w.CapBack = &h.back
+			}
+		} else {
+			w.Barred = true
+		}
 		out = append(out, w)
 	}
 	return out
@@ -596,6 +674,70 @@ func retryable(status int, body []byte) bool {
 	return false
 }
 
+// lateRests says whether a reply that broke off after it began, with this
+// error, was the vendor failing (#733): unreachable, overloaded, out of
+// quota. A conversation grown too long for the model, or a request the
+// vendor turned away as it reads, would fail the same at the next asked:
+// nobody rests for it.
+func lateRests(msg string) bool {
+	return !tooLong(http.StatusBadRequest, msg) && !refusedWords.MatchString(msg)
+}
+
+// unsaidMargin is how far past a model's window a request's estimate
+// must go to be taken as too long for it: estimate counts a token as four
+// bytes, which most text runs under (Devin counted 173,954 tokens of one
+// estimated at 151,851), so one past it by a fifth hardly fits.
+const unsaidMargin = 1.2
+
+// tooLongUnsaid says a failure that doesn't say why was the request being too
+// long for the model, as some vendors put it: Devin's 502 "capacity
+// issues", WorkBuddy's 400 "Invalid request parameters", Qoder's 400
+// "Error in upstream response" — each for a conversation well past the
+// model's window, and answered at a size it holds. Retried, or asked of
+// another account of the model, it fails the same, and the agent, told it
+// as a vendor's error, never compacts. The message it is told instead
+// says the prompt is too long. Not for a rate limit, an account's
+// trouble, a model it doesn't serve, or one already saying it overflowed.
+func tooLongUnsaid(p provider.Provider, model string, tokens, status int, body []byte) (string, bool) {
+	switch status {
+	case 400, 413, 422, 500, 502, 503, 504:
+	default:
+		return "", false
+	}
+	if overflowed(status, body) || failure(status, body) != failOther || quotaWords.Match(body) ||
+		unservedWords.Match(body) || refusedWords.Match(body) || provider.EdgeBlocked(body) {
+		return "", false
+	}
+	window := windowOf(p, model)
+	if window <= 0 || float64(tokens) < float64(window)*unsaidMargin {
+		return "", false
+	}
+	msg := fmt.Sprintf("prompt is too long: about %d tokens, more than %s's context window of %d", tokens, model, window)
+	said := strings.TrimSpace(vendorMessage(body))
+	if len(said) > 200 {
+		said = said[:200] + "…"
+	}
+	// the vendor's words, unless they'd read as a limit of another kind
+	if full := fmt.Sprintf("%s (%s answered %d: %s)", msg, p.Name, status, said); said != "" && tooLong(400, full) {
+		return full, true
+	}
+	return fmt.Sprintf("%s (%s answered %d)", msg, p.Name, status), true
+}
+
+// windowOf is the tokens a provider's model takes, where known: the
+// user's (Provider.ContextOf), else its catalog entry's.
+func windowOf(p provider.Provider, model string) int {
+	if n := p.ContextOf(model); n > 0 {
+		return n
+	}
+	for _, e := range provider.Served() {
+		if e.Group == "" && e.Provider.ID == p.ID && (e.Model == model || e.ID == model) && e.Context > 0 {
+			return e.Context
+		}
+	}
+	return 0
+}
+
 const (
 	// lastRetries is how many times the last one left is tried again after
 	// a failure that passes — a busy vendor, a dropped connection.
@@ -631,6 +773,24 @@ func passing(status int, header http.Header, body []byte, again int) (time.Durat
 		return wait, again < rateRetries && failure(status, body) == failRate && !creditWords.Match(body)
 	}
 	return 0, false
+}
+
+// withRoom is, of the candidates left, those another member than c's may
+// answer a request of about tokens that c's model found too long: not an
+// account of c's model at c's provider, which holds it no better, nor one
+// whose window it is known to be past.
+func withRoom(left []candidate, c candidate, tokens int) []candidate {
+	var out []candidate
+	for _, x := range left {
+		if x.p.ID == c.p.ID && x.model == c.model {
+			continue
+		}
+		if w := windowOf(x.p, x.model); w > 0 && tokens >= w {
+			continue
+		}
+		out = append(out, x)
+	}
+	return out
 }
 
 // matesFirst puts first, of the candidates left, the other keys or
@@ -700,6 +860,14 @@ type holdWriter struct {
 
 	ended bool   // the stream's last event was written: the reply is whole
 	tail  []byte // the end of the last write, for a marker split across two
+	// ctx is the agent's request: a stream's last event written once it
+	// has gone reached nobody, and doesn't make the reply whole (#751)
+	ctx context.Context
+
+	// alive is the request's, shared by its tries: a stream held for its
+	// reasoning keeps the agent from its idle timeout with SSE comments
+	// meanwhile (#751)
+	alive *keptAlive
 
 	first firstToken // when its first content and text came (#196)
 
@@ -708,7 +876,20 @@ type holdWriter struct {
 	// connection open after it — a 429 said as an event — kept the agent
 	// waiting with nothing sent, the next account never asked
 	stop func()
+
+	// mu keeps a try's writes apart from watchFirst, which ends a try
+	// that is slow to start from its own goroutine
+	mu sync.Mutex
+	// firstWait is how long a try may take to its first content before
+	// the next member is asked (Group.FirstToken), 0 for as long as it
+	// takes; slow says it took longer, and was let go with nothing sent
+	firstWait time.Duration
+	slow      bool
 }
+
+// errSlowStart is what a try's writes get once it was let go for taking
+// longer than its group waits for a first token.
+var errSlowStart = errors.New("let go: no first token in time")
 
 func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
 	return &holdWriter{w: w, hold: hold, header: http.Header{}, first: firstToken{start: time.Now()}}
@@ -717,7 +898,13 @@ func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
 func (h *holdWriter) Header() http.Header { return h.header }
 
 func (h *holdWriter) WriteHeader(code int) {
-	if h.status != 0 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.writeHeader(code)
+}
+
+func (h *holdWriter) writeHeader(code int) {
+	if h.status != 0 || h.slow {
 		return
 	}
 	h.status = code
@@ -737,6 +924,11 @@ func (h *holdWriter) WriteHeader(code int) {
 }
 
 func (h *holdWriter) pass() {
+	if h.alive != nil && h.alive.sent {
+		// the agent has the stream's headers already, from keepAlive
+		h.passing = true
+		return
+	}
 	dst := h.w.Header()
 	for k, v := range h.header {
 		if k != resetsHeader && k != refusedHeader { // magpie's own notes, for restAfter and settle
@@ -748,8 +940,13 @@ func (h *holdWriter) pass() {
 }
 
 func (h *holdWriter) Write(b []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.slow {
+		return 0, errSlowStart
+	}
 	if h.status == 0 {
-		h.WriteHeader(http.StatusOK)
+		h.writeHeader(http.StatusOK)
 	}
 	h.see(b)
 	h.first.see(b)
@@ -774,7 +971,7 @@ var streamEnds = [][]byte{
 // see notes a stream's last event going by. An agent may hang up as soon as
 // it has that — Codex does — and a reply it had whole is not canceled.
 func (h *holdWriter) see(b []byte) {
-	if h.ended {
+	if h.ended || h.ctx != nil && h.ctx.Err() != nil {
 		return
 	}
 	buf := append(h.tail, b...)
@@ -870,8 +1067,62 @@ func (h *holdWriter) scan() {
 	if h.thinking {
 		longest = max(longest, holdThinking)
 	}
+	// a group that asks the next member when one is slow to start holds
+	// the stream until then, for nothing of it to have reached the agent
+	waiting := h.firstWait > 0 && h.first.first == 0
+	if waiting {
+		longest = max(longest, h.firstWait+time.Second)
+	}
 	if h.held.Len() > holdMost || time.Since(h.since) > longest {
 		h.flow()
+		return
+	}
+	if (h.thinking || h.buffered || waiting) && time.Since(h.since) >= keepHeldAfter {
+		h.keepAlive()
+	}
+}
+
+// keepHeldAfter is how long a stream held for its reasoning waits before
+// its agent is first kept alive, as long as a stream with nothing in it
+// is held (holdLongest); a refusal after it still goes to another account,
+// whose stream follows the comments in the same response.
+var keepHeldAfter = holdLongest
+
+// keptAlive is what a request's held streams have sent its agent ahead of
+// a reply: the stream's headers and SSE comments, nothing of the reply.
+type keptAlive struct {
+	proto provider.Protocol
+	sent  bool      // the stream's 200 and headers went out
+	at    time.Time // the last comment
+}
+
+// keepAlive tells the agent of a stream held past keepHeldAfter for its
+// reasoning that it goes on, every keepaliveEvery: held for up to
+// holdThinking (4 minutes), the agent heard nothing at all, and Alma's
+// idle timeout for a reasoning model, 240s, ended the turn first (#751). A
+// comment is no event in any protocol, so another account may still answer
+// after it, its stream going on in the same response (pass).
+func (h *holdWriter) keepAlive() {
+	a := h.alive
+	if a == nil || time.Since(a.at) < keepaliveEvery {
+		return
+	}
+	if !a.sent {
+		dst := h.w.Header()
+		for k, v := range h.header {
+			if k != resetsHeader && k != refusedHeader && k != "Content-Length" {
+				dst[k] = v
+			}
+		}
+		dst.Set("Content-Type", "text/event-stream; charset=utf-8")
+		h.w.WriteHeader(http.StatusOK)
+		a.sent = true
+	}
+	// no blank line after it, as sseWriter.comment
+	_, _ = io.WriteString(h.w, ": keepalive\n")
+	a.at = time.Now()
+	if f, ok := h.w.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 
@@ -880,10 +1131,16 @@ func (h *holdWriter) flow() {
 	h.pass()
 	h.w.Write(h.held.Bytes())
 	h.held.Reset()
-	h.Flush()
+	h.flush()
 }
 
 func (h *holdWriter) Flush() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.flush()
+}
+
+func (h *holdWriter) flush() {
 	if f, ok := h.w.(http.Flusher); ok && h.passing {
 		f.Flush()
 	}
@@ -944,9 +1201,72 @@ func (h *holdWriter) release() {
 	if h.passing || h.status == 0 {
 		return
 	}
+	if h.alive != nil && h.alive.sent && !h.stream {
+		// an error status, once the agent has a stream: told as its error
+		h.passing = true
+		streamError(h.w, h.alive.proto, h.status, provider.APIError(h.held.Bytes(), http.StatusText(h.status)))
+		return
+	}
 	h.pass()
 	h.w.Write(h.held.Bytes())
-	h.Flush()
+	h.flush()
+}
+
+// watchFirst lets the try go — stop, with slow said — once firstWait
+// passes with no first content and nothing of it sent to the agent: the
+// stream held, or no reply begun at all. Meanwhile the agent is kept alive
+// after keepHeldAfter, a vendor that says nothing at all running no scan.
+// The returned func ends the watch, and returns once it has.
+func (h *holdWriter) watchFirst() func() {
+	if h.firstWait <= 0 || h.stop == nil {
+		return func() {}
+	}
+	done, over := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(over)
+		deadline := time.NewTimer(h.firstWait)
+		defer deadline.Stop()
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		began := time.Now()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				h.mu.Lock()
+				if h.started() {
+					h.mu.Unlock()
+					return
+				}
+				if time.Since(began) >= keepHeldAfter {
+					h.keepAlive()
+				}
+				h.mu.Unlock()
+			case <-deadline.C:
+				h.mu.Lock()
+				if !h.started() {
+					h.slow = true
+				}
+				h.mu.Unlock()
+				if h.slow {
+					h.stop()
+				}
+				return
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-over
+	}
+}
+
+// started says whether the try has begun its reply, or ended, as far as
+// watchFirst need know: its first content, anything sent on to the agent,
+// a failure, or a reply that isn't streamed.
+func (h *holdWriter) started() bool {
+	return h.first.first != 0 || h.passing || h.ended || h.failure != 0 || h.whole || h.status >= 400
 }
 
 // eventEnd is where the first whole event in b ends, or -1.
@@ -1514,6 +1834,10 @@ func pinTo(want string, cands []candidate, pl planned) ([]candidate, planned, in
 		return nil, pl, http.StatusTooManyRequests, AccountHeader + ": " + strings.Join(rests, "; ") + "; no other account is tried in its place"
 	}
 	for _, w := range pl.left {
+		if match(w) && w.Capped > 0 {
+			msg, _ := cappedError(w.Model, []Weighed{w}, time.Now())
+			return nil, pl, http.StatusTooManyRequests, AccountHeader + ": " + msg + "; no other account is tried in its place"
+		}
 		if match(w) {
 			return nil, pl, http.StatusBadRequest, fmt.Sprintf("%s: %s's plan doesn't list %s", AccountHeader, w.Who, w.Model)
 		}

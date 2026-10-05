@@ -43,9 +43,23 @@ jobs:
       - name: Vet
         run: go vet -tags "${{ steps.tags.outputs.tags }}" ./...
 
+      - uses: oven-sh/setup-bun@v2
+        if: runner.os == 'Linux'
+        with:
+          bun-version: 1.4.2
+
       - name: Test
         if: runner.os != 'Windows'
         run: go test -tags "${{ steps.tags.outputs.tags }}" ./...
+
+      - name: Production plugin flow
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        env:
+          MAGPIE_FLOW_BIG: '1'
+        run: |
+          bun --version
+          go test -timeout 10m -tags "${{ steps.tags.outputs.tags }}" ./internal/plugin/... -run '^TestFlowBigReplyProd$' -count=1
 
       # The redaction tests reuse this binary in fresh processes to check
       # first-use races, so it must include the race detector.
@@ -67,6 +81,12 @@ jobs:
         if: runner.os == 'Windows'
         run: go test -run '^$' ./...
 
+      # These checks use in-memory errors and loopback test servers. Run
+      # the native Winsock refusal case rather than only compiling it.
+      - name: Windows MCP health
+        if: runner.os == 'Windows'
+        run: go test -v -count=1 -timeout 2m ./internal/library -run '^(TestNetHealth|TestCheckHTTP)$'
+
       # Usage isolates USERPROFILE and the agent homes; execute its native
       # ChangeTime checks rather than only cross-compiling the Windows API.
       - name: Windows usage cache
@@ -78,6 +98,18 @@ jobs:
       - name: Windows update install
         if: runner.os == 'Windows'
         run: go test -v -count=1 -timeout 2m ./internal/update -run '^(TestInstallBinary|TestMoveAside)'
+
+      # These tests use temporary paths, without the Unix HOME assumptions
+      # of the full suite. Run the native link-kind and sharing-error checks.
+      - name: Windows session moves
+        if: runner.os == 'Windows'
+        run: go test -v -count=1 ./internal/sessions -run '^Test(WindowsSession|Move|CopyAll)'
+
+      # dsh's layered config is read and edited in temporary homes. Run
+      # these checks on Windows too, including Desktop's home patch layer.
+      - name: Windows dsh configuration
+        if: runner.os == 'Windows'
+        run: go test -v -count=1 ./internal/agent -run '^Test(Dsh|KeepDsh)'
 
   cli:
     name: cli (${{ matrix.goos }}/${{ matrix.goarch }}, nogui)

@@ -81,6 +81,15 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			writeError(w, provider.Responses, 400, err.Error())
 			return
 		}
+		// a thread's title, where Settings sends it (#705) — the request
+		// still on Codex's own model, through its sign-in, when it says
+		// nothing of them
+		if rest == "/responses" {
+			if to := codexTitlesTo(r.Header, body, false); to != "" {
+				s.codexTitle(w, r, body, to)
+				return
+			}
+		}
 		// The namespace owns the route even if a model is not in the catalog.
 		// Unknown providers/groups must fail locally, never fall through to OpenAI.
 		if strings.Contains(model, "/") {
@@ -98,7 +107,7 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			s.serve(w, r, provider.Responses, body)
 			return
 		}
-		body = callItemIDs(body)
+		body = boundCallIDs(callItemIDs(body))
 		if rest == "/responses/compact" {
 			break // preserve native compaction's existing passthrough
 		}
@@ -148,10 +157,10 @@ func sealedReaders(cands []candidate, pl planned) ([]candidate, planned) {
 // leadFirst puts first the account that answered the lead, the thread
 // parent names, in scope: the one that sealed its subagent's task, which
 // another account may not open, as it doesn't another's reasoning.
-func leadFirst(scope, parent string, cands []candidate, pl planned) ([]candidate, planned) {
+func leadFirst(scope, parent string, cands []candidate, pl planned) ([]candidate, planned, string) {
 	parent = strings.TrimSpace(parent)
 	if parent == "" {
-		return cands, pl
+		return cands, pl, ""
 	}
 	sticks.Lock()
 	st, had := stickOf(scope + "|" + parent)
@@ -167,16 +176,19 @@ func leadFirst(scope, parent string, cands []candidate, pl planned) ([]candidate
 	}
 	sticks.Unlock()
 	if !had || time.Since(st.at) > stickKeep {
-		return cands, pl
+		return cands, pl, ""
 	}
 	for i, c := range cands {
 		if i > 0 && c.who() == st.who {
 			cands = append(append([]candidate{c}, cands[:i]...), cands[i+1:]...)
 			pl.order = append(append([]Weighed{pl.order[i]}, pl.order[:i]...), pl.order[i+1:]...)
-			break
+			return cands, pl, c.rest
 		}
 	}
-	return cands, pl
+	if len(cands) > 0 && cands[0].who() == st.who {
+		return cands, pl, cands[0].rest
+	}
+	return cands, pl, ""
 }
 
 // Only native sealed agent tasks need this guidance. Other encrypted_content
@@ -247,6 +259,11 @@ func codexAccounts(h http.Header, model string) (string, bool) {
 	p, _, ok := provider.Resolve(id)
 	// one account named is found among them however many are on
 	pinned := h.Get(AccountHeader) != ""
+	// an account with a usage cap goes through routing, which holds it
+	// there, even alone: relayed as it came, nothing would
+	if ok && p.Account != nil && p.Account.Agent == "codex" && p.AccountCap(p.Account.User) > 0 {
+		return id, true
+	}
 	if !ok || p.Account == nil || p.Account.Agent != "codex" || len(p.AlsoOn()) == 0 && !pinned {
 		return "", false
 	}
@@ -293,6 +310,8 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 	var uu Usage
 	metadata := requestSessionMetadata(r.Header, body)
 	kind := requestCallKind(r.Header, metadata)
+	var titleReply capturedBody // bounded; ordinary streams incur no copy
+	captureTitle := false
 	end := func(status int, msg string, tokens, out int) {}
 	if rest == "/responses" {
 		who := "Codex's own sign-in"
@@ -301,15 +320,26 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 		}
 		model := modelOf(body)
 		seat := Weighed{ID: "codex", Provider: "openai", Name: "OpenAI", Icon: "openai", Who: who, Kind: "account", Agent: "codex", Model: model}
-		tr = s.trace.begin(Route{Time: start, Agent: agentOf(r), Session: sessionOf(r.Header), ParentSession: titleParentSession(r.Header, metadata, kind), Kind: kind, Model: model, Provider: "openai",
+		link := s.titlePrompts.observe(r, body, metadata, kind, start)
+		captureTitle = link != nil && isTitleKind(kind)
+		tr = s.trace.begin(Route{TitleLink: link, Time: start, Agent: agentOf(r), Session: sessionOf(r.Header), ParentSession: titleParentSession(r.Header, metadata, kind), Kind: kind, Model: model, Provider: "openai",
 			Order: []Weighed{seat}, Tries: []Try{{ID: seat.ID, Model: model, Start: start}}})
 		end = func(status int, msg string, tokens, out int) {
 			ms := time.Since(start).Milliseconds()
 			ttft, text := first.ms()
+			replyDigest := ""
+			if captureTitle && status < 400 && msg == "" && !titleReply.truncated {
+				replyDigest = titleReplyDigest(titleReply.buf.Bytes(), nil)
+			}
 			s.trace.update(tr, func(t *Route) {
 				t.Tries[0].Done, t.Tries[0].Status, t.Tries[0].Millis, t.Tries[0].Error = true, status, ms, msg
 				t.Tries[0].TTFT, t.Tries[0].FirstText = ttft, text
 				t.Done, t.Status, t.Error, t.Millis, t.Tokens = true, status, msg, ms, tokens
+				if t.TitleLink != nil && isTitleKind(kind) && status < 400 && msg == "" && !titleReply.truncated {
+					link := *t.TitleLink
+					link.Reply = replyDigest
+					t.TitleLink = &link
+				}
 				t.Output, t.TTFT, t.FirstText = out, ttft, text
 				t.Usage = routeUsage("openai", model, uu)
 				t.Tries[0].Served, t.Tries[0].Swapped = served, swapped(model, served)
@@ -420,6 +450,9 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 	for {
 		n, err := res.Body.Read(buf)
 		if n > 0 {
+			if captureTitle {
+				titleReply.add(buf[:n])
+			}
 			if sniff != nil {
 				sniff.write(buf[:n])
 				first.see(buf[:n])
@@ -460,7 +493,7 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 		Requested: call.Model, Served: served,
 		Input: uu.Input, Output: uu.Output, CacheRead: uu.CacheRead, CacheWrite: uu.CacheWrite,
 		Reasoning: uu.Reasoning, Millis: call.Millis, TTFT: call.TTFT, FirstText: call.FirstText, Status: call.Status, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
-		RequestID: requestID(res.Header), Endpoint: r.URL.Path}
+		RequestID: requestID(res.Header), ResponseID: uu.ResponseID, Endpoint: r.URL.Path}
 	failedWith(&rec, call.Status, call.Error, errType)
 	appendUsage(r, rec)
 }
@@ -609,6 +642,9 @@ func callKind(h http.Header) string {
 	if v == "" && h.Get("User-Agent") == SearchAgent {
 		v = "web_search"
 	}
+	if v == "" && h.Get("User-Agent") == VisionAgent {
+		v = "vision"
+	}
 	if v == "" && h.Get("x-openai-codex-luna-reserve") != "" {
 		v = "luna_reserve"
 	}
@@ -692,9 +728,27 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if own == nil {
+	// what follows reads the providers seven times over (the catalog, the
+	// codex provider's picks and windows, the list's tag): held, they are
+	// built once, where each build read every agent's sign-in, keychain
+	// items among them, and together held the answer past Codex's 5 s (#746)
+	defer provider.Hold()()
+	cached := own == nil
+	if cached {
 		for _, e := range codexcat.CacheEntries() {
 			own = append(own, e)
+		}
+	}
+	// the windows the user set on the codex provider, as /v1/models says
+	// them (#674); a cached entry, which keeps what magpie handed Codex
+	// last, takes the account's own list's back when none is set
+	window := provider.CodexNativeWindow(cached)
+	for _, m := range own {
+		if o, ok := m.(map[string]any); ok {
+			slug, _ := o["slug"].(string)
+			if n, most, ok := window(slug); ok {
+				codexcat.Window(o, n, most)
+			}
 		}
 	}
 	// The backend lists every model the ChatGPT account can reach. When the
@@ -873,6 +927,55 @@ func callItemIDs(body []byte) []byte {
 		it["id"], _ = json.Marshal(id)
 		if b, err := marshalPlain(it); err == nil {
 			items[i], changed = b, true
+		}
+	}
+	if !changed {
+		return body
+	}
+	q["input"], _ = marshalPlain(items)
+	nb, err := marshalPlain(q)
+	if err != nil {
+		return body
+	}
+	return nb
+}
+
+// longCallID finds a call_id longer than the ChatGPT backend takes.
+var longCallID = regexp.MustCompile(`"call_id"\s*:\s*"[^"]{65,}"`)
+
+// boundCallIDs is a Responses request with every call_id longer than 64
+// characters as provider.BoundCallID has it, the rest of the request byte
+// for byte (#732, congee949): a conversation that had a foreign provider's
+// tool calls (two ids joined, 86 or 87 characters) went on Codex's own
+// ChatGPT sign-in as it came, and the backend turned it away with 400
+// "input[7].call_id … maximum length 64". A call and its output get the
+// same id, on every request.
+func boundCallIDs(body []byte) []byte {
+	if !longCallID.Match(body) {
+		return body
+	}
+	var q map[string]json.RawMessage
+	if json.Unmarshal(body, &q) != nil {
+		return body
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(q["input"], &items) != nil {
+		return body
+	}
+	changed := false
+	for i, raw := range items {
+		var it map[string]json.RawMessage
+		var id string
+		if json.Unmarshal(raw, &it) != nil || json.Unmarshal(it["call_id"], &id) != nil {
+			continue
+		}
+		b := provider.BoundCallID(id)
+		if b == id {
+			continue
+		}
+		it["call_id"], _ = json.Marshal(b)
+		if nb, err := marshalPlain(it); err == nil {
+			items[i], changed = nb, true
 		}
 	}
 	if !changed {

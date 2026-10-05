@@ -83,7 +83,11 @@ func Entries(ms []catalog.Model, after int) []any {
 		Tools      []string `json:"experimental_supported_tools"`
 		Modalities []string `json:"input_modalities"`
 		Context    *int     `json:"context_window,omitempty"`
-		Tiers      []tier   `json:"service_tiers"`
+		// the model's whole window when Context is the working one
+		// (settings.Working): Codex's model_context_window may raise it
+		// that far, as it does OpenAI's own models'
+		MaxContext *int   `json:"max_context_window,omitempty"`
+		Tiers      []tier `json:"service_tiers"`
 		// Without the search, Codex puts every MCP tool's schema (a
 		// ChatGPT sign-in's apps' among them) in every request, 190K
 		// tokens before the first word (#258); with it, they are named in
@@ -99,16 +103,24 @@ func Entries(ms []catalog.Model, after int) []any {
 		// fails to load); later Codex ask for parallel calls whatever it
 		// says, so it says what they do.
 		Parallel bool `json:"supports_parallel_tool_calls"`
-		// Set only with settings.CodexAgentsV1, on an OpenAI model's
-		// entry (see V1).
+		// "v1" only with settings.CodexAgentsV1, on an OpenAI model's
+		// entry (see V1); "v2" on a model offering Ultra that no ChatGPT
+		// account answers for (catalog.Model.AgentsV2), as Codex's own
+		// entry for it says: Ultra hands work to Codex's agents in V2
+		// alone, and a magpie-served lead writes their tasks as text.
 		MultiAgent string `json:"multi_agent_version,omitempty"`
 	}
 	own := CacheEntries()
 	v1 := V1()
+	work := settings.Load()
 	var entries []any
 	for i, m := range ms {
 		if raw, ok := own[strings.TrimPrefix(m.ID, "codex/")]; ok && strings.HasPrefix(m.ID, "codex/") {
 			e := ownEntry(raw, m.ID, m.Name, after+i+1)
+			// the window as magpie resolves it — the one the user set,
+			// else the account's list's — not the cache's, which is what
+			// magpie last handed Codex (#674)
+			Window(e, m.Context, 0)
 			if v1 {
 				Stamp(e)
 			}
@@ -132,12 +144,18 @@ func Entries(ms []catalog.Model, after int) []any {
 		// in (Fast, see provider.codexListed)
 		if v1 && (strings.HasPrefix(m.ID, "codex/") || m.Fast) {
 			e.MultiAgent = "v1"
+		} else if m.AgentsV2 {
+			e.MultiAgent = "v2"
 		}
 		if m.Images {
 			e.Modalities = append(e.Modalities, "image")
 		}
 		if c := m.Context; c > 0 {
-			e.Context = &c
+			w := work.Working(c)
+			e.Context = &w
+			if w < c {
+				e.MaxContext = &c
+			}
 		}
 		e.Truncation.Mode, e.Truncation.Limit = "tokens", 10000
 		for _, ef := range m.Efforts {
@@ -155,8 +173,7 @@ func Entries(ms []catalog.Model, after int) []any {
 // CacheEntries is Codex's own models, as models_cache.json describes them
 // for the ChatGPT account it last asked with, by slug.
 func CacheEntries() map[string]map[string]any {
-	home, _ := os.UserHomeDir()
-	b, err := os.ReadFile(filepath.Join(home, ".codex", "models_cache.json"))
+	b, err := os.ReadFile(catalog.CodexModelsCache())
 	if err != nil {
 		return nil
 	}
@@ -289,6 +306,27 @@ func ownEntry(raw map[string]any, id, name string, priority int) map[string]any 
 		e["base_instructions"] = Prompt
 	}
 	return e
+}
+
+// Window has one of Codex's own entries say a context window of n tokens
+// (none: as it says), and most at the most it may be raised to (0: as it
+// says). Only those two fields change. An entry whose max_context_window is
+// below its window — one the user set past what OpenAI lists — would say
+// two things at once, and Codex may hold the window to the max, so the max
+// is raised to it.
+func Window(e map[string]any, n, most int) {
+	if n <= 0 {
+		return
+	}
+	e["context_window"] = n
+	if most > 0 {
+		e["max_context_window"] = most
+	}
+	if cur, ok := e["max_context_window"].(float64); ok && int(cur) < n {
+		e["max_context_window"] = n
+	} else if cur, ok := e["max_context_window"].(int); ok && cur < n {
+		e["max_context_window"] = n
+	}
 }
 
 // Codex keeps the model list it was handed in models_cache.json, with the

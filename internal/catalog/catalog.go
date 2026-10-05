@@ -51,6 +51,10 @@ type Model struct {
 	// Fast is set on a model Codex may ask for priority processing (its
 	// Fast mode): one a ChatGPT account serves.
 	Fast bool `json:",omitempty"`
+	// AgentsV2 is set on a model Codex is told multi-agent V2 for, so its
+	// Ultra hands work to Codex's agents: one offering Ultra that no
+	// ChatGPT account answers for (provider.Entry's).
+	AgentsV2 bool `json:",omitempty"`
 	// Draws is set on a vendor-listed model that makes images (gpt-image-1,
 	// a relay's flux): kept with the list for Settings → Images, never
 	// offered to agents as a model to talk to.
@@ -88,6 +92,11 @@ type Price struct {
 	Output     float64 `json:"output"`
 	CacheRead  float64 `json:"cache_read"`
 	CacheWrite float64 `json:"cache_write"`
+}
+
+// Times is the price at r times each of its parts.
+func (p Price) Times(r float64) Price {
+	return Price{Input: p.Input * r, Output: p.Output * r, CacheRead: p.CacheRead * r, CacheWrite: p.CacheWrite * r}
 }
 
 // Cost of a call at this price. Reasoning tokens are billed as output by
@@ -765,11 +774,22 @@ func Providers() []string {
 	return ids
 }
 
+// CodexHome is where Codex CLI keeps its state: $CODEX_HOME, else ~/.codex.
+func CodexHome() string {
+	if dir := appdir.Getenv("CODEX_HOME"); dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex")
+}
+
+// CodexModelsCache is the model list Codex CLI keeps, under CodexHome.
+func CodexModelsCache() string { return filepath.Join(CodexHome(), "models_cache.json") }
+
 // Codex returns the models Codex itself lists, straight from the cache the
 // Codex CLI writes; there is no compiled-in list to fall back to.
 func Codex() []Model {
-	home, _ := os.UserHomeDir()
-	out, _ := filememo.Read("codex models", filepath.Join(home, ".codex", "models_cache.json"), parseCodex)
+	out, _ := filememo.Read("codex models", CodexModelsCache(), parseCodex)
 	return slices.Clone(out)
 }
 

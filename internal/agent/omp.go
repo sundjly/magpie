@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
@@ -95,7 +96,7 @@ var ompProfileName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // agent there. omp takes that variable as given, without expanding "~".
 func ompDir(home string) string {
 	root := filepath.Join(home, ".omp")
-	if d := os.Getenv("PI_CONFIG_DIR"); d != "" {
+	if d := appdir.Getenv("PI_CONFIG_DIR"); d != "" {
 		root = filepath.Join(home, d)
 	}
 	p, set := os.LookupEnv("OMP_PROFILE")
@@ -105,7 +106,7 @@ func ompDir(home string) string {
 	if p = strings.TrimSpace(p); p != "" && p != "default" && ompProfileName.MatchString(p) && !strings.HasSuffix(p, ".") {
 		return filepath.Join(root, "profiles", p, "agent")
 	}
-	if d := os.Getenv("PI_CODING_AGENT_DIR"); filepath.IsAbs(d) {
+	if d := appdir.Getenv("PI_CODING_AGENT_DIR"); filepath.IsAbs(d) {
 		return filepath.Clean(d)
 	}
 	return filepath.Join(root, "agent")
@@ -117,10 +118,12 @@ func omp(home string) *Agent {
 
 // ompIn is omp in a WSL distro (see wsl.go): ~/.omp/agent, as the
 // distro's variables that move it aren't read. The omp there isn't the one
-// on Windows' PATH, so its version isn't known, and its models offer xhigh
-// rather than a max an older omp would refuse.
+// on Windows' PATH: its version is the one the distro's probe asked it
+// (whqtian on Discord: a WSL omp's max became xhigh while its version wasn't
+// known), and without one its models offer xhigh rather than a max an older
+// omp would refuse.
 func ompIn(at place) *Agent {
-	return ompAt(at, filepath.Join(at.home, ".omp", "agent"), func() ompProviderEntry { return ompProviderAt(at.gw(), "") })
+	return ompAt(at, filepath.Join(at.home, ".omp", "agent"), func() ompProviderEntry { return ompProviderAt(at.gw(), at.version) })
 }
 
 // ompAt is omp with its agent folder at dir, magpie's entry in its
@@ -267,7 +270,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		}
 	}
 	return &Agent{
-		ID: "omp", Name: "omp", Icon: "omp", Aliases: []string{"oh-my-pi"},
+		ID: "omp", Name: "omp", Icon: "omp", Aliases: []string{"oh-my-pi"}, Spelled: prefixed,
 		UA:  []string{"oh-my-pi"},
 		Bin: "omp", Dir: dir, Path: path,
 		// a role's thinking level is omp's, after whichever model it is on;
@@ -513,7 +516,7 @@ func ompOwnOptions(modelsFile, cur string) []Option {
 	}
 	at := map[string]int{}
 	var out []Option
-	for _, o := range append(opts, ownOptions("", cur)...) {
+	for _, o := range append(opts, ownOptionsFrom(ompRegistry, "", cur)...) {
 		i, dup := at[o.Value]
 		if !dup {
 			at[o.Value] = len(out)

@@ -347,7 +347,7 @@ func keepUnloaded(ps, last []Provider) []Provider {
 		told[p.Spec] = true
 	}
 	installed := map[string]bool{}
-	for _, e := range Load().Plugins {
+	for _, e := range list().Plugins {
 		installed[e.Spec] = true
 	}
 	for _, p := range last {
@@ -407,6 +407,7 @@ func Settle() {
 // provider's sign-in is read afresh from plugin-auth.json.
 func Cached() []Provider {
 	checkList()
+	l := list() // one read of plugins.json for the whole call
 	provMu.Lock()
 	ps := provCache
 	good := provGood
@@ -416,13 +417,13 @@ func Cached() []Provider {
 			_ = json.Unmarshal(b, &ps)
 		}
 	}
-	if len(Load().Plugins) == 0 {
+	if len(l.Plugins) == 0 {
 		return nil
 	}
 	auth := readAuth()
 	out := make([]Provider, 0, len(ps))
 	on := map[string]bool{}
-	for _, e := range Load().Plugins {
+	for _, e := range l.Plugins {
 		if !e.Off {
 			on[e.Spec] = true
 		}
@@ -448,7 +449,7 @@ func Cached() []Provider {
 		}
 		out = append(out, p)
 	}
-	if !good && len(Load().Plugins) > 0 {
+	if !good && len(l.Plugins) > 0 {
 		// refreshed in the background: a sign-in or the plugins changed.
 		// Whether one is already in flight is read and set under one lock,
 		// so two callers asking at once start one refresh, not two.
@@ -652,6 +653,8 @@ func SignOut(ctx context.Context, provider, account string) error {
 	if Running() {
 		return Call(ctx, "signOut", map[string]any{"provider": provider, "account": account}, nil)
 	}
+	unlock := lockAuth()
+	defer unlock()
 	var m map[string]json.RawMessage
 	b, err := steady.ReadFile(AuthPath())
 	if err != nil {
@@ -819,6 +822,9 @@ type UsageWindow struct {
 	ResetsAt  string   `json:"resetsAt"` // RFC 3339
 	ResetSecs int64    `json:"resetSecs"`
 	Display   string   `json:"display"`
+	Amount    float64  `json:"amount"` // of Limit, in Unit: the window's own count, used
+	Limit     float64  `json:"limit"`
+	Unit      string   `json:"unit"`
 	Span      float64  `json:"span"` // seconds
 	Model     string   `json:"model"`
 	Models    []string `json:"models"`

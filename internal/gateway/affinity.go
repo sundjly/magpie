@@ -281,6 +281,7 @@ func affine(scope, mode string, rotate bool, in http.Header, from provider.Proto
 	case "session", "turn", "cache":
 		a.Kept = true
 		if at > 0 {
+			weightedKept(cs[0], cs[at])
 			cs = append(append([]candidate{cs[at]}, cs[:at]...), cs[at+1:]...)
 			order := append(append([]Weighed{pl.order[at]}, pl.order[:at]...), pl.order[at+1:]...)
 			pl.order = order
@@ -331,6 +332,25 @@ func answered(key string, c candidate, turn, cacheRead int) {
 	}
 	sticks.Unlock()
 	saveSticks()
+}
+
+// unanswered forgets that c answered a conversation, when its reply to it
+// broke off (#733): the agent's retry goes by routing again, not back to
+// the one that just failed it. The account alone is enough: affine's
+// widest match keeps a conversation on an account whose answerer's model
+// has since left the group, so a stick that only matched by its model
+// would leave the next request kept on the account that just broke off.
+func unanswered(key string, c candidate) {
+	sticks.Lock()
+	st, ok := stickOf(key)
+	ok = ok && st.who == c.who()
+	if ok {
+		delete(sticks.m, key)
+	}
+	sticks.Unlock()
+	if ok {
+		saveSticks()
+	}
 }
 
 // foreignReasoning is how a vendor refuses reasoning another account (or

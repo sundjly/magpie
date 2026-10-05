@@ -128,13 +128,18 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		RequestArchive:      true,
 		RequestArchiveMaxMB: 64,
 		QuotaLeft:           true,
+		UsageOrder:          []string{"kimi", "codex"},
 		PlainNames:          true,
 		PlainOwnNames:       true,
 		CodexAgentsV1:       true,
+		CodexTitles:         "off",
+		ChinaMirror:         true,
 		CodexAutoReset:      []string{"me@example.com"},
 		TextSize:            125,
 		UpdateSkip:          "0.1.500",
+		UpdateMirror:        "https://mirror.example/",
 		Window:              []int{900, 700},
+		FullContext:         true,
 	}
 	if err := settings.Save(was); err != nil {
 		t.Fatal(err)

@@ -47,7 +47,7 @@
     <button class="icon" id="open" title="Open as a window" data-tt>
       <svg viewBox="0 0 16 16" width="14" height="14"><path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8a1.5 1.5 0 0 0 1.5-1.5V10M9 2h5v5M14 2 8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
-    <button class="icon" id="prefs" title="Settings" data-tt>
+    <button class="icon" id="prefs" title="Settings" data-tt data-keys="⌘,|Ctrl+,">
       <svg viewBox="0 0 24 24" width="14" height="14"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></g></svg>
     </button>
     <button class="icon winclose" id="winclose" title="Close" data-tt>
@@ -128,6 +128,7 @@
     <div class="row-head quota-head" id="quotaHead" hidden>
       <span class="label" data-t>Allowances</span>
       <span class="grow"></span>
+      <button class="sess-pick quota-trend" id="quotaTrend" type="button" hidden></button>
       <button class="text rt-mask" id="usageMask" aria-pressed="false" data-tt="Mask the accounts on this page — email addresses and account names — for a screenshot to share"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.9 4.2A10.4 10.4 0 0 1 12 4c6.5 0 10 8 10 8a17.6 17.6 0 0 1-2.2 3.2M6.6 6.6C3.9 8.4 2 12 2 12s3.5 8 10 8a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2M2 2l20 20"/></svg><span data-t>Hide accounts</span></button>
       <div class="segs" id="quotaMode" hidden></div>
     </div>
@@ -149,6 +150,7 @@
     <div class="sess-tools">
       <button class="sess-pick" id="ledComputer" type="button" hidden></button>
       <button class="sess-pick" id="ledAgent" type="button" hidden></button>
+      <button class="sess-pick" id="ledPurpose" type="button" hidden></button>
       <button class="sess-pick" id="ledProvider" type="button" hidden></button>
       <button class="sess-pick" id="ledAccount" type="button" hidden></button>
       <button class="sess-pick" id="ledKey" type="button" hidden></button>
@@ -177,6 +179,7 @@
     </div>
     <div class="led-head"><p class="led-sum" id="ledSum"></p><span class="grow"></span><span class="led-arch" id="ledArchive"></span></div>
     <div class="led-wrap" id="ledWrap"></div>
+            <div class="led-hscroll" id="ledHScroll" hidden><div></div></div>
     <div class="led-pager" id="ledPager" hidden></div>
     <p class="usage-note" id="ledNote"></p>
   </div>
@@ -200,6 +203,7 @@
     <div class="row-head" id="sessListHead" hidden>
       <span class="label" data-t>Latest sessions</span>
       <span class="grow"></span>
+      <button class="text sess-all" id="sessAll" type="button" data-t>All sessions</button>
       <input class="sess-filter" id="sessQ" type="search" spellcheck="false" autocomplete="off" placeholder="Search sessions" data-tp>
     </div>
     <div class="list sess-list" id="sessList"></div>
@@ -255,6 +259,14 @@
         <div id="codexAgentsV1Segs"></div>
       </div>
       <div class="row pref">
+        <div class="who"><div class="name" data-t>Long conversations</div><div class="sub" data-t>Codex and Claude Code compact a conversation at 272K tokens on a model with a larger window; in Claude Code a Claude model runs to its own window, 1M for a [1m] one, as Anthropic runs it. The model’s full window lets any conversation grow further, with every turn slower and costlier</div></div>
+        <div id="fullContextSegs"></div>
+      </div>
+      <div class="row pref" id="codexTitlesRow">
+        <div class="who"><div class="name" data-t>Codex thread titles</div><div class="sub" id="codexTitlesSub"></div></div>
+        <div class="val" id="codexTitlesPick"></div>
+      </div>
+      <div class="row pref">
         <div class="who"><div class="name" data-t>Open at login</div><div class="sub" data-t>Start magpie in the tray when you log in, so agents find the gateway from the start</div></div>
         <div id="loginSegs"></div>
       </div>
@@ -286,6 +298,10 @@
         <div class="who"><div class="name" data-t>Menu bar logos</div><div class="sub" data-t>Each subscription's logo before its numbers; off, the numbers alone with a thin line between subscriptions</div></div>
         <div id="trayLogosSegs"></div>
       </div>
+      <div class="row pref" id="trayBirdRow" hidden>
+        <div class="who"><div class="name" data-t>Menu bar magpie icon</div><div class="sub" data-t>magpie's icon before the allowances; off, the allowances alone, and a click on one still opens the panel</div></div>
+        <div id="trayBirdSegs"></div>
+      </div>
       <div class="row pref">
         <div class="who"><div class="name" data-t>Allowance display</div><div class="sub" data-t>How much of each window is used, or how much is left, on the Usage page, the panel and the menu bar</div></div>
         <div id="quotaLeftSegs"></div>
@@ -311,6 +327,8 @@
       <button type="button" role="tab" id="warmTab-codex" data-warm="codex" aria-controls="codexWarmList">Codex</button>
       <button type="button" role="tab" id="warmTab-claude" data-warm="claude" aria-controls="claudeWarmList">Claude Code</button>
       <button type="button" role="tab" id="warmTab-wb" data-warm="wb" aria-controls="wbList" hidden>WorkBuddy</button>
+      <button type="button" role="tab" id="warmTab-trae" data-warm="trae" aria-controls="traeList" hidden>Trae CN</button>
+      <button type="button" role="tab" id="warmTab-minimax" data-warm="minimax" aria-controls="minimaxList" hidden>MiniMax Code</button>
     </div></div>
     <div class="warm-panes">
     <div class="list prefs" id="codexWarmList" role="tabpanel" aria-labelledby="warmTab-codex">
@@ -339,6 +357,18 @@
         <div id="wbCheckinSegs"></div>
       </div>
     </div>
+    <div class="list prefs" id="traeList" role="tabpanel" aria-labelledby="warmTab-trae">
+      <div class="row pref" id="traeCheckinRow">
+        <div class="who"><div class="name" data-t>Daily check-in</div><div class="sub" id="traeCheckinSub"></div></div>
+        <div id="traeCheckinSegs"></div>
+      </div>
+    </div>
+    <div class="list prefs" id="minimaxList" role="tabpanel" aria-labelledby="warmTab-minimax">
+      <div class="row pref" id="minimaxCheckinRow">
+        <div class="who"><div class="name" data-t>Daily check-in</div><div class="sub" id="minimaxCheckinSub"></div></div>
+        <div id="minimaxCheckinSegs"></div>
+      </div>
+    </div>
     </div>
   </section>
   <section class="set-page" id="setPage-network" role="tabpanel" aria-labelledby="setTab-network">
@@ -358,6 +388,8 @@
     <div class="list prefs" id="imagesList"></div>
     <div class="row-head"><span class="label" data-t>Web search</span></div>
     <div class="list prefs" id="searchList"></div>
+    <div class="row-head"><span class="label" data-t>Replies</span></div>
+    <div class="list prefs" id="replyList"></div>
   </section>
   <section class="set-page" id="setPage-privacy" role="tabpanel" aria-labelledby="setTab-privacy">
     <div class="list prefs" id="redactList"></div>

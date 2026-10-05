@@ -16,11 +16,11 @@ package agent
 // stays.
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 	"gopkg.in/yaml.v3"
@@ -39,7 +39,7 @@ const mcodeUA = "minimax-code"
 
 // MiniMaxDir is the folder MiniMax Code keeps its config.yaml in.
 func MiniMaxDir(home string) string {
-	if d := strings.TrimSpace(os.Getenv("MINIMAX_DATA_DIR")); d != "" {
+	if d := strings.TrimSpace(appdir.Getenv("MINIMAX_DATA_DIR")); d != "" {
 		return d
 	}
 	return filepath.Join(home, ".minimax")
@@ -76,7 +76,7 @@ func miniMaxAt(at place, dir string) *Agent {
 		return edit.SetYAML(path, kvs...)
 	}
 	return atomic(&Agent{
-		ID: "minimax-code", Name: "MiniMax Code", Icon: "minimax-color", Aliases: []string{"mcode"},
+		ID: "minimax-code", Name: "MiniMax Code", Icon: "minimax-color", Aliases: []string{"mcode"}, Spelled: prefixed,
 		UA:  []string{mcodeUA},
 		Bin: "mcode", Dir: dir, Path: path,
 		Sync: func() error {

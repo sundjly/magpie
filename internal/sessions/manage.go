@@ -22,7 +22,9 @@ import (
 //
 // Only the agents whose sessions are files of their own can be deleted:
 // Claude Code's (and Qoder's and WorkBuddy's, kept the same way), Codex's,
-// Pi's, omp's and Cursor CLI's (a chat's folder, its store and meta.json). The agents' indexes are left as they are: Codex's
+// Pi's, omp's and Cursor CLI's (a chat's folder, its store and meta.json).
+// Hermes's and Alma's are rows in a database the agent keeps open and
+// writes, so they are only listed. The agents' indexes are left as they are: Codex's
 // session_index.jsonl (names by thread id) and its state database, and
 // Claude Code's history.jsonl (the prompts typed, for the up arrow), are
 // written by the agent while it runs, and a name or a prompt left for a
@@ -114,9 +116,11 @@ func ListAgent(agent string) []Managed {
 	for _, fs := range groups {
 		s, _ := assemble(fs, price)
 		if s.Resume == "" && !s.ReadOnly {
-			s.Resume = ResumeCommand(s.Agent, s.ID, s.Cwd)
+			s.Resume = resumeCommand(s.WSL, s.Agent, s.ID, s.Cwd)
 		}
-		m := Managed{Session: s, Files: len(fs), Deletable: Deletable(agent) && !s.ReadOnly}
+		// a WSL distro's are listed and resumed, not deleted: magpie moves
+		// no files out of a distro
+		m := Managed{Session: s, Files: len(fs), Deletable: Deletable(agent) && !s.ReadOnly && s.WSL == ""}
 		for _, f := range fs {
 			m.Size += f.size
 			if st := cache[f.path]; st != nil && f.main {
@@ -203,6 +207,9 @@ func Delete(agent, id string) (Trashed, error) {
 	}
 	if len(fs) == 0 {
 		return Trashed{}, errors.New("no such session")
+	}
+	if s.WSL != "" {
+		return Trashed{}, fmt.Errorf("magpie doesn't delete sessions in WSL %s: delete it there", s.WSL)
 	}
 	paths := sessionPaths(agent, id, fs)
 	now := time.Now()
@@ -362,8 +369,10 @@ func move(from, to string) error {
 	if _, err := os.Lstat(to); err == nil {
 		return fmt.Errorf("%s is already there", to)
 	}
-	if os.Rename(from, to) == nil {
+	if err := os.Rename(from, to); err == nil {
 		return nil
+	} else if !errors.Is(err, crossDeviceErr) {
+		return err
 	}
 	if err := copyAll(from, to); err != nil {
 		os.RemoveAll(to)
@@ -391,7 +400,7 @@ func copyAll(from, to string) error {
 			if err != nil {
 				return err
 			}
-			return os.Symlink(target, dst)
+			return copySymlink(target, dst, fi)
 		}
 		if !fi.Mode().IsRegular() {
 			return nil

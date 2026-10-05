@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 func clientTraceFeed(t *testing.T, c *traceCursor, bodies bool, lines ...string) []TraceSpan {
@@ -83,6 +85,7 @@ func TestOmpTraceMainAndAuxiliaryModels(t *testing.T) {
 		`{"type":"model_usage","id":"aux","parentId":"a","timestamp":"2026-10-02T12:00:05Z","model":"small","provider":"p","purpose":"title","usage":{"input":10,"output":2}}`,
 		`{"type":"message","id":"result","parentId":"a","timestamp":"2026-10-02T12:00:06Z","message":{"role":"toolResult","toolCallId":"tool","content":"result"}}`,
 		`{"type":"message","id":"final","parentId":"result","timestamp":"2026-10-02T12:00:08Z","message":{"role":"assistant","model":"model","usage":{"input":120,"output":3},"content":[],"stopReason":"stop"}}`)
+	spans = append(spans, c.finishPi(time.Now().Add(piTimingGrace))...)
 	roots, models, tools := spanKinds(spans)
 	if len(roots) != 2 || len(models) != 3 || len(tools) != 1 || models[1].Tokens.Input != 10 || models[1].Parent != roots[0].ID {
 		t.Fatalf("omp %+v", spans)
@@ -335,7 +338,7 @@ func TestClaudeTraceInterruptedToolDoesNotBlockNextInteraction(t *testing.T) {
 func TestTraceDiscoveryIncludesClaudeChildren(t *testing.T) {
 	home := t.TempDir()
 	data := filepath.Join(home, "data")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	t.Setenv("XDG_DATA_HOME", data)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
@@ -383,7 +386,7 @@ func TestGeminiParallelToolResultsStayWithTheirCalls(t *testing.T) {
 func TestClaudeTraceSubagentsShareSessionWithoutIDCollisions(t *testing.T) {
 	for _, agent := range []string{"claude", "claude-desktop"} {
 		t.Run(agent, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
+			testenv.SetHome(t, t.TempDir())
 			t.Setenv("CODEX_HOME", t.TempDir())
 			t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
 			t.Setenv("PI_CODING_AGENT_SESSION_DIR", "")
@@ -457,7 +460,7 @@ func TestClaudeTraceSubagentsShareSessionWithoutIDCollisions(t *testing.T) {
 func TestClaudeSubagentEndTurnAfterToolResult(t *testing.T) {
 	for _, bodies := range []bool{false, true} {
 		t.Run(fmt.Sprint(bodies), func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
+			testenv.SetHome(t, t.TempDir())
 			t.Setenv("CODEX_HOME", t.TempDir())
 			t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
 			t.Setenv("PI_CODING_AGENT_SESSION_DIR", "")
@@ -542,7 +545,7 @@ func TestClaudeSubagentRepeatedEndTurnBlocks(t *testing.T) {
 	for _, bodies := range []bool{false, true} {
 		for _, split := range []bool{false, true} {
 			t.Run(fmt.Sprintf("bodies=%t/split=%t", bodies, split), func(t *testing.T) {
-				t.Setenv("HOME", t.TempDir())
+				testenv.SetHome(t, t.TempDir())
 				t.Setenv("CODEX_HOME", t.TempDir())
 				t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
 				t.Setenv("PI_CODING_AGENT_SESSION_DIR", "")

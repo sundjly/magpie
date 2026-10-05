@@ -291,6 +291,23 @@ func kimiCodeBase(base string) string {
 	return u
 }
 
+// KimiCodeSearch is where a Kimi Code plan's key searches the web, as
+// kimi-cli's SearchWeb does (auth/platforms.py: the plan's search_url is
+// its base_url, /coding/v1, with /search), "" for a provider that isn't a
+// Kimi Code plan with a key.
+func KimiCodeSearch(p Provider) string {
+	if p.Account != nil || p.Key == "" {
+		return ""
+	}
+	for _, base := range []string{p.Chat, p.Anthropic} {
+		h := hostOf(base)
+		if base != "" && ((h == "api.kimi.com" || h == "api.kimi.ai") && strings.Contains(base, "/coding") || strings.HasPrefix(p.Preset, "kimi-code")) {
+			return strings.TrimSuffix(kimiCodeBase(base), "/") + "/search"
+		}
+	}
+	return ""
+}
+
 // readKimiCode reads Kimi Code's /usages, as kimi-cli's /usage does:
 //
 //	{"usage":{"limit":"100","used":"12","resetTime":"2026-09-30T05:24:18.44Z"},
@@ -423,8 +440,9 @@ var planQuotaCache struct {
 // than a minute ago is not asked again.
 func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 	c := &planQuotaCache
+	_, again := refreshing(ctx) // one card read again (RefreshUsage)
 	c.Lock()
-	if c.data != nil && time.Since(c.at) < time.Minute {
+	if !again && c.data != nil && time.Since(c.at) < time.Minute {
 		defer c.Unlock()
 		return c.data
 	}
@@ -458,7 +476,9 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 					user = Mask(k)
 				}
 			}
-			jobs = append(jobs, job{p, src, k, user})
+			if wantsCard(ctx, p.ID, user) {
+				jobs = append(jobs, job{p, src, k, user})
+			}
 		}
 	}
 	got := make([]*SubscriptionQuota, len(jobs))
@@ -514,8 +534,13 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 	}
 	out = append(out, <-stepfun...)
 	if ctx.Err() == nil {
+		noteQuotaHistory(out, time.Now())
 		c.Lock()
-		c.at, c.data = time.Now(), out
+		if again {
+			c.data = mergeCards(c.data, out)
+		} else {
+			c.at, c.data = time.Now(), out
+		}
 		c.Unlock()
 	}
 	return out

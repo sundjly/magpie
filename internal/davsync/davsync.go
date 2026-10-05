@@ -469,7 +469,11 @@ func syncNow(ctx context.Context, force bool) error {
 	if _, ok := Load(); !ok { // off: no lock taken, so none made
 		return nil
 	}
-	unlock, err := lock(ctx)
+	// a sync has no time to end in (see stallAfter), a wait for another's
+	// does
+	lctx, lcancel := context.WithTimeout(ctx, wait)
+	unlock, err := lock(lctx)
+	lcancel()
 	if err != nil {
 		return err
 	}
@@ -537,7 +541,9 @@ func Run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		c, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		// no request is let stand still for long (stallAfter), but a large
+		// backup on a slow line takes what it takes: only an hour ends it
+		c, cancel := context.WithTimeout(ctx, time.Hour)
 		err := Now(c)
 		cancel()
 		if msg := fmt.Sprint(err); err != nil && msg != last {
@@ -589,6 +595,9 @@ func hashes(b backup.Bundle) map[string]string {
 	if len(b.Order) > 0 { // as before it, when never arranged
 		providers = append(providers, map[string][]string{"order": b.Order})
 	}
+	if len(b.GroupOrder) > 0 { // as before it, when never arranged
+		providers = append(providers, map[string][]string{"groupOrder": b.GroupOrder})
+	}
 	return map[string]string{
 		"providers": h(providers),
 		"settings":  settingsHash,
@@ -605,12 +614,29 @@ func orEmpty[V any](m map[string]V) map[string]V {
 	return m
 }
 
-// take puts from's part in to.
+// take puts from's part in to. The merged bundle is a sync one (BundleVersion):
+// its per-part markers, not the whole-bundle Keys bit, say which part
+// carries credentials, so a keyed providers upload no longer tells a reader
+// the settings and the library came with keys too. If an older writer drops
+// those markers, readers fall back to Keys even if the version stays 2.
 func take(to *backup.Bundle, from backup.Bundle, part string) {
+	// Preserve every legacy part's scope before a providers upload changes
+	// Keys for older readers. An untouched nil marker would otherwise inherit
+	// that new value and turn a redaction into a credential-bearing update.
+	if to.ProvidersKeys == nil {
+		to.ProvidersKeys = backup.Flag(to.Keys)
+	}
+	if to.SettingsKeys == nil {
+		to.SettingsKeys = backup.Flag(to.Keys)
+	}
+	if to.LibraryKeys == nil {
+		to.LibraryKeys = backup.Flag(to.Keys)
+	}
 	switch part {
 	case "providers":
+		keys := from.Keys || (from.ProvidersKeys != nil && *from.ProvidersKeys)
 		ps := from.Providers
-		if !from.Keys && to.Keys { // sent without keys: keep the ones the server has
+		if !keys && (to.Keys || (to.ProvidersKeys != nil && *to.ProvidersKeys)) { // sent without keys: keep the ones the server has
 			keys := map[string]provider.Provider{}
 			for _, p := range to.Providers {
 				keys[p.ID] = p
@@ -618,7 +644,7 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 			ps = slices.Clone(ps)
 			for i, p := range ps {
 				if k, ok := keys[p.ID]; ok && p.Key == "" && len(p.Keys) == 0 {
-					ps[i].Key, ps[i].KeyName, ps[i].Keys, ps[i].KeyProtocol = k.Key, k.KeyName, k.Keys, k.KeyProtocol
+					ps[i].Key, ps[i].KeyName, ps[i].Keys, ps[i].KeyProtocol, ps[i].KeyWeight = k.Key, k.KeyName, k.Keys, k.KeyProtocol, k.KeyWeight
 					if p.BalanceToken == "" {
 						ps[i].BalanceToken = k.BalanceToken
 					}
@@ -626,7 +652,7 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 			}
 		}
 		searches := from.Searches
-		if searches != nil && !from.Keys && to.Keys && to.Searches != nil { // the same for the search APIs
+		if searches != nil && !keys && (to.Keys || (to.ProvidersKeys != nil && *to.ProvidersKeys)) && to.Searches != nil { // the same for the search APIs
 			keys := map[string]string{}
 			for _, a := range *to.Searches {
 				keys[a.Vendor] = a.Key
@@ -639,11 +665,13 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 			}
 			searches = &ss
 		}
-		to.Providers, to.Icons, to.Groups, to.Searches, to.Order = ps, from.Icons, from.Groups, searches, from.Order
-		to.Keys = to.Keys || from.Keys
+		to.Providers, to.Icons, to.Groups, to.Searches, to.Order, to.GroupOrder = ps, from.Icons, from.Groups, searches, from.Order, from.GroupOrder
+		to.ProvidersKeys = backup.Flag(keys || (to.ProvidersKeys != nil && *to.ProvidersKeys))
+		to.Keys = to.Keys || keys // the whole-bundle bit follows it, for a magpie that reads no per-part ones: it keeps the server's keys on its own upload then
 	case "settings":
+		keys := from.Keys || (from.SettingsKeys != nil && *from.SettingsKeys)
 		s := from.Settings
-		if s != nil && !from.Keys && to.Keys && to.Settings != nil {
+		if s != nil && !keys && (to.Keys || (to.SettingsKeys != nil && *to.SettingsKeys)) && to.Settings != nil {
 			// Sent without keys: keep the ones the server has, as for providers.
 			copy := *s
 			copy.LANKey, copy.LANKeyID = to.Settings.LANKey, to.Settings.LANKeyID
@@ -657,21 +685,29 @@ func take(to *backup.Bundle, from backup.Bundle, part string) {
 		if s != nil {
 			to.Settings = s
 		}
-		if from.Keys && from.GatewayKeys != nil {
+		if keys && from.GatewayKeys != nil {
 			to.GatewayKeys = from.GatewayKeys // an explicit empty store clears it
 		}
-		to.Keys = to.Keys || from.Keys
+		to.SettingsKeys = backup.Flag(keys || (to.SettingsKeys != nil && *to.SettingsKeys))
 	case "profiles":
 		to.Profiles = from.Profiles
 	case "agents":
 		to.Agents = from.Agents
 	case "library":
+		keys := from.Keys || (from.LibraryKeys != nil && *from.LibraryKeys)
 		lib := from.Library
-		if lib != nil && !from.Keys && to.Keys { // sent without keys: keep the ones the server has
+		// An empty secret is not a clear: a keyed computer's library holds
+		// "" for a server it synced and never held a token for, and writes
+		// that over the token the keyless computer that set it up has. The
+		// server's value is kept for such an entry whatever the policy; a
+		// server taken out here is gone, as a part's own clearing works.
+		if lib != nil && (to.Keys || (to.LibraryKeys != nil && *to.LibraryKeys)) {
 			lib = lib.WithSecrets(to.Library, backup.Secret)
 		}
 		to.Library = lib
+		to.LibraryKeys = backup.Flag(keys || (to.LibraryKeys != nil && *to.LibraryKeys))
 	}
+	to.Version = backup.BundleVersion // the merged bundle is a sync one, whatever the server's file was
 }
 
 // changed is when a part was last changed here, as its files say.
@@ -722,6 +758,9 @@ func bring(b backup.Bundle, part string) error {
 			return err
 		}
 		if err := provider.MirrorOrder(b.Order); err != nil {
+			return err
+		}
+		if err := provider.MirrorGroupOrder(b.GroupOrder); err != nil {
 			return err
 		}
 		if b.Searches == nil { // from a magpie before them: the ones here stay

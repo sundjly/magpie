@@ -49,7 +49,7 @@
     const u = s.replace(/^git\+/, "").replace(/\.git$/, "");
     return /^https?:\/\//.test(u) ? u : "";
   };
-  const lang = () => (document.documentElement.lang || "").startsWith("zh") ? "zh" : "en";
+  const lang = () => (document.documentElement.lang || "en").slice(0, 2);
   const summary = (l) => l.summary?.[lang()] || l.summary?.en || l.npm?.description || "";
   const count = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k" : String(n || 0);
   const entryOf = (pkg) => mine?.plugins?.find((e) => name(e.spec) === pkg);
@@ -368,7 +368,20 @@
       meta.append(d);
     }
     if (l.npm?.version) meta.append(el("span", "pm-ver", "v" + (e?.version || l.npm.version)));
-    if (e && e.latest && e.version && newer(e.latest, e.version)) meta.append(el("span", "pm-chip up", t("Update")));
+    if (e && e.latest && e.version && newer(e.latest, e.version)) {
+      // the chip says there is an update, so it is the one that brings it
+      // (Discord: 显示更新但是好像没有更新按钮)
+      const b = busy.get(l.package) || busy.get(e.spec);
+      const up = el("button", "pm-chip up", b === "upgrade" ? t("Updating…") : t("Update to {v}", { v: "v" + e.latest }));
+      up.type = "button";
+      up.disabled = busy.size > 0 || checking || !!e.off;
+      up.onclick = (ev) => {
+        ev.stopPropagation();
+        act(l.package, "upgrade", { spec: e.spec }, () => status(t("{name} updated to v{v}", { name: l.name, v: e.latest }), "ok"));
+      };
+      up.onkeydown = (ev) => ev.stopPropagation();
+      meta.append(up);
+    }
     if (e?.error && !e.off) meta.append(el("span", "pm-chip bad", t("Didn't load")));
     else if (e?.off) meta.append(el("span", "pm-chip", t("Off")));
     if (l.replaces) {
@@ -435,9 +448,45 @@
     };
     q.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === "Escape" && q.value) { q.value = ""; q.oninput(); } };
     find.append(q);
-    h.append(tabs, el("span", "grow"), find);
+    h.append(tabs, el("span", "grow"), mirrorSwitch(), find);
     h.classList.toggle("stuck", page.scrollTop > 0);
     return h;
+  }
+
+  // 「国内镜像」: the list, npm's packages and answers, and Bun asked of
+  // mirrors in China first (npmmirror, jsDelivr); none before what's
+  // installed has come, which says how it is set
+  let mirrorSaving = false;
+  function mirrorSwitch() {
+    const on = !!mine?.mirror;
+    const b = el("button", "pm-mirror" + (on ? " on" : ""));
+    b.type = "button";
+    b.hidden = !mine;
+    b.disabled = mirrorSaving;
+    b.setAttribute("role", "switch");
+    b.setAttribute("aria-checked", on ? "true" : "false");
+    b.title = t("Download the plugin list, plugins and Bun from mirrors in China first (npmmirror, jsDelivr), their official addresses after. Each is a copy of the very file, checked as the original is");
+    const sw = el("span", "lib-switch" + (on ? " on" : ""));
+    sw.append(el("i"));
+    b.append(el("span", "", t("Mirrors in China")), sw);
+    b.onclick = async () => {
+      if (mirrorSaving || !mine) return;
+      mirrorSaving = true;
+      mine.mirror = !on;
+      draw();
+      try {
+        const r = await api("plugins/mirror", { on: !on });
+        mine.mirror = r.mirror;
+        // the list again, now from the mirror, and npm's answers with it
+        if (r.mirror) loadListings().then(() => { redraw(); askNPM(); });
+      } catch (e) {
+        mine.mirror = on;
+        status(t(e.message), "err");
+      }
+      mirrorSaving = false;
+      redraw();
+    };
+    return b;
   }
 
   async function searchNPM(s) {
@@ -492,7 +541,7 @@
     const known = new Set(listings.map((l) => l.package));
     const box = el("section", "pm-sec");
     const h = el("div", "pm-sechead");
-    h.append(el("h3", "", t("On npm")), el("span", "", t("OpenCode plugins anyone published — read what one does before you install it")));
+    h.append(el("h3", "", t("On npm")), el("span", "", t("OpenCode plugins and pi packages anyone published — read what one does before you install it")));
     box.append(h);
     if (!hits) box.append(el("p", "pm-note", t("Type two letters or more to search npm")));
     else if (hits.loading) box.append(skeleton(2));
@@ -511,7 +560,7 @@
     const box = el("div", "pm-intro");
     const text = el("div", "pm-introtext");
     text.append(el("h2", "", t("Subscriptions, as plugins")));
-    text.append(el("p", "", t("Plugins sign in to coding plans and make their requests; the models then work in every agent, like any provider's. They're OpenCode's provider plugins, run on Bun.")));
+    text.append(el("p", "", t("Plugins sign in to coding plans and make their requests; the models then work in every agent, like any provider's. They're OpenCode's provider plugins or pi's packages, run on Bun.")));
     const trust = el("p", "pm-trust");
     trust.append(glyph(SHIELD, 12, 1.5), el("span", "", t("A plugin is someone else's code with your sign-in: install the ones you trust.")));
     text.append(trust);
@@ -703,7 +752,7 @@
       const up = el("button", "text", b === "upgrade" ? t("Updating…") : t("Update"));
       up.disabled = busy.size > 0 || checking;
       // the community's would come by itself: Update brings it now
-      if (pkg.startsWith("@magpie-community/") && !/@(?!latest$)[^@/]+$/.test(e.spec.slice(pkg.length))) up.title = t("magpie updates it by itself within a few hours; Update does it now");
+      if (pkg.startsWith("@magpie-community/") && !/@(?!latest$)[^@/]+$/.test(e.spec.slice(pkg.length))) up.title = t("magpie updates it by itself within the hour; Update does it now");
       up.onclick = () => act(pkg, "upgrade", { spec: e.spec }, () => status(t("{name} updated to v{v}", { name: l?.name || pkg, v: e.latest }), "ok"));
       val.append(up);
     } else if (isGit(e.spec) && !e.off) {
