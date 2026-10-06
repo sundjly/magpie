@@ -347,7 +347,7 @@ func (a *Agent) Wired() bool {
 	if a.Native != nil {
 		return a.Native.Read().Provider == "connected"
 	}
-	if a.Joined != nil && a.Joined() {
+	if a.Joined != nil && a.Joined() || a.Beside != nil && a.Beside() {
 		return true
 	}
 	vals := a.Values()
@@ -392,6 +392,15 @@ func (a *Agent) Pick(key, v string) error {
 // the provider and the whole catalog in, so the agent's own model list has
 // every one of magpie's models. An agent that can keep the model it is on
 // (Join) keeps it. An agent already connected is left as it is.
+// NoModelsError is Connect's answer while magpie has no models to give
+// the agent: no provider or subscription has been added yet. The GUI says
+// it in the reader's language by its code (no_models).
+type NoModelsError struct{ Agent string }
+
+func (e *NoModelsError) Error() string {
+	return "Add a provider or subscription in magpie first, then connect " + e.Agent
+}
+
 func (a *Agent) Connect() error {
 	_, err := a.ConnectHow()
 	return err
@@ -474,6 +483,11 @@ func (a *Agent) connect() (Connection, error) {
 		}
 	}
 	if f == nil {
+		// nothing to connect it to yet: no provider or subscription added,
+		// which said only that it can't be connected (Tystem on Discord)
+		if shown, hidden := provider.CatalogFor(a.ListsFor()); len(shown)+len(hidden) == 0 {
+			return Connection{}, &NoModelsError{Agent: a.Name}
+		}
 		return Connection{}, fmt.Errorf("%s can't be connected to magpie", a.Name)
 	}
 	cur := connectWas(vals[f.Key], opts)
@@ -494,11 +508,14 @@ func (a *Agent) connect() (Connection, error) {
 	// alias): on the account it is signed in to (its vendor's) first, then
 	// on a subscription, before a key's; else its own vendor's; else a
 	// subscription's; else the first
-	var pick, same, alike, own, sub string
+	var pick, same, alike, own, sub, group string
 	sameRank, alikeRank := -1, -1
 	for _, o := range opts {
 		if o.Value == magpieID {
 			return Connection{How: "magpie", Field: f.Key, Value: magpieID}, a.Apply(f.Key, magpieID)
+		}
+		if o.Ref != "" && o.Group == RoutingGroups && group == "" {
+			group = o.Value
 		}
 		if o.Ref == "" || o.Group == RoutingGroups {
 			continue
@@ -527,6 +544,12 @@ func (a *Agent) connect() (Connection, error) {
 			sub = o.Value
 		}
 	}
+	// the model it is on, of its own, as magpie serves it on a sign-in of
+	// the user's, which its field lists as its own (Codex's on a ChatGPT
+	// account it can't join, #940)
+	if same == "" && alike == "" && cur != "" && a.OwnVia != nil {
+		same = a.OwnVia(cur)
+	}
 	how := "first"
 	switch {
 	case same != "":
@@ -540,6 +563,10 @@ func (a *Agent) connect() (Connection, error) {
 		pick = own
 	case sub != "":
 		pick = sub
+	case pick == "" && group != "":
+		// only routing groups are shown it (its models hidden, or its own
+		// account's alone beside them): the first group (#939)
+		pick = group
 	}
 	if pick == "" {
 		return Connection{}, fmt.Errorf("magpie has no models %s can use: add a subscription or a provider first", a.Name)

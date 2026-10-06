@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -148,5 +150,194 @@ func TestGatewayKeyModelsMatchTheServingProvider(t *testing.T) {
 	}
 	if membersAllowed(who, nil) || !membersAllowed(access.Identity{}, nil) {
 		t.Fatal("an empty group")
+	}
+}
+
+// A key held to a routing group it names, "group/<id>" (Magic_zero on
+// Discord), is shown the group and may use it, every member of it going
+// through it — the next one too when the first fails — but not the
+// members asked by name, a group it doesn't name, or a fallback outside
+// the group; "group/*" names every group, and a group named inside one
+// it doesn't name counts for its own members.
+func TestGatewayKeyModelsNameAGroup(t *testing.T) {
+	fresh(t)
+	plan := &fake{t: t, ctype: "application/json", reply: `{"id":"from-plan","choices":[]}`}
+	spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
+	twoProviders(t, plan, spare)
+	keys, secrets := newCaller(t, "Group", "Every group", "Inner")
+	for i, ms := range [][]string{{"group/both"}, {"group/*"}, {"group/solo", "spare/m2"}} {
+		if _, err := access.Update("models-key", access.Change{Key: keys[i].ID, Models: ms}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, g := range []provider.Group{
+		{Name: "Both", Members: []string{"plan/m1", "spare/m2"}, Routing: provider.Ordered},
+		{Name: "Solo", Members: []string{"plan/m1"}, Routing: provider.Ordered},
+		{Name: "Outer", Members: []string{"group/solo", "spare/m2"}, Routing: provider.Ordered},
+	} {
+		if err := provider.SaveGroup(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := New().Handler()
+	do := func(secret, method, path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+secret)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	listed := func(secret string) []string {
+		var l struct{ Data []struct{ ID string } }
+		w := do(secret, "GET", "/v1/models", "")
+		if err := json.Unmarshal(w.Body.Bytes(), &l); err != nil {
+			t.Fatal(w.Body.String())
+		}
+		var ids []string
+		for _, m := range l.Data {
+			ids = append(ids, m.ID)
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	if ids := listed(secrets[0]); !slices.Equal(ids, []string{"group/both"}) {
+		t.Fatalf("a key naming group/both lists %v", ids)
+	}
+	if ids := listed(secrets[1]); !slices.Equal(ids, []string{"group/both", "group/outer", "group/solo"}) {
+		t.Fatalf("a key naming group/* lists %v", ids)
+	}
+	if ids := listed(secrets[2]); !slices.Contains(ids, "group/outer") || !slices.Contains(ids, "group/solo") || slices.Contains(ids, "plan/m1") || slices.Contains(ids, "group/both") {
+		t.Fatalf("a key naming group/solo and spare/m2 lists %v", ids)
+	}
+	chat := func(secret, model string) *httptest.ResponseRecorder {
+		return do(secret, "POST", "/v1/chat/completions", `{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`)
+	}
+	for _, c := range []struct {
+		key   int
+		model string
+		code  int
+		from  string
+	}{
+		{0, "group/both", 200, "from-plan"},
+		{0, "both", 200, "from-plan"},
+		{0, "plan/m1", 403, ""},
+		{0, "spare/m2", 403, ""},
+		{0, "group/solo", 403, ""},
+		{1, "group/solo", 200, "from-plan"},
+		{1, "plan/m1", 403, ""},
+		{2, "group/outer", 200, "from-plan"},
+		{2, "group/both", 403, ""},
+	} {
+		w := chat(secrets[c.key], c.model)
+		if w.Code != c.code || c.from != "" && !strings.Contains(w.Body.String(), c.from) {
+			t.Fatalf("key %d asking %s: %d %s", c.key, c.model, w.Code, w.Body.String())
+		}
+	}
+	// the group's first member out of quota: the next member, through it
+	plan.code, plan.reply = 429, `{"error":{"message":"slow down"}}`
+	if w := chat(secrets[0], "group/both"); w.Code != 200 || !strings.Contains(w.Body.String(), "from-spare") {
+		t.Fatal("a named group's next member", w.Code, w.Body.String())
+	}
+	// but plan's own fallback, spare/m2, isn't Solo's
+	spareCalls := spare.calls
+	if w := chat(secrets[1], "group/solo"); w.Code == 200 || spare.calls != spareCalls {
+		t.Fatal("a named group fell back outside itself", w.Code, w.Body.String())
+	}
+}
+
+// A gateway key held to some models (#882) counts no tokens on one it may
+// not use — Anthropic's count_tokens and Gemini's :countTokens, a group
+// judged by its members — and System One asks its decision model only of
+// a key that may use it; a free key goes on as before, and no provider is
+// asked for any of it.
+func TestGatewayKeyModelsHoldCountTokensAndSystemOne(t *testing.T) {
+	fresh(t)
+	plan := &fake{t: t, ctype: "application/json", reply: `{"id":"from-plan","choices":[]}`}
+	spare := &fake{t: t, ctype: "application/json", reply: `{"id":"from-spare","choices":[]}`}
+	twoProviders(t, plan, spare)
+	var decided int
+	jev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decided++
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"answers":{"intent":{"choice":"bug"}},"usage":{"input_tokens":10,"output_tokens":2}}`)
+	}))
+	t.Cleanup(jev.Close)
+	if err := provider.Save(provider.Provider{ID: "jev", Name: "Jev", Key: "k", Decide: jev.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SaveGroup(provider.Group{Name: "Both", Members: []string{"plan/m1", "spare/m2"}, Routing: provider.Ordered}); err != nil {
+		t.Fatal(err)
+	}
+	keys, secrets := newCaller(t, "Held", "Free")
+	if _, err := access.Update("models-key", access.Change{Key: keys[0].ID, Models: []string{"plan/*"}}); err != nil {
+		t.Fatal(err)
+	}
+	h := New().Handler()
+	do := func(secret, method, path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+secret)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	// counting tokens on a model it may not use, by id, bare and through a
+	// group with one in: said in Anthropic's own error shape
+	for _, model := range []string{"spare/m2", "m2", "group/both"} {
+		w := do(secrets[0], "POST", "/v1/messages/count_tokens", `{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`)
+		var e struct {
+			Error struct{ Message, Type string }
+		}
+		json.Unmarshal(w.Body.Bytes(), &e)
+		if w.Code != 403 || e.Error.Type != "permission_error" || !strings.Contains(e.Error.Message, `"Held"`) || !strings.Contains(e.Error.Message, "plan/*") {
+			t.Fatalf("counting %s: %d %s", model, w.Code, w.Body.String())
+		}
+	}
+	// one it may use is counted, and a free key counts anything
+	for _, c := range []struct{ secret, model string }{
+		{secrets[0], "plan/m1"}, {secrets[1], "spare/m2"},
+	} {
+		if w := do(c.secret, "POST", "/v1/messages/count_tokens", `{"model":"`+c.model+`","messages":[{"role":"user","content":"hi"}]}`); w.Code != 200 || !strings.Contains(w.Body.String(), "input_tokens") {
+			t.Fatalf("counting %s: %d %s", c.model, w.Code, w.Body.String())
+		}
+	}
+	// Gemini's counting, the model in its URL, is held the same way
+	w := do(secrets[0], "POST", "/v1beta/models/spare/m2:countTokens", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	var g struct {
+		Error struct {
+			Code   int
+			Status string
+		}
+	}
+	if w.Code != 403 || json.Unmarshal(w.Body.Bytes(), &g) != nil || g.Error.Code != 403 || g.Error.Status != "PERMISSION_DENIED" {
+		t.Fatalf("gemini counting: %d %s", w.Code, w.Body.String())
+	}
+	if w = do(secrets[0], "POST", "/v1beta/models/plan/m1:countTokens", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`); w.Code != 200 || !strings.Contains(w.Body.String(), "totalTokens") {
+		t.Fatalf("gemini counting allowed: %d %s", w.Code, w.Body.String())
+	}
+	if plan.calls != 0 || spare.calls != 0 || decided != 0 {
+		t.Fatal("a held count or decision reached a provider", plan.calls, spare.calls, decided)
+	}
+	// System One's decision model is a model: the held key is refused it,
+	// a free key asks, and one given the decider asks too
+	const ask = `{"model":"jev/jev-latest","state":{"message":"hi"},"questions":{"intent":{"type":"choice"}}}`
+	w = do(secrets[0], "POST", "/v1/systemone", ask)
+	var e struct {
+		Error struct{ Message, Type string }
+	}
+	json.Unmarshal(w.Body.Bytes(), &e)
+	if w.Code != 403 || e.Error.Type != "permission_error" || !strings.Contains(e.Error.Message, `"Held"`) {
+		t.Fatalf("system one held: %d %s", w.Code, w.Body.String())
+	}
+	if decided != 0 {
+		t.Fatal("a held decision reached its provider", decided)
+	}
+	if w = do(secrets[1], "POST", "/v1/systemone", ask); w.Code != 200 || decided != 1 {
+		t.Fatalf("a free key's decision: %d %s, decided %d", w.Code, w.Body.String(), decided)
+	}
+	if _, err := access.Update("models-key", access.Change{Key: keys[0].ID, Models: []string{"jev/*"}}); err != nil {
+		t.Fatal(err)
+	}
+	if w = do(secrets[0], "POST", "/v1/systemone", ask); w.Code != 200 || decided != 2 {
+		t.Fatalf("a key given the decider: %d %s, decided %d", w.Code, w.Body.String(), decided)
 	}
 }

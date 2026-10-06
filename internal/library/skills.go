@@ -37,6 +37,9 @@ type Skill struct {
 	// changed the skill since.
 	Hash   string `json:"hash,omitempty"`
 	Commit string `json:"commit,omitempty"`
+	// From is the repository one not installed from GitHub was found to
+	// come from (skill_from.go), only to group it with the rest of it
+	From string `json:"from,omitempty"`
 }
 
 // Source is where a skill came from: a GitHub repository it can be updated
@@ -254,8 +257,12 @@ func isDigits(s string) bool {
 	return true
 }
 
-// fresh is whether the copy at p holds what the library's skill does.
-func fresh(p, name string) bool { return hashDir(p) == hashDir(realDir(skillDir(name))) }
+// fresh is whether both folders could be read and the copy at p holds
+// what the library's skill does. Failed hashes don't prove it can be discarded.
+func fresh(p, name string) bool {
+	h := hashDir(p)
+	return h != "" && h == hashDir(realDir(skillDir(name)))
+}
 
 func unlink(p string) error {
 	fi, err := os.Lstat(p)
@@ -398,6 +405,7 @@ func (l *Library) syncSkills(t *Target, res *Result, all []*Target) {
 			sharers = append(sharers, o.Agent.ID)
 		}
 	}
+	cp := l.copies(t, sharers)
 	wanted := func(s *Skill) bool {
 		if s == nil {
 			return false
@@ -461,10 +469,20 @@ func (l *Library) syncSkills(t *Target, res *Result, all []*Target) {
 			if ours(p, s.Name) {
 				dropOld(p, s.Name)
 			}
+			// magpie's copy in an agent given links now is a link again
+			// (#896), unless no link can be made here (Windows without the
+			// right to), where the copy stays
+			if ours(p, s.Name) && !cp && !linked(p) {
+				if ok, err := relink(id, p, s.Name); err != nil {
+					res.fail(id, "skill:"+s.Name, err)
+				} else if ok {
+					res.changed(id)
+				}
+			}
 			// a copy is made again once the library's skill has changed: in
 			// an agent that takes copies, and where magpie couldn't link
 			// (Windows without the right to) and left a copy instead
-			if ours(p, s.Name) && ((t.Copy && linked(p)) || (!linked(p) && !fresh(p, s.Name) && hashDir(realDir(skillDir(s.Name))) != "")) {
+			if ours(p, s.Name) && ((cp && linked(p)) || (!linked(p) && !fresh(p, s.Name) && hashDir(realDir(skillDir(s.Name))) != "")) {
 				if err := copyIn(p, s.Name); err != nil {
 					res.fail(id, "skill:"+s.Name, err)
 				} else {
@@ -491,7 +509,7 @@ func (l *Library) syncSkills(t *Target, res *Result, all []*Target) {
 			}
 		}
 		put := link
-		if t.Copy {
+		if cp {
 			put = copyIn
 		}
 		if err := put(p, s.Name); err != nil {
@@ -757,6 +775,7 @@ func ProbeSkills(input string) (*Probe, error) {
 			p.Candidates[i].Have = l.skill(c.Name) != nil
 		}
 	}
+	noteFrom(p.src, p.root, p.Candidates)
 	return p, nil
 }
 
@@ -1410,6 +1429,9 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 	if err := os.MkdirAll(skillsDir(), 0o755); err != nil {
 		return err
 	}
+	// where it came from is told before it is moved: a copy leaves its
+	// .git behind, and the skills CLI's lock names it where it was
+	from := (&tracer{}).folder(f.real)
 	src := &Source{Kind: "folder", Dir: f.real}
 	// one in the shared ~/.agents/skills (or a link into it) stays
 	// there, linked to: the shared folder is the user's, never emptied
@@ -1449,7 +1471,7 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 	// place (its copy kept aside), as the agents with the folder itself do
 	agents := slices.Concat(f.Agents, f.Copies)
 	slices.Sort(agents)
-	l.Skills = append(l.Skills, &Skill{Name: name, Source: src, Agents: slices.Compact(agents)})
+	l.Skills = append(l.Skills, &Skill{Name: name, Source: src, Agents: slices.Compact(agents), From: from})
 	return nil
 }
 

@@ -12,7 +12,10 @@ the model it is set to. Click a value, pick a model. That is the whole app.
 
 It lives in the menu bar: click the icon and a panel drops down; the same
 screen also opens as a normal window (`magpie`, or *Open magpie* in the tray menu),
-and there is a terminal version (`magpie tui`) and a plain CLI.
+and there is a terminal version (`magpie tui`) and a plain CLI. The
+terminal version serves the gateway while it is open when no other magpie
+(the app, `magpie web`, `magpie serve`) does, and says so on its status
+line; agents connected to magpie lose it when it quits.
 
 ```
   ◉ magpie
@@ -86,11 +89,12 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Goose        | `~/.config/goose/config.yaml`     | model           |
 | Cursor CLI   | `~/.cursor/cli-config.json`       | model           |
 | Zed          | `~/.config/zed/settings.json` (`$XDG_CONFIG_HOME` on Linux, `%APPDATA%\Zed` on Windows) | model (a `magpie` OpenAI-compatible provider; its catalog in Zed's picker) |
-| VS Code (Chat) | `~/Library/Application Support/Code/User/settings.json` + `chatLanguageModels.json` (`~/.config/Code/User` on Linux, `%APPDATA%\Code\User` on Windows) | model (`chat.defaultModel`; a `magpie` Custom Endpoint group, its catalog in Chat's model picker; VS Code 1.122+, no Copilot sign-in or key needed) |
+| VS Code (Chat) | `~/Library/Application Support/Code/User/settings.json` + `chatLanguageModels.json` (`~/.config/Code/User` on Linux, `%APPDATA%\Code\User` on Windows) | model (`chat.defaultModel`; a `magpie` Custom Endpoint group, its catalog in Chat's model picker; VS Code 1.122+, no Copilot sign-in or key needed). Each profile's own pair under `User/profiles/<id>/` (listed in `globalStorage/storage.json`) gets the same, unless the profile uses the default's |
+| VS Code Insiders (Chat) | the same files under `Code - Insiders/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscode-insiders`, since its chat's User-Agent is VS Code's |
 | JetBrains Air | `acp.json` in `~/Library/Application Support/JetBrains/Air` (`~/.config/JetBrains/Air` on Linux, `%APPDATA%\JetBrains\Air` on Windows) + `magpie-opencode.json` beside it | model (a `Magpie` ACP agent: OpenCode's `opencode acp` on magpie's provider alone, its models and routing groups in Air's model menu; needs OpenCode installed) |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
-| DeepSeek Harness (dsh) | `~/.dsh/profiles/*/cordis.patch.yml` (`$DSH_HOME`; a custom provider, Magpie), or `~/.dsh/config.yaml` before dsh 0.1.5 | model, effort |
+| DeepSeek Harness (dsh) | `~/.dsh/profiles/*/cordis.patch.yml` (`$DSH_HOME`; a custom provider, Magpie, its key `MAGPIE_GATEWAY_KEY` in `~/.dsh/.env`; on one of magpie's models its `web-search-deepseek` row also goes to the gateway, which searches with the model or Settings › Web search, unless dsh has a `DEEPSEEK_API_KEY` or a row of your own), or `~/.dsh/config.yaml` before dsh 0.1.5 | model, effort |
 | Command Code | `~/.commandcode/settings.json` (+ `providers.json`) | model |
 | fx           | `~/.fx/settings.json`             | model (a keyless `magpie` provider) |
 | omp (oh-my-pi) | `~/.omp/agent/config.yml` (+ `models.yml`) | model |
@@ -144,6 +148,16 @@ separate Responses endpoint, `catalog=` to borrow a models.dev list, and
 `models=` to name the models to expose. Anything a preset does not know can
 be overridden the same way.
 
+`magpie provider set <id> header.<Name>=<value>` sends a header of your own
+on every request to a key+URL provider (an empty value removes it; signed-in
+accounts ignore them). It replaces a header of the same name magpie would
+send, except `anthropic-beta`, which is a list: your betas are added after
+the ones the agent asked for that request (Claude Code's, its 1M context's
+`context-1m-2025-08-07` for a `[1m]` model, fast mode's), each once. A beta
+the provider turns away (`Unexpected value(s) … for the anthropic-beta
+header`) is dropped from the retry and from then on, yours as well as the
+agent's; any other of yours is always sent.
+
 `magpie usage` also lists **upstream provider keys** to help check upstream bills.
 Each request records the fingerprint and saved name of the key that actually
 served it, including image calls and account/key failover. The CSV adds
@@ -154,6 +168,11 @@ Rotating the provider's first key does not move old usage to its replacement;
 deleted keys keep their historical identity. Older records appear as
 **key not recorded**, never inferred from today's configured key.
 These are upstream credentials, not keys clients use to call Magpie.
+
+The CSV's `cache_write_tokens` is still every cache write; the last two
+columns, `cache_write_5m_tokens` and `cache_write_1h_tokens`, split it by how
+long Anthropic keeps it (a record from before the split is all 5-minute).
+The app shows the split on a request's Cache and the usage tiles' tooltips.
 
 It lists **accounts** too: each Codex, Claude or other subscription account's
 tokens and cost, by the account that actually answered — the one that took
@@ -244,11 +263,14 @@ A gateway key can also be held to some **models** (#882): pick them with the
 **All models** badge on the key's row, or run `magpie gateway-key models <id>
 openai/gpt-5 anthropic/*` (`all` takes the restriction off). A pattern is
 `<provider>/<model>` or `<provider>/*`, matched against the provider that
-serves the call, so a bare model name is resolved first. Such a key sees only
-its models in `/v1/models` and the Anthropic and Gemini lists, a routing group
-only when it may use every member, and is refused any other model with a 403
-in the API's error shape before a provider is asked; a fallback it may not
-use is skipped. A key with no models listed may use every model.
+serves the call, so a bare model name is resolved first, or a routing group,
+`group/<id>` (`group/*` for every group). A key that names a group may use
+the group with every member in it, though not those members asked for by
+name. Such a key sees only its models in `/v1/models` and the Anthropic and
+Gemini lists, a routing group it doesn't name only when it may use every
+member, and is refused any other model with a 403 in the API's error shape
+before a provider is asked; a fallback it may not use is skipped. A key with
+no models listed may use every model.
 
 While LAN sharing is enabled, remote requests require an enabled gateway key
 sent as Bearer, `x-api-key`, `x-goog-api-key` or `?key=`. Loopback remains
@@ -355,6 +377,59 @@ export const LemonPlugin = async () => ({
 In TypeScript, `icon` and `placeholder` aren't in OpenCode's types: build
 the hook as a variable (or cast it), or put the icon in `package.json`.
 
+#### Gateway middleware
+
+A plugin can also be gateway middleware: `onRequest(body, ctx)` sees each
+request an agent sends before it is routed, `onEvent(event, ctx)` each
+event of a streamed reply and `onResponse(body, ctx)` a whole one, all in
+the agent's own API. A hook returns the changed object, or nothing to
+leave it; `onEvent` returns `null` to drop an event, and
+`ctx.reject(status, message)` turns a request away. Declare it with
+`"magpie": { "middleware": "./mw.js" }` in `package.json`, or add a single
+`*.middleware.js` file:
+
+```js
+// alias.middleware.js — magpie plugin add ./alias.middleware.js
+export const events = ["message_start"]
+export function onRequest(body, ctx) {
+  ctx.state.asked = body.model
+  if (body.model === "fast") body.model = "deepseek/deepseek-chat"
+  return body
+}
+export function onEvent(ev, ctx) {
+  ev.message.model = ctx.state.asked // the agent sees the name it asked for
+  return ev
+}
+```
+
+Middleware runs inside the gateway in [moejs](https://github.com/Calcium-Ion/moejs),
+a JavaScript engine written in Go (about a microsecond a streamed event),
+not on Bun: no timers, `fetch` or Node APIs, and imports only of files
+beside it. A hook that throws or takes too long (250 ms a request, 50 ms an
+event) leaves what it was given as it was. Settings → Plugins shows each
+middleware's calls, time and failures. The [plugin guide](https://usemagpie.ai/docs/plugins#middleware)
+has the rest.
+
+`ctx.options` is the middleware's entry's `options` in `plugins.json`: set
+them with its **Options** button in Plugins › Installed, or
+
+```sh
+magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}'
+magpie plugin options model-map off   # clears them
+```
+
+The name can be a package's short name (`model-map` for
+`@magpie-community/middleware-model-map`). A package's
+`"magpie": { "options": {…} }` is the example the editor starts from.
+
+Ready-made middleware, under Plugins › Discover › Gateway middleware
+(`@magpie-community/middleware-<name>`), mostly New API's channel settings
+with the same JSON: `param-override` (`param_override`), `model-map`
+(`model_mapping`), `system-prompt`, `word-guard` (sensitive words) and
+`think-tags` (strip `<think>…</think>`, or `thinking_to_content`). A
+middleware's entry in the community `registry.json` has
+`"kind": "middleware"` and no `providers`.
+
 ### What a model costs
 
 A call is counted at its **effective price**: what you set for that provider
@@ -374,7 +449,39 @@ magpie model prices                                       # every model you pric
 
 The four numbers are USD per million tokens. All four are asked for, because
 a price missing one would understate the rest of every call; `0` is a model
-served at no cost, which is a price, not the absence of one.
+served at no cost, which is a price, not the absence of one. Decimals take a
+point or, in the app's boxes, a comma (`0,25`).
+
+A **fifth number** is a 1-hour cache write's price. Anthropic bills a cache
+write kept for 5 minutes at 1.25× input and one kept for an hour at 2× input,
+and its usage says which were which (`cache_creation.ephemeral_5m_input_tokens`
+/ `ephemeral_1h_input_tokens`, from the API and from Claude Code's
+transcripts). The fourth number is the 5-minute price; the fifth, when not
+given, is 2× input for a Claude model — Anthropic's rule. Any other model has
+no 1-hour price unless you give one: a 1-hour write it reports is counted at
+the 5-minute price, and neither `magpie model price` nor the app's boxes show
+a 1-hour price for it. A call recorded
+before magpie kept the split counts all its writes at the 5-minute price, as
+it did.
+
+A **long-context price** is what the whole request costs once its prompt is
+over a size, as OpenAI bills gpt-6-astra, gpt-6.1-sol and gpt-6-luna over
+272K input (2× input and cache, 1.5× output):
+
+```sh
+magpie model price openai/gpt-6-astra 10,50,1,12.5 --tier 272k 20,75,2,25
+```
+
+The size counts the prompt the way OpenAI does: uncached input + cache reads
++ cache writes, and the tier applies when that is **over** the size (272,000
+is not, 272,001 is). Then every part of the call — input, output, cache — is
+at the tier's price, not only the tokens past the size. `--tier` may be given
+again for another size. The built-in prices carry a tier only where
+models.dev lists one (`cost.tiers` of type `context`), as it does for those
+three. Session and day totals sum many calls, so they are counted at the base
+price; the ledger and each request are counted at the tier they reached. In
+the app, a model's price row has a quiet **Long-context price** row under it,
+shown with the list's tier greyed in, or behind a link where there is none.
 
 The order a price is looked for in is: **the price for this model → the price
 for `<provider id>/*`, which covers every model of that provider → what the
@@ -604,6 +711,9 @@ deployments, set `MAGPIE_PUBLIC_URL=https://magpie.example.com` to the base
 URL shown in the console and CLI, including connection examples. Local
 agent configs still use the local gateway address.
 
+Building an app or agent that should use magpie, or get a row on the
+Agents page: see [Integrating your app or agent](integrating.md).
+
 A reverse proxy must enforce authentication itself, or you must enable
 Settings → Share on local network and use an enabled gateway key
 (Gateway → Gateway keys) for external clients. A public URL with no port of
@@ -700,7 +810,12 @@ model (`opus`, `sonnet`…) removes them and restores whatever was there.
 **Codex** gets a `[model_providers.magpie]` table, `model_catalog_json`
 pointing at `~/.codex/magpie-models.json` (written from the catalog, so the
 models show in Codex's own list) and a valid `model`/`effort`; picking a
-native model removes all of that. Your ChatGPT sign-in is never touched.
+native model or disconnecting removes `model_provider` and the catalog. The
+`[model_providers.magpie]` table stays, so a thread started on magpie can
+still be opened. Codex won't load its config at all when `model_provider =
+"magpie"` has no table ("Model provider `magpie` not found"). If another
+tool leaves that state behind, magpie writes the table back the next time
+it syncs. Your ChatGPT sign-in is never touched.
 Codex reads its model list at start-up, so restart it after a switch.
 
 **OpenCode, Pi, Crush** get a `magpie` provider entry and `magpie/provider/model`.
@@ -872,6 +987,16 @@ key. See [Connecting anything else](#connecting-anything-else) for the
 protocol-specific base URLs. Keep `3425` behind a firewall or VPN and do not
 expose it publicly without gateway-key authentication.
 
+Such a page is in **gateway mode**: it shows Providers, Gateway, Routing,
+Usage, Plugins and Settings, with no Agents, Sessions or Library tab, and
+Settings leaves out what is written into this machine's agents (provider in
+model names, Codex subagents, long conversations, Codex thread titles) and
+the desktop's alerts and tray. `magpie web` is in it by itself when it finds
+no agents on its machine, as in the container, and with
+`magpie web --gateway`. *Settings › General › Gateway mode* picks Automatic,
+On or Off for this machine (it wins over both); Off brings every page back.
+The app's own window is never in gateway mode.
+
 For a bind-mounted configuration directory, the directory must be writable by
 the non-root container user (uid 65532):
 
@@ -933,8 +1058,8 @@ gateway translates.
 ```sh
 magpie                          # open the app: a window plus the menu bar icon
 magpie tray                     # menu bar icon only (use this in your login items)
-magpie tui                      # the same thing, in the terminal
-magpie web                      # the app's window in a browser (WSL, a server over SSH); --lan, --addr, --no-open
+magpie tui                      # the same thing, in the terminal; serves the gateway while open when no other magpie does
+magpie web                      # the app's window in a browser (WSL, a server over SSH); --lan, --addr, --no-open, --gateway
                                 # (a new key each run; MAGPIE_WEB_KEY keeps one, for a page run as a service)
 magpie ls                       # list every agent and its current settings
 magpie claude opus              # set a model (agent names accept prefixes: cc, oc, gem …)

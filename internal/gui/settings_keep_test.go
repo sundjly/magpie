@@ -128,7 +128,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		LANKey:              "sk-lan",
 		LANKeyID:            "lan-key-id",
 		Port:                3591,
-		GitHubToken:        "ghp_kept",
+		GitHubToken:         "ghp_kept",
 		RequestArchive:      true,
 		RequestArchiveMaxMB: 64,
 		QuotaLeft:           true,
@@ -137,6 +137,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		PlainOwnNames:       true,
 		CodexAgentsV1:       true,
 		CodexTitles:         "off",
+		CodexAutoReview:     "fake/m1",
 		ChinaMirror:         true,
 		CodexAutoReset:      []string{"me@example.com"},
 		TextSize:            125,
@@ -144,6 +145,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		UpdateMirror:        "https://mirror.example/",
 		Window:              []int{900, 700},
 		FullContext:         true,
+		GatewayMode:         "off",
 	}
 	if err := settings.Save(was); err != nil {
 		t.Fatal(err)

@@ -52,7 +52,7 @@ type RequestPage struct {
 type packedRow struct {
 	Time                           time.Time
 	Text                           [28]uint32
-	Tokens                         [5]int64
+	Tokens                         [6]int64
 	Millis, TTFT, FirstText, Order int64
 	Sent                           int64
 	RouteID                        int64
@@ -96,7 +96,7 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 		c.Bytes += int64(len(s) + 48)
 		return id
 	}
-	p := packedRow{Time: r.Time, Tokens: [5]int64{int64(r.Input), int64(r.Output), int64(r.CacheRead), int64(r.CacheWrite), int64(r.Reasoning)}, Millis: r.Millis, TTFT: r.TTFT, FirstText: r.FirstText, Sent: r.Sent, Order: order, RouteID: r.RouteID, Cost: r.Cost, Status: int32(r.Status)}
+	p := packedRow{Time: r.Time, Tokens: [6]int64{int64(r.Input), int64(r.Output), int64(r.CacheRead), int64(r.CacheWrite), int64(r.Reasoning), int64(r.CacheWrite1h)}, Millis: r.Millis, TTFT: r.TTFT, FirstText: r.FirstText, Sent: r.Sent, Order: order, RouteID: r.RouteID, Cost: r.Cost, Status: int32(r.Status)}
 	for i, s := range rowText(&r) {
 		p.Text[i] = intern(*s)
 	}
@@ -128,7 +128,7 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 }
 func (c *rowChunk) row(i int) Row {
 	p := &c.Rows[i]
-	r := Row{Record: Record{RouteID: p.RouteID, Time: p.Time, Input: int(p.Tokens[0]), Output: int(p.Tokens[1]), CacheRead: int(p.Tokens[2]), CacheWrite: int(p.Tokens[3]), Reasoning: int(p.Tokens[4]), Millis: p.Millis, TTFT: p.TTFT, FirstText: p.FirstText, Sent: p.Sent, Status: int(p.Status), Rejected: p.Flags&4 != 0, SessionOfficialLogin: p.Flags&8 != 0}, Cost: p.Cost, Priced: p.Flags&1 != 0, Swapped: p.Flags&2 != 0, Routed: p.Flags&32 != 0}
+	r := Row{Record: Record{RouteID: p.RouteID, Time: p.Time, Input: int(p.Tokens[0]), Output: int(p.Tokens[1]), CacheRead: int(p.Tokens[2]), CacheWrite: int(p.Tokens[3]), CacheWrite1h: int(p.Tokens[5]), Reasoning: int(p.Tokens[4]), Millis: p.Millis, TTFT: p.TTFT, FirstText: p.FirstText, Sent: p.Sent, Status: int(p.Status), Rejected: p.Flags&4 != 0, SessionOfficialLogin: p.Flags&8 != 0}, Cost: p.Cost, Priced: p.Flags&1 != 0, Swapped: p.Flags&2 != 0, Routed: p.Flags&32 != 0}
 	for i, s := range rowText(&r) {
 		*s = c.Strings[p.Text[i]]
 	}
@@ -296,7 +296,7 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 		row := Row{Record: r, Source: source, Swapped: r.Served != "" && Swapped(sent, r.Served), Routed: GroupRouted(sent, r.Served)}
 		if pr := price(r); pr != nil && r.Input+r.Output > 0 {
 			row.Priced = true
-			row.Cost = pr.Cost(r.Input, r.Output, r.CacheRead, r.CacheWrite)
+			row.Cost = r.CostAt(*pr)
 		}
 		row.Agent = AgentOf(r.Agent)
 		return row
@@ -346,7 +346,14 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 	on := map[string]bool{}
 	var chunks []*rowChunk
 	var resolver *sessionResolver
-	for _, s := range sources {
+	read := prefetchSources(sources, func(s sessions.CallSource) bool {
+		if !since.IsZero() && s.Modified.Before(since) {
+			return false
+		}
+		c := idx.chunks[s.Path]
+		return c == nil || c.Source.Size != s.Size || !c.Source.Modified.Equal(s.Modified)
+	}, readSource)
+	for i, s := range sources {
 		on[s.Path] = true
 		if !since.IsZero() && s.Modified.Before(since) {
 			continue
@@ -358,7 +365,7 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 			if resolver == nil {
 				resolver = newSessionResolver([]sessions.Call{{}})
 			}
-			cs := readSource(s)
+			cs := read(i)
 			c = &rowChunk{Source: s, Rows: make([]packedRow, 0, len(cs))}
 			for _, call := range cs {
 				r := logRecord(call)
@@ -554,7 +561,7 @@ type matchKey struct {
 // Codex that names cache_write_input_tokens beside a gateway record that
 // didn't, an older Codex that doesn't beside one that does; the sum is the
 // same either way.
-func matchTokens(t [5]int64) [3]int64 { return [3]int64{t[0] + t[3], t[1], t[2]} }
+func matchTokens(t [6]int64) [3]int64 { return [3]int64{t[0] + t[3], t[1], t[2]} }
 
 type matchEnd struct {
 	at    time.Time
@@ -1055,4 +1062,59 @@ func callerGroups(groups map[string]*Group) []Group {
 		return strings.Compare(a.ID, b.ID)
 	})
 	return out
+}
+
+// prefetchSources reads the session files a query has to parse a few at a
+// time, ahead of the loop that takes them in order. The first All after
+// magpie starts parses every one of them, and one by one that was a wait on
+// the disk for each: Requests stayed a skeleton for 40 s over 12k Codex
+// sessions. read(i) gives source i's calls; at most a window of them waits
+// to be taken, so the history is never all held at once. A source that
+// wasn't wanted is read when it is asked for.
+func prefetchSources(sources []sessions.CallSource, want func(sessions.CallSource) bool, readSource func(sessions.CallSource) []sessions.Call) func(int) []sessions.Call {
+	type slot struct {
+		done  chan struct{}
+		calls []sessions.Call
+	}
+	slots := map[int]*slot{}
+	var order []int
+	for i, s := range sources {
+		if want(s) {
+			slots[i] = &slot{done: make(chan struct{})}
+			order = append(order, i)
+		}
+	}
+	if len(order) < 2 {
+		return func(i int) []sessions.Call { return readSource(sources[i]) }
+	}
+	workers := min(8, len(order))
+	window := make(chan struct{}, 4*workers)
+	next := make(chan int)
+	go func() {
+		for _, i := range order {
+			window <- struct{}{}
+			next <- i
+		}
+		close(next)
+	}()
+	for range workers {
+		go func() {
+			for i := range next {
+				s := slots[i]
+				s.calls = readSource(sources[i])
+				close(s.done)
+			}
+		}()
+	}
+	return func(i int) []sessions.Call {
+		s := slots[i]
+		if s == nil {
+			return readSource(sources[i])
+		}
+		<-s.done
+		<-window
+		cs := s.calls
+		s.calls = nil
+		return cs
+	}
 }

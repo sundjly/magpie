@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -174,6 +175,11 @@ type Settings struct {
 	// (gateway.searcher). One that is gone, off or can't search gives way
 	// to magpie's pick.
 	Searcher string `json:"searcher,omitempty"`
+	// SearchFirst is what a model that can't search the web is searched
+	// for with first, when both a provider and a search API can (#928):
+	// SearchFirstAPI for the search APIs, the provider's search after them
+	// when they fail; empty for the provider first, as before.
+	SearchFirst string `json:"searchFirst,omitempty"`
 	// TrayUsages are the subscriptions and plans whose windows are shown
 	// beside the tray icon, in the order shown, each by its provider and
 	// account ("claude|a@b.c"); none when empty.
@@ -198,6 +204,15 @@ type Settings struct {
 	// again when it is opened (#580): less memory, a moment's wait. This
 	// computer's own (KeepOwn).
 	Lightweight bool `json:"lightweight,omitempty"`
+	// KeepAwake keeps this computer from going to sleep by itself while
+	// agents work through the gateway and for a while after (xiao_wang24004
+	// on X; internal/awake). This computer's own (KeepOwn).
+	KeepAwake bool `json:"keepAwake,omitempty"`
+	// GatewayMode is whether `magpie web` shows only what a gateway serving
+	// other machines needs (Player on Discord): "on", "off", or "" to
+	// decide by itself — on for `magpie web --gateway`, or with no agents
+	// on this machine. This computer's own (KeepOwn).
+	GatewayMode string `json:"gatewayMode,omitempty"`
 	// QuotaLeft shows a subscription's windows by how much of each is left,
 	// not used: the Usage page, the tray panel and the menu bar alike.
 	QuotaLeft bool `json:"quotaLeft,omitempty"`
@@ -238,6 +253,14 @@ type Settings struct {
 	// as Codex sends them, "off" answered by magpie with no title and sent
 	// nowhere, or a model's id (provider/model, group/<id>) that writes it.
 	CodexTitles string `json:"codexTitles,omitempty"`
+	// CodexAutoReview is the model Codex's auto-review (approvals_reviewer
+	// = "auto_review": the guardian that decides an approval in the user's
+	// place) runs on (#938): a model's id (provider/model, group/<id>) put
+	// in every entry of the list magpie hands Codex as
+	// auto_review_model_override, which Codex takes before its own
+	// codex-auto-review or the conversation's model at low effort. ""
+	// leaves the list as it was.
+	CodexAutoReview string `json:"codexAutoReview,omitempty"`
 	// FullContext has Codex and Claude Code told a model's whole context
 	// window. Off, a window above WorkingWindow is told as WorkingWindow,
 	// so they compact a long conversation there instead of sending ever
@@ -363,6 +386,13 @@ type ModelPrice struct {
 	Output     *float64 `json:"output,omitempty"`
 	CacheRead  *float64 `json:"cache_read,omitempty"`
 	CacheWrite *float64 `json:"cache_write,omitempty"`
+	// CacheWrite1h is a 1-hour cache write's price, absent where none is
+	// given: such a write is then counted at 2× input for a Claude model,
+	// else at the 5-minute price (catalog.OneHourFor).
+	CacheWrite1h *float64 `json:"cache_write_1h,omitempty"`
+	// Tiers are the prices of a request whose input is over a size, each
+	// whole: "magpie model price … --tier 272k …" (PAMI on Discord).
+	Tiers []catalog.Tier `json:"tiers,omitempty"`
 }
 
 // priceParts are the parts of a price, in the order they are asked for and
@@ -382,10 +412,35 @@ func (m ModelPrice) Price() (catalog.Price, string) {
 			return catalog.Price{}, priceParts[i]
 		}
 	}
-	return catalog.Price{
+	bad := func(v float64) bool { return math.IsNaN(v) || math.IsInf(v, 0) || v < 0 }
+	if m.CacheWrite1h != nil && bad(*m.CacheWrite1h) {
+		return catalog.Price{}, "1-hour cache write"
+	}
+	for i, t := range m.Tiers {
+		if t.Above <= 0 || i > 0 && t.Above <= m.Tiers[i-1].Above ||
+			bad(t.Input) || bad(t.Output) || bad(t.CacheRead) || bad(t.CacheWrite) || bad(t.CacheWrite1h) {
+			return catalog.Price{}, fmt.Sprintf("tier %d", i+1)
+		}
+	}
+	p := catalog.Price{
 		Input: *m.Input, Output: *m.Output,
 		CacheRead: *m.CacheRead, CacheWrite: *m.CacheWrite,
-	}, ""
+		Tiers: slices.Clone(m.Tiers),
+	}
+	if m.CacheWrite1h != nil {
+		p.CacheWrite1h = *m.CacheWrite1h
+	}
+	return p, ""
+}
+
+// StatedPrice is a price as ModelPrices keeps it: every part given, the
+// 1-hour cache write only when it is.
+func StatedPrice(p catalog.Price) ModelPrice {
+	m := ModelPrice{Input: new(p.Input), Output: new(p.Output), CacheRead: new(p.CacheRead), CacheWrite: new(p.CacheWrite), Tiers: slices.Clone(p.Tiers)}
+	if p.CacheWrite1h > 0 {
+		m.CacheWrite1h = new(p.CacheWrite1h)
+	}
+	return m
 }
 
 // CheckModelPrice is whether a price the user gives is one magpie will bill a
@@ -405,7 +460,9 @@ func CheckModelPrice(key string, m ModelPrice) error {
 	} else if err := CheckModelKey("price", key); err != nil {
 		return err
 	}
-	if _, bad := m.Price(); bad != "" {
+	if _, bad := m.Price(); strings.HasPrefix(bad, "tier ") {
+		return fmt.Errorf("the price of %q has a %s that is not over a size above 0 and above the tier before it, with every part finite and not negative", key, bad)
+	} else if bad != "" {
 		return fmt.Errorf("the price of %q needs %s %s price that is present, finite and not negative", key, anArticle(bad), bad)
 	}
 	return nil
@@ -474,6 +531,25 @@ var (
 	// webviews' zoom on Windows and Linux (Wails' SetZoom) goes no lower.
 	TextSizes = []int{100, 110, 125, 150}
 )
+
+// SearchFirst's values: a provider's search first, saved as "", or the
+// search APIs first.
+const (
+	SearchFirstModel = "model"
+	SearchFirstAPI   = "api"
+)
+
+// DefaultTextSize is the text size of settings that have never had one
+// saved. Windows' and Linux's body text is 14px against magpie's 13px at
+// 100%, a size smaller than what is around it there, so they start at
+// 110% (#914); the Mac's is 13px, as magpie's. A size once saved, 100%
+// too, is kept as it is. A var so tests can be any system.
+var DefaultTextSize = func() int {
+	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
+		return 110
+	}
+	return 100
+}
 
 var validTerminalBundleID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$`)
 
@@ -572,12 +648,14 @@ func (s Settings) Compact() int {
 
 // KeepOwn puts back cur's settings that are this computer's own, which a
 // sync or a restored backup never brings from another: the window's size,
-// the proxy, the gateway's port, the Dock, and what the menu bar or tray shows beside magpie's
+// the proxy, the gateway's port, the Dock, gateway mode, and what the menu bar or tray shows beside magpie's
 // icon (yoooo on Discord: usage turned off on a Mac came back from a
 // Windows box that shows it).
 func (s *Settings) KeepOwn(cur Settings) {
 	s.Window, s.Proxy, s.Port, s.Dock, s.DockWindow, s.Lightweight = cur.Window, cur.Proxy, cur.Port, cur.Dock, cur.DockWindow, cur.Lightweight
+	s.KeepAwake = cur.KeepAwake
 	s.TrayUsages, s.TrayUsage, s.TrayUsageEvery, s.TrayNoLogos, s.TrayNoBird = cur.TrayUsages, cur.TrayUsage, cur.TrayUsageEvery, cur.TrayNoLogos, cur.TrayNoBird
+	s.GatewayMode = cur.GatewayMode
 }
 
 // RenamePerModel moves what the user said of a provider's models to the id
@@ -775,7 +853,17 @@ func Save(s Settings) error {
 	if s.CodexTitles != "" && s.CodexTitles != "off" && !strings.Contains(s.CodexTitles, "/") {
 		return fmt.Errorf("the model for Codex's titles must be a model's id such as openai/gpt-5-mini, or off, not %q", s.CodexTitles)
 	}
+	s.CodexAutoReview = strings.TrimSpace(s.CodexAutoReview)
+	if s.CodexAutoReview != "" && !strings.Contains(s.CodexAutoReview, "/") {
+		return fmt.Errorf("the model for Codex's auto-review must be a model's id such as openai/gpt-5-mini, not %q", s.CodexAutoReview)
+	}
 	s.Searcher = strings.TrimSpace(s.Searcher)
+	if s.SearchFirst = strings.TrimSpace(s.SearchFirst); s.SearchFirst == SearchFirstModel {
+		s.SearchFirst = ""
+	}
+	if s.SearchFirst != "" && s.SearchFirst != SearchFirstAPI {
+		return fmt.Errorf("web search must go first to %q or %q, not %q", SearchFirstModel, SearchFirstAPI, s.SearchFirst)
+	}
 	s.ImageGen = strings.TrimSpace(s.ImageGen)
 	if s.ImageGen != "" && s.ImageGen != "off" && !strings.Contains(s.ImageGen, "/") {
 		return fmt.Errorf("the image generation model must be a model's id such as openai/gpt-image-1, or off, not %q", s.ImageGen)
@@ -867,7 +955,7 @@ func (s Settings) normal() Settings {
 		s.UpdateEvery = 360
 	}
 	if s.TextSize == 0 {
-		s.TextSize = 100
+		s.TextSize = DefaultTextSize()
 	}
 	// one card, as a magpie before TrayUsages kept it; an empty list
 	// sent on purpose (all of them turned off) stays empty

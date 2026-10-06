@@ -48,7 +48,13 @@ import (
 // The [model_providers.magpie] table stays once written. A thread keeps the
 // provider it was started on, and one started on magpie can't be opened
 // again without the table ("Model provider `magpie` not found"), whichever
-// way Codex is routed now.
+// way Codex is routed now. Codex looks model_provider up in the tables as
+// it loads config.toml (codex-rs config: "Model provider `{id}` not
+// found"), so `model_provider = "magpie"` without the table keeps it from
+// loading its config at all, a new thread too: magpie never writes the one
+// without the other, takes model_provider out whenever it steps out as the
+// provider (disconnected, unwired, joined beside the sign-in), and Sync
+// writes the table back when something else took it.
 
 // codexStandIn is the model Codex is set to use, when magpie is its
 // provider, for a model it names that magpie doesn't serve. Codex asks for
@@ -107,13 +113,20 @@ func codexIn(at place) *Agent {
 	// joined: connected by Join, on a model of Codex's own (its last pick)
 	// with magpie's beside it, by the base URL
 	joined := func() bool { return viaBase() && stashLoad()[at.key("codex.joined")] == "1" }
+	// beside: set on one of magpie's models beside the ChatGPT sign-in, by
+	// the base URL, Codex's own models in its list too: one of them written
+	// in by Codex (its /model, or a Codex app still running on its old
+	// pick) leaves it connected, its config still on magpie's gateway
+	// (#940: it read as not connected), the change told as drift. One
+	// picked on the Agents page still takes magpie out (set).
+	beside := func() bool { return viaBase() && stashLoad()[at.key("codex.beside")] == "1" }
 	// magpie is in Codex's config: on one of magpie's models, or joined;
 	// or, routed, on the model of the group magpie set it to as Codex
 	// spells it (gpt-6.1-sol for group/auto-gpt-6-1-sol, #750), which the
 	// gateway takes as that group
 	wired := func() bool {
 		m := get("model")
-		return isMagpie(m) || joined() || routed() && setAsGroup(cmp.Or(at.id, "codex"), "model", m)
+		return isMagpie(m) || joined() || beside() || routed() && setAsGroup(cmp.Or(at.id, "codex"), "model", m)
 	}
 	models := func() []catalog.Model {
 		switch {
@@ -162,6 +175,31 @@ func codexIn(at place) *Agent {
 	hasProvider := func() bool {
 		t, err := edit.GetTOMLTable(path, "model_providers."+magpieID)
 		return err == nil && t != nil
+	}
+	// noProvider: the config was read and has no such table; one magpie
+	// can't read is told by Check as it is, and written to by nothing
+	noProvider := func() bool {
+		t, err := edit.GetTOMLTable(path, "model_providers."+magpieID)
+		return err == nil && t == nil
+	}
+	// namesMagpie: the config has Codex on magpie as its provider, at its
+	// top or in a profile. Codex then reads [model_providers.magpie] as it
+	// loads the config, before any thread: without the table it loads no
+	// config at all ("Model provider `magpie` not found"), the app and the
+	// CLI both, whatever the model.
+	namesMagpie := func() bool {
+		if asProvider() {
+			return true
+		}
+		names, _ := edit.TOMLTables(path)
+		for _, n := range names {
+			if strings.HasPrefix(n, "profiles.") {
+				if t, _ := edit.GetTOMLTable(path, n); t["model_provider"] == magpieID {
+					return true
+				}
+			}
+		}
+		return false
 	}
 	// dropProvider takes magpie out as the provider Codex is on; the table
 	// stays for the threads started on it
@@ -285,7 +323,31 @@ func codexIn(at place) *Agent {
 		agents, err := edit.GetTOMLTable(path, "agents")
 		return agents["default_subagent_model"], err
 	}
+	// the model Codex writes its memories with (Yc on Discord): [memories]
+	// extract_model summarises a thread, consolidation_model folds them in
+	// (codex-rs/config/src/types.rs). Unset, Codex takes gpt-5.6-luna and
+	// gpt-5.6-terra, whatever its model; magpie sets both to one pick.
+	memories := func() (string, error) {
+		m, err := edit.GetTOMLTable(path, "memories")
+		return cmp.Or(m["consolidation_model"], m["extract_model"]), err
+	}
+	dropMemories := func() error {
+		for _, k := range []string{"extract_model", "consolidation_model"} {
+			if err := edit.DelTOMLKey(path, "memories", k); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// one of magpie's goes too: Codex could no longer find it
 	dropSubagent := func() error {
+		if m, err := memories(); err != nil {
+			return err
+		} else if isMagpie(m) {
+			if err := dropMemories(); err != nil {
+				return err
+			}
+		}
 		model, err := subagent()
 		if err != nil {
 			return err
@@ -421,7 +483,7 @@ func codexIn(at place) *Agent {
 	// provider, catalog and effort); it answers the model Codex was on
 	// then, for Unwire to go back to
 	unroute := func() (string, error) {
-		forget(at.key("codex.out"), at.key("codex.joined"))
+		forget(at.key("codex.out"), at.key("codex.joined"), at.key("codex.beside"))
 		if err := giveTables(); err != nil {
 			return "", err
 		}
@@ -474,7 +536,7 @@ func codexIn(at place) *Agent {
 				return err
 			}
 			os.Remove(catalogPath)
-			forget(at.key("codex.model"), at.key("codex.effort"), at.key("codex.provider"), at.key("codex.catalog"), at.key("codex.out"), at.key("codex.joined"))
+			forget(at.key("codex.model"), at.key("codex.effort"), at.key("codex.provider"), at.key("codex.catalog"), at.key("codex.out"), at.key("codex.joined"), at.key("codex.beside"))
 			return nil
 		}
 		// magpie API: magpie stays Codex's provider whichever model is the
@@ -522,6 +584,7 @@ func codexIn(at place) *Agent {
 				); err != nil {
 					return err
 				}
+				stash(map[string]string{at.key("codex.beside"): "1"})
 				if err := takeTables(); err != nil {
 					return err
 				}
@@ -532,6 +595,8 @@ func codexIn(at place) *Agent {
 			} else {
 				forget(at.key("codex.out"))
 			}
+			// magpie is its provider now, not beside the sign-in
+			forget(at.key("codex.beside"))
 			if err := putProvider(); err != nil {
 				return err
 			}
@@ -652,8 +717,19 @@ func codexIn(at place) *Agent {
 			return true, settle()
 		},
 		Joined: joined,
+		Beside: beside,
 		Routed: routed,
+		OwnVia: codexOwnViaMagpie,
 		Sync: func() error {
+			// model_provider = "magpie" left with its table gone (taken by
+			// another tool, or a hand edit), which keeps Codex from loading
+			// its config at all, connected to magpie or not (Tystem on
+			// Discord): the table is written back, as it stays once written
+			if namesMagpie() && noProvider() {
+				if err := putProvider(); err != nil {
+					return err
+				}
+			}
 			if err := failover(); err != nil {
 				return err
 			}
@@ -726,6 +802,9 @@ func codexIn(at place) *Agent {
 			return nil
 		},
 		Check: func() string {
+			if namesMagpie() && noProvider() {
+				return "Codex's config names magpie as its model_provider but has no [model_providers.magpie], so Codex can't load its config (\"Model provider `magpie` not found\"): magpie writes it back when it next syncs, or connect Codex again"
+			}
 			if !wired() {
 				return ""
 			}
@@ -860,6 +939,27 @@ func codexIn(at place) *Agent {
 					}
 					return static("low", "medium", "high", "xhigh")
 				},
+			},
+			{
+				// [memories] extract_model and consolidation_model, one
+				// pick for both; Default removes them, for Codex's own
+				Key: "memories", Label: "memories", Quiet: true,
+				Get: func() string { v, _ := memories(); return v },
+				Set: func(v string) error {
+					if v == "" {
+						return dropMemories()
+					}
+					if isMagpie(v) && !routed() {
+						return fmt.Errorf("pick a model through magpie for Codex first; its memories can then be written with one of magpie's")
+					}
+					for _, k := range []string{"extract_model", "consolidation_model"} {
+						if err := edit.SetTOMLKey(path, "memories", k, v); err != nil {
+							return err
+						}
+					}
+					return nil
+				},
+				Options: func(map[string]string) []Option { return modelOptions(routed()) },
 			},
 			{
 				// how Codex takes magpie's models: beside its ChatGPT
@@ -1039,11 +1139,6 @@ func codexOwnOf(id string) string {
 // reach magpie.
 func codexGatewayURL() string { return gateway.URL() + gateway.CodexPath }
 
-// isCodexGateway reports whether an openai_base_url is magpie's, on
-// whichever port it listened on then.
-func isCodexGateway(u string) bool { return isCodexGatewayOn(u, "127.0.0.1") }
-
-// isCodexGatewayOn is isCodexGateway for a gateway reached at host.
 // codexKeptGateway is the gateway's URL for this machine's Codex: the
 // address its config names when that is magpie's gateway on a host other
 // than this one's loopback (openai_base_url at the Codex path, or
@@ -1075,6 +1170,8 @@ func codexKeptGateway(path string) string {
 	return cmp.Or(kept(base, gateway.CodexPath), table, gateway.URL())
 }
 
+// isCodexGatewayOn reports whether an openai_base_url is magpie's gateway
+// reached at host, on whichever port it listened on then.
 func isCodexGatewayOn(u, host string) bool {
 	return strings.HasPrefix(u, "http://"+host+":") && strings.HasSuffix(strings.TrimSuffix(u, "/"), gateway.CodexPath)
 }

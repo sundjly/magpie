@@ -105,7 +105,7 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 				s.codexCompact(w, r, body)
 				return
 			}
-			s.serve(w, r, provider.Responses, body)
+			s.serveAgent(w, r, provider.Responses, body)
 			return
 		}
 		body = boundCallIDs(callItemIDs(body))
@@ -114,7 +114,7 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 		}
 		body, _ = codexInput(body, false)
 		if id, ok := codexAccounts(r.Header, model); ok {
-			s.serve(w, r, provider.Responses, withModel(body, id))
+			s.serveAgent(w, r, provider.Responses, withModel(body, id))
 			return
 		}
 		if r.Header.Get(AccountHeader) != "" {
@@ -791,6 +791,12 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 			if o, ok := m.(map[string]any); ok {
 				codexcat.Stamp(o)
 			}
+		}
+	}
+	// and the auto-review model the user picked (#938)
+	for _, m := range own {
+		if o, ok := m.(map[string]any); ok {
+			codexcat.AutoReview(o)
 		}
 	}
 	ms := provider.CodexListed()

@@ -17,6 +17,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -33,9 +34,34 @@ import (
 // ends with the error, as it used to at once.
 const streamRetries = 2
 
+// emptyRetries is how many times a reply that said nothing (#667) is asked
+// again on the same account before it fails: once while its stream is
+// held, which the request then asks again, or of another account — or the
+// group of its next member — and as often as a cut reply once the client
+// has the stream, when nobody asks again after it.
+func emptyRetries(w http.ResponseWriter, ctx context.Context) int {
+	if h, ok := w.(*holdWriter); ok && h.mayAskAgain() || inGroupTry(ctx) {
+		return 1
+	}
+	return streamRetries
+}
+
 // errStreamCut ends a reply's read once its error event is in hand,
 // without waiting on a vendor that keeps the connection open after it.
 var errStreamCut = errors.New("stream cut mid-reply")
+
+// errEndedShort is an Anthropic stream that ended, its connection closed
+// cleanly, before it said its reply had: the passthrough's word for it.
+var errEndedShort = errors.New("the reply ended before it was complete")
+
+// anthropicEnds says whether an Anthropic stream's event ends the reply:
+// its message_stop (a stop_reason is upstreamStop's), or an error.
+func anthropicEnds(data string) bool {
+	var v struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal([]byte(data), &v) == nil && lastEvent(v.Type)
+}
 
 // groupTryKey marks a try of a routing group's member. A member whose
 // stream breaks with an error mid-reply is failed as it used to be — the
@@ -225,6 +251,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 	var failedStatus int
 	var cut, errSent bool
 	var empty bool // a reply in this protocol that says nothing fails (#667)
+	empties := 0   // the times such a reply was asked again here
 	said, stop := false, ""
 	var kept []Event       // the reply's end, while nothing is said in it
 	var before, this Usage // what the tries before this one billed, and this try
@@ -328,8 +355,11 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					t := &textCallSee{names: names, see: see}
 					attemptSee, held = t.event, t.release
 				}
+				ended := false // the upstream said its reply ended
 				serr = readSSEAlive(rd, func(_, data string) error {
-					u.add(Usage{Upstream: upstreamOf([]byte(data))})
+					st := upstreamStop([]byte(data))
+					u.add(Usage{Upstream: upstreamOf([]byte(data)), Stop: st})
+					ended = ended || st != "" || actual == provider.Anthropic && anthropicEnds(data)
 					if err := dec(data, attemptSee); err != nil {
 						return err
 					}
@@ -342,6 +372,14 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				if errors.Is(serr, errStreamCut) {
 					serr = nil
 				}
+				if serr == nil && failed == "" && !ended && actual == provider.Anthropic && r.Context().Err() == nil {
+					// an Anthropic stream that just stopped — no
+					// stop_reason, no message_stop — is a reply cut
+					// short, not a finished one: a relay's (蓝猫 on
+					// Discord) read as whole ended the agent's turn a
+					// few words in, with nothing to say why
+					serr = errEndedShort
+				}
 			}
 		}
 		if serr == nil && failed == "" {
@@ -349,6 +387,23 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				held()
 			}
 			if empty && !said && answersNothing(stop) {
+				if empties < emptyRetries(w, r.Context()) && r.Context().Err() == nil {
+					// asked again here first, for the agent to have the
+					// answer rather than the error: Gemini on a long
+					// conversation now and then ends with only its
+					// reasoning several times running, and an agent told
+					// the error stops its run (#667, Pi). What reasoning
+					// the client has stays, the next try's follows it.
+					empties++
+					before, this = before.plus(this, false), Usage{}
+					kept, stop = nil, ""
+					enc.keepalive()
+					select {
+					case <-time.After(retryPause << (empties - 1)):
+					case <-r.Context().Done():
+					}
+					continue
+				}
 				// as an error it is asked again, or of another account,
 				// and an agent told it tries again rather than end its
 				// turn (#667); a reply that said nothing has nothing to
@@ -387,6 +442,9 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		// the upstream died mid-reply: say so in the client's own
 		// protocol instead of finishing as if all went well
 		failed = cutMidReply(p.Name, serr)
+		if errors.Is(serr, errEndedShort) {
+			failed = p.Name + ": " + errEndedShort.Error()
+		}
 	}
 	if failed != "" {
 		// the same refusal as the 429's, said inside the reply
