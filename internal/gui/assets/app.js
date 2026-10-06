@@ -240,6 +240,7 @@ function renderAgentsLoading() {
 
 let agentArranging = false, agentRenderPending = false;
 function renderAgents() {
+  renderCodexMemories(); // Settings' row is the same field
   if (agentArranging) { agentRenderPending = true; return; }
   if (unhideCleared()) return; // it renders again with the hiding dropped
   const page = $("#view-agents");
@@ -2696,7 +2697,7 @@ function extraField(a, f) {
   b.append(svg(EXTRA_GLYPH[f.label] || EXTRA_GLYPH.tiers, 13, 1.5));
   const opt = optionFor(f, f.value);
   b.title = f.label === SUB_EFFORT ? subEffortTitle(a, f, opt) : f.menu ? menuTitle(f)
-    : t("{label}: {value}", { label: t(f.label), value: t(opt?.label || f.value || (f.label === MEMORIES ? MEMORIES_DEFAULT : "same as model")) }) + (opt?.note && !FOLLOWS_MODEL.includes(f.label) ? "\n" + t(opt.note) : "");
+    : t("{label}: {value}", { label: f.label === MEMORIES ? t("Codex memories model") : t(f.label), value: t(opt?.label || f.value || (f.label === MEMORIES ? MEMORIES_DEFAULT : "same as model")) }) + (opt?.note && !FOLLOWS_MODEL.includes(f.label) ? "\n" + t(opt.note) : "");
   b.setAttribute("aria-label", b.title);
   b.dataset.key = f.key;
   b.onclick = (ev) => openPicker(a, f, b, ev);
@@ -15964,7 +15965,13 @@ const SESS_WEEK = 20, SESS_WEEK_MAX = 24;
 // wide card and left the rest empty. The weeks before the range come in as
 // empty cells, GitHub's way, up to a year in all, and the cells grow a little
 // to take what is left; a narrow card gets none and its cells shrink.
-const sessCalWidth = new ResizeObserver((es) => { for (const e of es) e.target.fitCal?.(); });
+// It fits on the next frame: a calendar put again changes the card's height,
+// which this would be told of in the same call, a ResizeObserver loop.
+const sessCalWidth = new ResizeObserver((es) => {
+  for (const { target: chart } of es) {
+    if (!chart.fitFrame) chart.fitFrame = requestAnimationFrame(() => { chart.fitFrame = 0; chart.fitCal?.(); });
+  }
+});
 function sessCalFit(chart, days, value, tip) {
   const wrap = chart.querySelector(".sess-cal-wrap"), cal = wrap?.querySelector(".sess-cal");
   if (!cal || !wrap.clientWidth) return;
@@ -17492,6 +17499,7 @@ function renderTrayUsage(s, keep) {
   $("#fullContextSegs").replaceChildren(compactRow);
   renderCodexTitles(s);
   renderCodexAutoReview(s);
+  renderCodexMemories();
   const rate = s.fx?.rate;
   const currencySub = $("#currencySub");
   currencySub.textContent = t("What a cost — the Usage page's, the tray panel's, the TUI's and the CLI's — is shown as; a vendor's own balance, already in its own currency, is never converted");
@@ -17759,6 +17767,31 @@ function renderCodexAutoReview(s) {
     writingPrefs(api("settings/codex-auto-review", { model: id })).then((ns) => { prefs = ns; renderSettings(); }).catch((e) => { status(t(e.message), "err"); renderSettings(); });
   } }, b, ev);
   $("#codexAutoReviewPick").replaceChildren(b);
+}
+
+// renderCodexMemories: the model Codex writes its memories with (#985,
+// Hu9956: the notebook square on Codex's card was all there was, beside the
+// subagent squares, and wasn't found). It is the card's own field, picked
+// in the same picker and written the same way, so the row and the square
+// show one setting; renderAgents draws the row again after every pick.
+// No Codex with a memories field to pick: no row.
+function renderCodexMemories() {
+  const row = $("#codexMemoriesRow");
+  if (!row) return;
+  const a = state.agents.find((x) => x.id === "codex");
+  const f = a?.fields?.find((x) => x.label === MEMORIES);
+  row.hidden = gatewayMode || !f || (!f.options.length && !f.value);
+  if (row.hidden) return;
+  const opt = optionFor(f, f.value);
+  $("#codexMemoriesSub").textContent = f.value ? t("Codex sums threads up and folds them into its memories with this model, whatever model the conversation is on")
+    : t("Codex sums threads up and folds them into its memories with its own models, gpt-5.6-luna and gpt-5.6-terra, whatever model the conversation is on");
+  const b = el("button", "rt-cond on");
+  b.type = "button";
+  b.setAttribute("aria-label", t("Codex memories model"));
+  if (f.value) b.append(icon(opt?.icon || "generic"), el("span", "", opt?.label || f.value));
+  else b.append(icon("openai"), el("span", "", t("Codex’s own pick")));
+  b.onclick = (ev) => openPicker(a, f, b, ev);
+  $("#codexMemoriesPick").replaceChildren(b);
 }
 
 // renderImages: the model that describes images to a model that can't see
