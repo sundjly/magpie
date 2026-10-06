@@ -12283,6 +12283,9 @@ function renderQuotas() {
       // the account's standing say on its resets, held or not (#719)
       const policy = !brief && autoResetRow(sub, "quota-autoreset");
       if (policy) card.append(policy);
+      // and on its credits, when its windows run out
+      const credits = !brief && creditsRow(sub, "quota-credits");
+      if (credits) card.append(credits);
     }
     // in the card's head, beside its name: no line of its own
     // (of the keys in sight: the ones folded away are the foot's button's)
@@ -13406,6 +13409,8 @@ function panelQuotaCard(q) {
   }
   const policy = autoResetRow(q, "pq-autoreset");
   if (policy) card.append(policy);
+  const credits = creditsRow(q, "pq-credits");
+  if (credits) card.append(credits);
   return card;
 }
 
@@ -13533,6 +13538,64 @@ function autoResetButton(q) {
       prefs = await writingPrefs(api("settings/" + q.provider + "-auto-reset", { user: q.user, on: !on }));
       state.settings = prefs;
       status(t(on ? "{who} no longer uses a reset by itself" : "{who} uses a reset by itself when its week runs out, or before one expires", { who: q.user }), "ok");
+      renderQuotas();
+    } catch (err) {
+      b.disabled = false;
+      status(err.message, "err");
+    }
+  };
+  return b;
+}
+
+// Whether a Codex account spends its credits once one of its windows is
+// used up, a standing say of the account's kept by its name (settings'
+// codexNoCredits, the CLI's quota credits): on unless the user turns it
+// off. Off, routing holds the account as used up till the window renews,
+// as a usage cap does at its share. creditsKept: the accounts that can
+// have it.
+function creditsKept(q) {
+  return !!(q.user && q.provider === "codex");
+}
+function creditsOn(q) {
+  return creditsKept(q) && !(state.settings?.codexNoCredits || []).includes(q.user.toLowerCase());
+}
+
+// creditsRow is that say on an account's card, credits held or not, so it
+// can be set ahead: what it does, in words, and the switch.
+function creditsRow(q, cls) {
+  if (!creditsKept(q)) return null;
+  const on = creditsOn(q);
+  const row = el("div", cls + (on ? " on" : ""));
+  const say = el("span", "ar-say");
+  say.append(el("b", "", t("Use credits:")), document.createTextNode(" " + t(on ? "when its windows run out, so a task goes on" : "no — held when a window runs out")));
+  say.title = creditsTitle(on);
+  row.dataset.user = q.user;
+  row.append(say, creditsButton(q));
+  return row;
+}
+function creditsTitle(on) {
+  return t(on ? "On: once one of this account's windows is used up, ChatGPT answers on the account's credits, if it holds any, so a task goes on. Click to turn it off."
+    : "Off: once one of this account's windows is used up, magpie holds it till the window renews, and requests go to your other accounts, groups and fallbacks, so its credits aren't spent. With none of them left, a request is refused with why, unless Auto-use resets is on and its week is used up: then a reset is used first.");
+}
+
+// creditsButton turns that on or off: a switch, its words beside it.
+function creditsButton(q) {
+  const on = creditsOn(q);
+  const b = el("button", "lib-switch use-credits" + (on ? " on" : ""));
+  b.type = "button";
+  b.setAttribute("role", "switch");
+  b.setAttribute("aria-checked", String(on));
+  b.setAttribute("aria-label", t("Use credits"));
+  b.title = creditsTitle(on);
+  b.append(el("i"));
+  b.onclick = async (e) => {
+    e.stopPropagation();
+    if (b.disabled) return;
+    b.disabled = true;
+    try {
+      prefs = await writingPrefs(api("settings/codex-credits", { user: q.user, on: !on }));
+      state.settings = prefs;
+      status(t(on ? "{who} no longer spends its credits: held when a window runs out" : "{who} spends its credits when its windows run out", { who: q.user }), "ok");
       renderQuotas();
     } catch (err) {
       b.disabled = false;
@@ -16918,6 +16981,7 @@ function renderSettings() {
     (v) => savePrefs({ ...keep, codexWarmAt: v }));
   renderWarmAt($("#claudeWarmAtSegs"), $("#claudeWarmAtSub"), s.claudeWarmAt, s.claudeWarmup, t("Sent through Claude Code."),
     (v) => savePrefs({ ...keep, claudeWarmAt: v }));
+  renderWarmAtOwn(s);
   // WorkBuddy's daily check-in pressed for each account, its tab shown
   // while one is signed in
   $("#warmTab-wb").hidden = !s.workbuddy && !s.workbuddyCheckin;
@@ -17660,6 +17724,58 @@ function renderWarmAt(box, sub, at, onReset, via, save) {
     box.append(i);
   }
   box.append(segs([["off", t("Off")], ["on", t("On")]], at ? "on" : "off", (v) => save(v === "on" ? at || "06:00" : "")));
+}
+
+// renderWarmAtOwn gives each ChatGPT account its own row under Daily
+// warm-up (#957, Evan26Ma): two accounts started at one time run out
+// together, one at 06:00 and one at 09:00 take over from one another. An
+// account follows the time above, has its own, or none (settings'
+// codexWarmAtOf, set on its own); the rows show with two accounts or more,
+// or while one has a time of its own.
+function renderWarmAtOwn(s) {
+  const list = $("#codexWarmList");
+  list.querySelectorAll(".warm-own").forEach((r) => r.remove());
+  const own = s.codexWarmAtOf || {};
+  const users = [...(s.codexUsers || [])];
+  for (const u of Object.keys(own)) if (!users.some((x) => x.toLowerCase() === u)) users.push(u);
+  if (users.length < 2 && !Object.keys(own).length) return;
+  const save = async (user, at) => {
+    try {
+      prefs = await writingPrefs(api("settings/codex-warm-at", { user, at }));
+      if (state) state.settings = prefs;
+      renderSettings();
+    } catch (e) {
+      status(t(e.message), "err");
+      renderSettings();
+    }
+  };
+  for (const user of users) {
+    const at = own[user.toLowerCase()];
+    const mode = at === undefined ? "same" : at === "off" ? "off" : "own";
+    const r = el("div", "row pref warm-own");
+    r.dataset.user = user;
+    const who = el("div", "who");
+    const name = el("div", "name", user);
+    name.title = user;
+    const sub = el("div", "sub", mode === "own" ? t("Its own time each day")
+      : mode === "off" ? t("Not started at a time of day")
+      : s.codexWarmAt ? t("Same as above, {at}", { at: s.codexWarmAt }) : t("Same as above, off"));
+    sub.title = t("Give accounts different times and one window starts as another runs out.");
+    who.append(name, sub);
+    const box = el("div", "warm-at");
+    if (mode === "own") {
+      const i = input(at, "06:00", "time");
+      i.className = "at";
+      i.setAttribute("aria-label", t("{who}'s time of day", { who: user }));
+      i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") i.blur(); };
+      i.onchange = () => { if (i.value && i.value !== at) save(user, i.value); };
+      box.append(i);
+    }
+    box.append(segs([["same", t("Same")], ["own", t("Own")], ["off", t("Off")]], mode, (v) =>
+      save(user, v === "same" ? "" : v === "off" ? "off" : s.codexWarmAt || "06:00")));
+    r.append(who, box);
+    list.append(r);
+  }
 }
 
 // renderAlerts draws the usage alerts (#368): a notification when a window
