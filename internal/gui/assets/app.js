@@ -63,13 +63,15 @@ const modelFavorites = new Set(Array.isArray(savedModelFavorites) ? savedModelFa
 const favoriteKey = (o) => o.ref || o.value;
 const isFavorite = (o) => modelFavorites.has(favoriteKey(o)) || modelFavorites.has(o.value);
 
-async function api(path, body) {
+// heads, when given, is shown the answer's headers (loadQuotas' X-Magpie-Reading)
+async function api(path, body, heads) {
   if (web && path === "open") { window.open(body.url, "_blank", "noopener"); return null; }
   const res = await fetch("/api/" + path, {
     method: body === undefined ? "GET" : "POST",
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  heads?.(res.headers);
   if (res.status === 204) return null;
   // a body that isn't JSON (a proxy's or a plain http.Error) is the error
   // itself, not WebKit's "did not match the expected pattern"
@@ -11923,13 +11925,27 @@ async function loadUsage(asked) {
 
 // An asked load is never swallowed by one already on its way that wasn't:
 // it goes after it.
-let quotasLoading = null;
-function loadQuotas(asked) {
+// An answer said to be read while the accounts' usage is being read again
+// (X-Magpie-Reading) can be the stale copy that read replaces: it is asked
+// for again, every 1.5s for half a minute at most, until the new one has
+// landed, so the tray panel, opened, shows what the window does without a
+// refresh by hand (#959). An answer the same as the last isn't drawn again.
+let quotasLoading = null, quotasLater = 0, quotasTries = 0;
+function loadQuotas(asked, again) {
   if (quotasLoading && (!asked || quotasLoading.asked)) return quotasLoading;
+  if (!again) quotasTries = 0;
+  let reading = false, same = false;
   const p = Promise.resolve(quotasLoading).catch(() => {})
-    .then(() => Promise.all([api("usage/quotas" + (asked ? "?asked=1" : "")), api("usage/quotas/history?days=35").catch(() => null)]))
-    .then(([q, h]) => { quotas = q || []; quotasAt = Date.now(); if (h) quotaHist = h; }, () => { quotas = quotas || []; })
-    .finally(() => { if (quotasLoading === p) quotasLoading = null; renderQuotas(); });
+    .then(() => Promise.all([api("usage/quotas" + (asked ? "?asked=1" : ""), undefined, (h) => { reading = h.get("X-Magpie-Reading") === "1"; }), api("usage/quotas/history?days=35").catch(() => null)]))
+    .then(([q, h]) => {
+      same = !!again && !!quotas && JSON.stringify(q || []) === JSON.stringify(quotas) && (!h || JSON.stringify(h) === JSON.stringify(quotaHist));
+      quotas = q || []; quotasAt = Date.now(); if (h) quotaHist = h;
+    }, () => { quotas = quotas || []; reading = false; })
+    .finally(() => {
+      if (quotasLoading === p) quotasLoading = null;
+      if (!same) renderQuotas();
+      if (reading && !quotasLater && ++quotasTries <= 20) quotasLater = setTimeout(() => { quotasLater = 0; loadQuotas(false, true); }, 1500);
+    });
   p.asked = !!asked;
   quotasLoading = p;
   return p;
@@ -12074,7 +12090,10 @@ function renderQuotas() {
       s.title = t("The {n} keys' balances added up", { n: subs.length });
       head.append(s);
     }
-    const folded = keys ? keysFolded(subs) : new Set();
+    // many accounts (Linx on X: twenty-odd on one plugin, 顶成擎天柱):
+    // the same, each still a row of its own
+    const accts = !keys && several && mode !== "panel" && subs.length > ACCTS_FOLD;
+    const folded = keys ? keysFolded(subs) : accts ? acctsFolded(subs) : new Set();
     for (const sub of subs) {
       if (folded.has(sub)) continue;
       // "Every model" by the account, or the card's name: where the click
@@ -12139,6 +12158,7 @@ function renderQuotas() {
     // (of the keys in sight: the ones folded away are the foot's button's)
     if (several) head.append(usageMore(folded.size ? subs.filter((q) => !folded.has(q)) : subs, "text quota-more"));
     if (keys && (folded.size || usageKeysAll.has(first.provider))) card.append(keysMore(first.provider, folded.size));
+    if (accts && (folded.size || usageAcctsAll.has(first.provider))) card.append(acctsMore(first.provider, folded.size));
     subscriptions.append(card);
   }
   restoreFlash();
@@ -12201,6 +12221,36 @@ function keysMore(provider, n) {
   b.onclick = () => {
     if (n) usageKeysAll.add(provider); else usageKeysAll.delete(provider);
     try { localStorage.setItem("magpie.usageKeysAll", JSON.stringify([...usageKeysAll])); } catch {}
+    renderQuotas();
+    backToReader($("#view-usage"));
+  };
+  return b;
+}
+// A card of more than ACCTS_FOLD accounts shows the first ACCTS_SHOWN, any
+// in full and the one carrying a check-in switch, the rest behind "Show N
+// more accounts" at its foot, as a card of keys does; remembered by
+// provider (magpie.usageAcctsAll). The tray panel leaves the ones in brief
+// out already.
+const ACCTS_FOLD = 8, ACCTS_SHOWN = 5;
+let usageAcctsAll = new Set();
+try { usageAcctsAll = new Set(JSON.parse(localStorage.getItem("magpie.usageAcctsAll") || "[]")); } catch {}
+function acctsFolded(subs) {
+  if (usageAcctsAll.has(subs[0].provider)) return new Set();
+  const shown = new Set(subs.slice(0, ACCTS_SHOWN));
+  for (const q of subs) {
+    if (usageAcctOpen(q, subs)) shown.add(q);
+    // the check-in switch is on the first account of each vendor's (checkinRow)
+    if (q.checkins && q === subs.find((x) => x.checkins && (x.checkinBy || "") === (q.checkinBy || ""))) shown.add(q);
+  }
+  return new Set(subs.filter((q) => !shown.has(q)));
+}
+function acctsMore(provider, n) {
+  const b = el("button", "text quota-keys-more quota-accts-more", n ? t(n === 1 ? "Show 1 more account" : "Show {n} more accounts", { n }) : t("Show fewer accounts"));
+  b.type = "button";
+  b.setAttribute("aria-expanded", String(!n));
+  b.onclick = () => {
+    if (n) usageAcctsAll.add(provider); else usageAcctsAll.delete(provider);
+    try { localStorage.setItem("magpie.usageAcctsAll", JSON.stringify([...usageAcctsAll])); } catch {}
     renderQuotas();
     backToReader($("#view-usage"));
   };
@@ -13243,15 +13293,16 @@ function resetsWords(r, q) {
     if (r.until) {
       const at = new Date(r.until);
       w.append(el("span", "resets-until", " · " + t("until {when}", { when: resetClock(at) })));
-      w.title += "\n" + t("The first runs out {when}", { when: at.toLocaleString() });
+      if (!r.each?.length) w.title += "\n" + t("The first runs out {when}", { when: at.toLocaleString() });
     }
+    if (r.each?.length) w.title += "\n" + resetsEach(r);
     return w;
   }
   w.append(el("span", "resets-n", "↺ " + t(r.count === 1 ? "1 reset" : "{n} resets", { n: r.count })));
   if (r.until) {
     const at = new Date(r.until);
     w.append(el("span", "resets-until", " · " + t("until {when}", { when: resetClock(at) })));
-    w.title = t("The first runs out {when}", { when: at.toLocaleString() });
+    w.title = r.each?.length ? resetsEach(r) : t("The first runs out {when}", { when: at.toLocaleString() });
     // whether the one that runs out first is kept from going to waste:
     // with Auto-use on it is used shortly before it does (#624, #719)
     if (q && autoResetKept(q)) {
@@ -13260,8 +13311,20 @@ function resetsWords(r, q) {
       w.title += "\n" + t(on ? "Auto-use is on: the reset that runs out first is used about half an hour before it does, if this account's windows have been used, so what they have left can be used until then and it isn't lost; at once if the account is held up until after then."
         : "Auto-use is off: the reset that runs out first is lost unless it's used by hand before then.");
     }
-  }
+  } else if (r.each?.length) w.title = resetsEach(r);
   return w;
+}
+
+// resetsEach lists every reset left and when it runs out, a line each,
+// soonest first, as the vendor said them (#960: the hover only named the
+// first, which the card already shows).
+function resetsEach(r) {
+  return r.each.map((c, i) => {
+    const when = c.until ? new Date(c.until).toLocaleString() : "";
+    if (c.window === "fiveHour") return when ? t("Five-hour reset runs out {when}", { when }) : t("Five-hour reset never runs out");
+    if (c.window === "weekly") return when ? t("Weekly reset runs out {when}", { when }) : t("Weekly reset never runs out");
+    return when ? t("Reset {n} runs out {when}", { n: i + 1, when }) : t("Reset {n} never runs out", { n: i + 1 });
+  }).join("\n");
 }
 
 // resetUseTitle says which reset a use spends: the one that runs out

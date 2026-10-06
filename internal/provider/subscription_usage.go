@@ -120,6 +120,9 @@ type SubscriptionQuota struct {
 	// In-process read order, separate from the vendor's ReadAt and never
 	// persisted: restarting starts a new sequence.
 	readSeq uint64
+	// glmPlan marks a key's quota read from the GLM Coding Plan endpoint,
+	// including custom providers. Only these can share ZCode's allowance.
+	glmPlan bool
 }
 
 var subscriptionUsageCache struct {
@@ -186,6 +189,17 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 	out := visibleQuotas(c.data)
 	c.Unlock()
 	return withDailyCredits(out, time.Now())
+}
+
+// SubscriptionUsageReading says a read of the accounts' usage is under way:
+// what SubscriptionUsage just gave may be the stale copy it replaces, for a
+// page to ask again once it lands (#959: the panel, opened, kept the old
+// copy until refreshed by hand, while the window's next read had the new).
+func SubscriptionUsageReading() bool {
+	c := &subscriptionUsageCache
+	c.Lock()
+	defer c.Unlock()
+	return c.pending != nil
 }
 
 // visibleQuotas drops accounts removed from magpie since the last refresh.
