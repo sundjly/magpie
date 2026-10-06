@@ -627,9 +627,7 @@ func asideOf(cs []candidate, q provider.Provider, fallback bool, from provider.P
 // restLast moves those resting after a recent failure behind the rest.
 func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	if len(out) == 1 {
-		if r, ok := restOf(out[0].restKey()); ok {
-			pl.order[0].Rest = &r // tried all the same: there is no other
-		} else if r, ok := restOf(out[0].restID()); ok {
+		if r, ok := restingOf(out[0]); ok {
 			pl.order[0].Rest = &r // tried all the same: there is no other
 		}
 		return out, pl
@@ -637,11 +635,7 @@ func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	var ready, resting []candidate
 	var wReady, wResting []Weighed
 	for i, c := range out {
-		r, ok := restOf(c.restKey())
-		if !ok && c.restID() != c.restKey() {
-			r, ok = restOf(c.restID())
-		}
-		if ok {
+		if r, ok := restingOf(c); ok {
 			pl.order[i].Rest = &r
 			resting, wResting = append(resting, c), append(wResting, pl.order[i])
 		} else {
@@ -650,6 +644,22 @@ func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	}
 	pl.order = append(wReady, wResting...)
 	return append(ready, resting...), pl
+}
+
+// restingOf is why c rests, by its own key or else its provider's, while
+// it does. A key resting out of its own windows has them read again as it
+// is planned, behind the request and once a minute at most: an ordered
+// group weighs nothing by them, and a reading that finds them full no
+// more is what brings it back (renewed).
+func restingOf(c candidate) (Rest, bool) {
+	r, ok := restOf(c.restKey())
+	if !ok && c.restID() != c.restKey() {
+		r, ok = restOf(c.restID())
+	}
+	if ok && r.agent == "" && r.user != "" {
+		keyAllowance(c.p)
+	}
+	return r, ok
 }
 
 // spentAfter says whether every candidate in cs rests with its allowance
@@ -947,7 +957,15 @@ type holdWriter struct {
 	// was said — Anthropic's stop_reason "refusal", OpenAI's content_filter
 	// — which another account or model may answer (#248)
 	refused bool
-	whole   bool // a reply that isn't streamed, held whole until release
+	// refusedAfter: the same filter ended a reply that had already begun,
+	// which the scan of a held stream never sees, as the reply goes
+	// through as it comes. A refusal isn't a failure of the account, so
+	// nobody rests for it, whatever its timing (#248)
+	refusedAfter bool
+	// after is what came of the reply once it began, for a refusal in it
+	// to be read event by event
+	after []byte
+	whole bool // a reply that isn't streamed, held whole until release
 
 	// buffered: the vendor said it holds the reply back for safety checks,
 	// which may end in a refusal: held longer (holdBuffered)
@@ -1062,6 +1080,9 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	h.see(b)
 	h.first.see(b)
 	h.heard = time.Now()
+	if h.first.first != 0 || h.passing {
+		h.refusalAfter(b)
+	}
 	if h.passing {
 		h.sent(b)
 		return h.w.Write(b)
@@ -1247,6 +1268,56 @@ func (h *holdWriter) sent(b []byte) {
 	if len(b) > 0 {
 		h.wrote, h.atLine = time.Now(), b[len(b)-1] == '\n'
 	}
+}
+
+// refusalAfter reads the events of a reply that has begun, for the safety
+// filter's refusal in one of them. The reply goes through as it comes, so
+// the scan that reads a stream held for its first content never sees an
+// event that comes after it, and the filter refusing a turn it had begun
+// is no failure of the account, as one it refuses before any of it is said
+// is not (#248). What is read is kept only as far as the event it is in is
+// whole, as a write may end in the middle of one.
+func (h *holdWriter) refusalAfter(b []byte) {
+	if len(h.after) == 0 && !mayRefuse(b) {
+		return // most of a reply's events are content
+	}
+	h.after = append(h.after, b...)
+	for {
+		end := eventEnd(h.after)
+		if end < 0 {
+			break
+		}
+		ev, rest := h.after[:end], h.after[end:]
+		h.after = rest
+		if mayRefuse(ev) {
+			if kind, _, _ := streamEvent(ev); kind == eventRefusal {
+				h.refusedAfter = true
+			}
+		}
+	}
+	if len(h.after) == 0 || len(h.after) > holdMost {
+		h.after = nil
+	}
+}
+
+// mayRefuse is whether an event may be the safety filter's refusal, by the
+// words its shapes carry, before it is read as JSON at all: every event of
+// a reply that has begun goes through this.
+func mayRefuse(ev []byte) bool {
+	for _, w := range refusalSays {
+		if bytes.Contains(ev, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// refusalSays are the words the events a vendor's filter refuses a reply
+// with carry: an error's code, a stop reason's, a finish reason's, a
+// Gemini block reason's.
+var refusalSays = [][]byte{
+	[]byte(`"error"`), []byte(`failed`), []byte(`refusal`), []byte(`filter`),
+	[]byte(`incomplete`), []byte(`finishReason`), []byte(`blockReason`),
 }
 
 // flow lets a held stream through, and what follows it.
