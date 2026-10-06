@@ -131,6 +131,10 @@ type Settings struct {
 	// signed-in MiniMax Code (China) account (its plugin's) once a Beijing
 	// day, claiming the credits it gives (#811).
 	MiniMaxCheckin bool `json:"minimaxCheckin,omitempty"`
+	// QoderCheckin claims Qoder's daily credits for each signed-in Qoder
+	// and Qoder CN account (its plugin's) once a Beijing day (ARNO on
+	// Discord).
+	QoderCheckin bool `json:"qoderCheckin,omitempty"`
 	// MemberModel has a reply's model name the routing group's member
 	// that answered, as magpie's provider/model id (workbuddy/glm-5.3-flash),
 	// rather than the vendor's own name for it, for agents that count
@@ -307,6 +311,11 @@ type Settings struct {
 	// agent id and then entry id, as the user dragged them on the Agents
 	// page (Codex's, #855): the ones named first, any other after them.
 	OrderedModels map[string][]string `json:"orderedModels,omitempty"`
+	// FastPicks are the catalog entries ("<provider>/<model>") an agent's
+	// picks of are sent in their vendor's fast mode, by agent id (#954):
+	// switched by the model in the agent's picker, as a routing group's
+	// member is (Group.Fast), without making a group of it.
+	FastPicks map[string][]string `json:"fastPicks,omitempty"`
 
 	// The three maps below, and every one added beside them, are the
 	// per-model ones: a field named Model* whose type is a map[string]X,

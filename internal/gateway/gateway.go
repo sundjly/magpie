@@ -414,6 +414,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// and the Trae CN accounts (#694), and the MiniMax Code ones (#811)
 	go provider.KeepTraeCheckedIn(ctx)
 	go provider.KeepMiniMaxCheckedIn(ctx)
+	// and the Qoder ones' daily credits
+	go provider.KeepQoderCheckedIn(ctx)
 	// and moves the built-in subscriptions being retired onto their plugins
 	go provider.KeepRetiringMoved(ctx)
 	// and keeps the community's plugins up to date, noting others' updates, and the Bun they run on
@@ -476,6 +478,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/magpie/quotas", s.quotas)
 	mux.HandleFunc("GET /v1/magpie/quotas/history", s.quotasHistory)
+	mux.HandleFunc("GET "+provider.RemoteCardsPath, s.quotaCards)
+	mux.HandleFunc("POST "+provider.RemoteRefreshPath, s.quotaCardsRefresh)
 	mux.HandleFunc("GET /v1/magpie/route", s.sessionRoute)
 	mux.HandleFunc("GET /v1/magpie/concurrency", s.concurrency)
 	mux.HandleFunc("GET /v1/magpie/limit", s.keyLimit)
@@ -545,6 +549,60 @@ func (s *Server) quotasHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	writeJSON(w, 200, map[string]any{"object": "list", "data": provider.QuotaHistories(provider.QuotaHistorySince(q.Get("days"), time.Now()), q.Get("provider"), q.Get("user"))})
+}
+
+// quotaCards is the Usage page's cards as this magpie last read them, for
+// another magpie that has this one as its provider (remote-magpie) to
+// show: its own cache, however old, and no vendor asked for it.
+func (s *Server) quotaCards(w http.ResponseWriter, r *http.Request) {
+	if !local(r) && !sharedWith(r) {
+		writeError(w, provider.Chat, http.StatusForbidden, "magpie's quotas are told to another machine only when magpie is shared on the local network (Settings → Share on local network) and the request carries its API key (Authorization: Bearer <key> or x-api-key: <key>)")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"object": "list", "data": provider.CachedCards(time.Now())})
+}
+
+// remoteRefreshes is when another magpie last had each card read again
+// here: one refreshed by hand is read at most once in remoteRefreshGap,
+// however often it is asked, so the vendor sees no more than this
+// computer's own refresh button would make it.
+var remoteRefreshes = struct {
+	sync.Mutex
+	at map[string]time.Time
+}{at: map[string]time.Time{}}
+
+const remoteRefreshGap = 30 * time.Second
+
+// quotaCardsRefresh is a card's refresh pressed on another magpie: the
+// card (?provider=, &user=) is read again here, or every card when none
+// is named, then the cards are answered as quotaCards answers them.
+func (s *Server) quotaCardsRefresh(w http.ResponseWriter, r *http.Request) {
+	if !local(r) && !sharedWith(r) {
+		writeError(w, provider.Chat, http.StatusForbidden, "magpie's quotas are told to another machine only when magpie is shared on the local network (Settings → Share on local network) and the request carries its API key (Authorization: Bearer <key> or x-api-key: <key>)")
+		return
+	}
+	id, user := r.URL.Query().Get("provider"), r.URL.Query().Get("user")
+	if strings.Contains(id, "/") || provider.IsRemoteCard(id) { // a card this magpie has from another: not passed on
+		writeError(w, provider.Chat, http.StatusBadRequest, "this magpie reads only its own cards again")
+		return
+	}
+	key := id + "|" + strings.ToLower(user)
+	remoteRefreshes.Lock()
+	due := time.Since(remoteRefreshes.at[key]) >= remoteRefreshGap
+	if due {
+		remoteRefreshes.at[key] = time.Now()
+	}
+	remoteRefreshes.Unlock()
+	if due {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		if id == "" {
+			provider.ReadAllCards(ctx)
+		} else {
+			provider.RefreshUsage(ctx, id, user)
+		}
+		cancel()
+	}
+	writeJSON(w, 200, map[string]any{"object": "list", "data": provider.CachedCards(time.Now())})
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -1120,17 +1178,25 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 		}
 	}
+	// the usage row of a request turned away before any provider was asked:
+	// the ledger says it failed and why. The recent-calls entry is the
+	// usual one at the end of serve, so a caller that only wants the row
+	// (a lane refusal, which returns to serve's end) does not call
+	// turnedAway and record twice.
+	logged := func() {
+		rec := usage.Record{Time: start, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Model: call.Model, Requested: call.Model,
+			Millis: call.Millis, Status: call.Status, Rejected: true, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind, Endpoint: endpointOf(r, from, ""), Archive: call.archiveName()}
+		failedWith(&rec, call.Status, call.Error, "")
+		withBodies(&rec, &call)
+		appendUsage(r, rec)
+	}
 	// a request turned away before any provider was asked is in the log
 	// as the failure it was, with the reason
 	turnedAway := func() {
 		finishCapture()
 		call.Millis = time.Since(start).Milliseconds()
 		s.record(call)
-		rec := usage.Record{Time: start, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Model: call.Model, Requested: call.Model,
-			Millis: call.Millis, Status: call.Status, Rejected: true, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind, Endpoint: endpointOf(r, from, ""), Archive: call.archiveName()}
-		failedWith(&rec, call.Status, call.Error, "")
-		withBodies(&rec, &call)
-		appendUsage(r, rec)
+		logged()
 	}
 	// a model's id without a provider in it that names a routing group is
 	// the group's, as "group/<id>" is, rather than one provider's that
@@ -1331,6 +1397,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 	} else {
 		cands, pl = s.plan(p, model, from)
+		if provider.IsFastPick(agent, p.ID+"/"+model) {
+			// the agent's pick of it is sent in its vendor's fast mode
+			// (#954), as a group's member may be; its fallbacks, other
+			// models, go as they are
+			fastPick(cands, pl, p.ID, model)
+		}
 	}
 	if sealedTask {
 		cands, pl = sealedReaders(cands, pl)
@@ -1726,6 +1798,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				w.Header().Set("Retry-After", "1")
 			}
 			failTo(w, kept, from, call.Status, call.Error)
+			// nobody was asked, and the agent is told: the ledger gets
+			// the row, as any other turn-away leaves one, and the usual
+			// entry in Recent calls is the one serve writes at its end
+			call.Millis = time.Since(start).Milliseconds()
+			logged()
 			break
 		}
 		hw.settle()

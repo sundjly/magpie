@@ -117,6 +117,12 @@ type SubscriptionQuota struct {
 	Checkins  bool              `json:"checkins,omitempty"`
 	CheckinBy string            `json:"checkinBy,omitempty"`
 	Checkin   *WorkBuddyCheckin `json:"checkin,omitempty"`
+	// Kind is the card's kind as another magpie is told it (CachedCards):
+	// subscription, plan or balance; "" here.
+	Kind string `json:"kind,omitempty"`
+	// From is the remote magpie a card is that one's (remote_quotas.go),
+	// by its name here; "" for this computer's own.
+	From string `json:"from,omitempty"`
 	// In-process read order, separate from the vendor's ReadAt and never
 	// persisted: restarting starts a new sequence.
 	readSeq uint64
@@ -328,7 +334,7 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		if ls := accountsOf("claude"); len(ls) > 1 || p.Account.standIn {
 			fetches = append(fetches, perLogin(via("claude"), ls, "Claude Code", "claude-color")...)
 		} else {
-			fetches = append(fetches, withUser(ctx, p.Account.User, func() SubscriptionQuota { return claudeSubscriptionUsage(viaLogin("claude", p.Account.User)) }))
+			fetches = append(fetches, withUser(ctx, p.Account.User, func() SubscriptionQuota { return claudeSubscriptionUsage(viaLogin("claude", p.Account.User), p.Account.User) }))
 		}
 	}
 	if user, plan, ok := cursorIdentity(); !moved("cursor") && ok && !hidden["cursor"] {
@@ -485,13 +491,17 @@ type accountStatusError struct {
 
 func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 
-func claudeSubscriptionUsage(ctx context.Context) SubscriptionQuota {
+// claudeSubscriptionUsage is the allowance of user, the account Claude Code
+// is signed in to, by the name magpie gives it (claudeAccount): its
+// readings and what it said answering are kept under that name, which for
+// a Team seat isn't the email alone `claude auth status` gives.
+func claudeSubscriptionUsage(ctx context.Context, user string) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
 	if _, _, ok := claudeCredential(); !ok {
 		q.Error = "Claude Code is signed out; run claude auth login"
 		return q
 	}
-	user, plan, _ := claudeIdentity()
+	_, plan, _ := claudeIdentity()
 	q.Plan = plan
 	var err error
 	q.Windows, err = claudeWindows(ctx, user, true)

@@ -151,6 +151,14 @@ shared helper; a control under what it unrolls (`data-unrolls`) going down
 with it; a click that asks to go somewhere with `scrollOnPurpose(e)`;
 the room kept at the foot going as the reader scrolls back; and the wheel.
 
+`routing-days-fit.test.cjs` checks Routing › Requests' day bar with the 30
+days the gateway keeps (#961): at 1100px, 733px (1100 at 150% text size) and
+440px no pill is cut off at its edge and the days that don't fit are under its
+last pill, whose menu lists each with its count; the oldest picked from it is
+asked for and names the pill, with the bar held where it was; three days need
+no such pill; a window narrowed then widened fits again. Chromium and WebKit,
+in English, Chinese, Japanese and German.
+
 `agent-disconnect-preview.test.cjs` checks the disconnect confirmation's
 file previews fill the body instead of the editor's label column. omp and
 Codex previews, restored values, expanding hidden lines, scrolling, Cancel,
@@ -375,6 +383,11 @@ leaves the list while the user's stays, the hint says only theirs are served,
 and the status line says which agent was moved to the model from one provider;
 clicked on, the found group is back. Neither click moves the page, the switch
 has no left-border accent, and every string has its Chinese.
+
+`group-id-dots.test.cjs` checks that a routing group's id keeps the dots of a
+model's name (#968): a new group named "GPT 6.1 Sol" is said and sent as
+`group/gpt-6.1-sol`, and `groupSlug` folds a run of dots and trims them at the
+ends as `provider.GroupSlug` does, in English and Chinese, Chromium and WebKit.
 
 `group-new-head.test.cjs` checks that a routing group of any models can be
 made from the top of the Routing page, in Chromium and WebKit, English and
@@ -816,6 +829,16 @@ folds them again without moving the page, and is remembered across a
 reload; DeepSeek's keys fold too, four keys aren't folded, a subscription's
 accounts aren't keys, an unread key leaves the sum out, and at 440px nothing
 is cut; in Chromium and WebKit, English and Chinese.
+
+`upstream-status.test.cjs` checks the vendors' status pages on the
+Providers and Usage pages (#971): with Anthropic's page saying its API is
+down, the Anthropic provider's row and the Claude subscription's row and
+usage card carry "API outage" beside the name, its title naming the part and
+the incident; a click opens the incident and not the row; a relay serving
+the same models, OpenAI (its page all well) and Moonshot (its page unread)
+carry nothing, and nothing does once the page is well again; at 440px the
+badge is whole (the name gives way) and nothing spills; in Chromium and
+WebKit, English and Chinese.
 
 `usage-accounts-fold.test.cjs` checks the Usage page's card of a subscription
 with many accounts (Linx on X: twenty-odd on one plugin made a very long

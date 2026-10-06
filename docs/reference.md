@@ -59,7 +59,10 @@ line; agents connected to magpie lose it when it quits.
 - **Real model lists, nothing compiled in.** With a key in hand magpie asks
   the vendor which models it serves and offers exactly those; the
   [models.dev](https://models.dev) catalog fills in names, reasoning efforts
-  and the list for vendors that have none, and refreshes itself in the
+  and the list for vendors that have none (a model the vendor's own entry
+  doesn't list is named as the other providers serving it name it, so
+  glm-5-turbo reads GLM-5-Turbo under Zhipu as under ZCode; an Azure
+  deployment keeps its own name), and refreshes itself in the
   background once it goes stale. Choose which models each provider exposes,
   or expose them all — a model released this morning is in the picker on
   the next refresh.
@@ -91,6 +94,7 @@ line; agents connected to magpie lose it when it quits.
 | Zed          | `~/.config/zed/settings.json` (`$XDG_CONFIG_HOME` on Linux, `%APPDATA%\Zed` on Windows) | model (a `magpie` OpenAI-compatible provider; its catalog in Zed's picker) |
 | VS Code (Chat) | `~/Library/Application Support/Code/User/settings.json` + `chatLanguageModels.json` (`~/.config/Code/User` on Linux, `%APPDATA%\Code\User` on Windows) | model (`chat.defaultModel`; a `magpie` Custom Endpoint group, its catalog in Chat's model picker; VS Code 1.122+, no Copilot sign-in or key needed). Each profile's own pair under `User/profiles/<id>/` (listed in `globalStorage/storage.json`) gets the same, unless the profile uses the default's |
 | VS Code Insiders (Chat) | the same files under `Code - Insiders/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscode-insiders`, since its chat's User-Agent is VS Code's |
+| VSCodium (Chat) | the same files under `VSCodium/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscodium`, so Usage counts them as VSCodium; its Chat features must be turned on (`chat.disableAIFeatures=false`, and `defaultChatAgent` plus `trustedExtensionAuthAccess` for GitHub.copilot-chat in its product.json) |
 | JetBrains Air | `acp.json` in `~/Library/Application Support/JetBrains/Air` (`~/.config/JetBrains/Air` on Linux, `%APPDATA%\JetBrains\Air` on Windows) + `magpie-opencode.json` beside it | model (a `Magpie` ACP agent: OpenCode's `opencode acp` on magpie's provider alone, its models and routing groups in Air's model menu; needs OpenCode installed) |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
@@ -200,6 +204,14 @@ Its list is the models the shared magpie's agents are shown, each named with
 its provider there (`Claude Sonnet 5 · Relay A · office`) — the ids stay ids
 (`office/relay-a/claude-sonnet-5`), only these labels carry the names — and its image
 models are listed under Settings → Images and draw through it.
+Its quotas show too: the Usage page, the menu bar and `magpie quota` list the
+shared magpie's cards named with it (`Codex · office`, id `office/codex`), as
+that magpie last read them — only the computer holding the sign-ins asks the
+vendors, and it answers from what it has kept (`GET /v1/magpie/quotas/cards`).
+A card's refresh here has it read that card once more
+(`POST /v1/magpie/quotas/refresh`, at most once in 30 seconds a card); until it
+has read anything, the remote's one card says so. Their history is shown with
+its own. A Codex reset or a check-in is pressed on that computer, not here.
 
 Codex's native image tool first asks the provider that served its conversation
 turn for the requested image model. If that provider does not list the model,
