@@ -409,7 +409,7 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 					link.Reply = replyDigest
 					t.TitleLink = &link
 				}
-				t.Output, t.TTFT, t.FirstText = out, ttft, text
+				t.Output, t.Reasoning, t.TTFT, t.FirstText = out, uu.Reasoning, ttft, text
 				t.Usage = routeUsage("openai", model, uu)
 				t.Tries[0].Served, t.Tries[0].Swapped = served, swapped(model, served)
 				t.Served, t.Swapped = t.Tries[0].Served, t.Tries[0].Swapped
@@ -962,6 +962,31 @@ func codexInput(body []byte, magpieModel bool) (_ []byte, compact bool) {
 		return body, false
 	}
 	return nb, compact
+}
+
+// bareReasoningRefused is how unfit remembers a provider turning away, for
+// model, reasoning items with nothing sealed in them (withoutBareReasoning).
+func bareReasoningRefused(model string) string { return "bare reasoning\x00" + model }
+
+// refusesInput is a 400 refusing a Responses request over its input: the
+// error's param is the input, as OpenAI's own is for an item it can't find
+// and a relay in front of it passes on with a message of its own ("bad
+// response status code 400", #1044), or the error names an item by id.
+func refusesInput(status int, b []byte) bool {
+	if !badRequest(status) {
+		return false
+	}
+	var e struct {
+		Error struct {
+			Param any `json:"param"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(b, &e) == nil {
+		if p, _ := e.Error.Param.(string); p == "input" || strings.HasPrefix(p, "input[") || strings.HasPrefix(p, "input.") {
+			return true
+		}
+	}
+	return unreadableItem.Match(b)
 }
 
 // withoutBareReasoning is a Responses request without the reasoning items

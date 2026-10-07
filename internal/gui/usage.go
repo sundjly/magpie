@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -115,12 +116,13 @@ func periodOf(s string) usage.Period {
 	return usage.Month
 }
 
-// csvStamp names the selected day, or the period when no day is selected.
-func csvStamp(p usage.Period, day string) string {
+// csvStamp names the selected day, or, when no day is selected, the period
+// and the day of now, the moment its rows were read at.
+func csvStamp(p usage.Period, day string, now time.Time) string {
 	if _, err := time.Parse(time.DateOnly, day); err == nil {
 		return "magpie-requests-day-" + day
 	}
-	return "magpie-requests-" + string(p) + "-" + time.Now().Format(time.DateOnly)
+	return "magpie-requests-" + string(p) + "-" + now.Format(time.DateOnly)
 }
 
 func ledgerFilter(q url.Values) usage.Filter {
@@ -396,23 +398,26 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("GET /api/usage/requests.csv", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		p := periodOf(q.Get("period"))
-		rows, _, _ := usage.Ledger(p, ledgerFilter(q))
+		// one moment for the rows and the day in the file's name
+		now := usage.Clock()
+		rows := usage.LedgerOfAt(p, ledgerFilter(q), now).Rows
 		rw.Header().Set("Content-Type", "text/csv; charset=utf-8")
-		rw.Header().Set("Content-Disposition", `attachment; filename="`+csvStamp(p, q.Get("day"))+`.csv"`)
+		rw.Header().Set("Content-Disposition", `attachment; filename="`+csvStamp(p, q.Get("day"), now)+`.csv"`)
 		usage.WriteCSV(rw, rows)
 	})
 	// the rows the ledger shows, all its pages, as a CSV in Downloads
 	mux.HandleFunc("POST /api/usage/requests/export", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		p := periodOf(q.Get("period"))
-		rows, _, _ := usage.Ledger(p, ledgerFilter(q))
+		now := usage.Clock()
+		rows := usage.LedgerOfAt(p, ledgerFilter(q), now).Rows
 		var b bytes.Buffer
 		if err := usage.WriteCSV(&b, rows); err != nil {
 			fail(rw, err)
 			return
 		}
 		dir := downloads()
-		stamp := csvStamp(p, q.Get("day"))
+		stamp := csvStamp(p, q.Get("day"), now)
 		name := filepath.Join(dir, stamp+".csv")
 		for i := 2; ; i++ { // never over an earlier one
 			if _, err := os.Stat(name); err != nil {
@@ -500,6 +505,21 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 		defer cancel()
 		rs := provider.CheckInQoder(ctx)
+		if rs == nil {
+			rs = []provider.WorkBuddyCheckin{}
+		}
+		writeJSON(rw, rs)
+	})
+	// and a plugin's own, for each account of the provider it names
+	mux.HandleFunc("POST /api/usage/plugin-checkin", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Provider string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Provider == "" {
+			fail(rw, errors.New("no provider"))
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		rs := provider.CheckInPlugins(ctx, in.Provider)
 		if rs == nil {
 			rs = []provider.WorkBuddyCheckin{}
 		}
