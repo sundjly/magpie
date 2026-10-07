@@ -114,6 +114,19 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
+// replaceKeeping is parent.replaceChildren(...nodes) that leaves a node
+// already in parent where it is, rather than taking it out and putting it
+// back. A filter redrawn from its own input event is one: taken out of the
+// page while an IME commits, it gets the text twice (#1055: 1, 2 → 1122).
+function replaceKeeping(parent, nodes) {
+  const keep = new Set(nodes);
+  for (const n of [...parent.childNodes]) if (!keep.has(n)) n.remove();
+  let at = parent.firstChild;
+  for (const n of nodes) {
+    if (n === at) at = at.nextSibling;
+    else parent.insertBefore(n, at);
+  }
+}
 function svg(d, size = 12, stroke = 1.6) {
   const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   s.setAttribute("viewBox", "0 0 16 16");
@@ -10906,14 +10919,9 @@ function balanceError(err) {
   return "";
 }
 
-// balanceFix: under a custom provider's balance token, what its Balance URL
-// wants in place of what is there, with the one click that sets it:
-// new-api's /api/usage/token is asked with the key alone and never with the
-// token (balance.go doesn't send it there), and a token without a URL is
-// asked nowhere; new-api's /api/user/self takes the token, with the user's
-// id in New-Api-User, which is said too while no such header is set. A URL
-// of any other kind (a sub2api panel's) is left alone: a token's shape
-// can't tell the two apart, new-api's own sign-ins being JWTs too.
+// An account token is unused without a Balance URL and can't authenticate
+// /api/usage/token, which takes API keys only. Other URLs may belong to
+// another relay and are left alone; both new-api and sub2api issue JWTs.
 function balanceFix(p) {
   const box = el("div", "bal-fix");
   const origin = (u) => { try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.origin : ""; } catch { return ""; } };
@@ -10926,30 +10934,32 @@ function balanceFix(p) {
     let path = "";
     try { path = new URL(u).pathname.replace(/\/+$/, ""); } catch {}
     let why = "";
-    if (path === "/api/usage/token") why = t("…/api/usage/token takes the API key, not this token: a new-api relay tells the account's balance to the token at /api/user/self.");
-    else if (!u) why = t("The token needs a Balance URL: a new-api relay tells the account's balance to it at /api/user/self.");
+    if (path === "/api/usage/token") why = t("…/api/usage/token takes the API key, not this token: for the account's balance, new-api uses /api/user/self; sub2api uses /api/v1/user/profile.");
+    else if (!u) why = t("The token needs a Balance URL: a new-api relay uses /api/user/self; a sub2api panel uses /api/v1/user/profile to read the account's balance.");
     if (why) {
       box.classList.add("warn");
       box.append(el("span", "", why));
       const site = origin(u) || origin(draft.chat || draft.anthropic || draft.responses || "");
       if (!site) return;
-      const to = site + "/api/user/self";
-      const use = el("button", "text action", t("Use {url}", { url: to }));
-      use.onclick = () => {
-        draft.balanceURL = to;
-        // /api/usage/token's fields aren't in /api/user/self's reply; the
-        // account's quota is, $1 to 500000 of it
-        if (!(draft.balancePath || "").trim() || /total_(available|granted|used)|unlimited_quota/.test(draft.balancePath)) draft.balancePath = "$data.quota / 500000";
-        const ed = box.closest(".editor");
-        const set = (sel, v) => { const i = ed?.querySelector(sel); if (i) i.value = v; };
-        set(".bal-url", draft.balanceURL);
-        set(".bal-path", draft.balancePath);
-        // what changed, in view below
-        const more = ed?.querySelector("details.more");
-        if (more) more.open = true;
-        box.refresh();
-      };
-      box.append(use);
+      for (const path of ["/api/user/self", "/api/v1/user/profile"]) {
+        const to = site + path;
+        const use = el("button", "text action", t("Use {url}", { url: to }));
+        use.onclick = () => {
+          draft.balanceURL = to;
+          // An unrelated expression belongs to the user, so changing the
+          // endpoint must not overwrite it.
+          if (!(draft.balancePath || "").trim() || /total_(available|granted|used)|unlimited_quota/.test(draft.balancePath)) draft.balancePath = balanceFieldOf(to);
+          const ed = box.closest(".editor");
+          const bal = ed?.querySelector(".bal-url");
+          const field = ed?.querySelector(".bal-path");
+          if (bal) bal.value = draft.balanceURL;
+          if (field) { field.value = draft.balancePath; field.placeholder = balanceFieldOf(draft.balanceURL); }
+          const more = ed?.querySelector("details.more");
+          if (more) more.open = true;
+          box.refresh();
+        };
+        box.append(use);
+      }
       return;
     }
     if (path === "/api/user/self" && !(draft.headers || []).some((h) => (h[0] || "").trim().toLowerCase() === "new-api-user" && (h[1] || "").trim())) {
@@ -11755,11 +11765,16 @@ function keyFoldRows(p, fold) {
   q.className = "keys-filter";
   q.dataset.provider = p.id;
   q.setAttribute("aria-label", q.placeholder);
+  // typing redraws the keys list around the filter, which stays in the
+  // page: taken out and put back, an IME's text lands twice (#1055)
   q.oninput = () => {
     keysOpen[p.id].q = q.value;
-    const at = q.selectionStart;
-    renderProviders();
-    focusKeyFilter(p.id, at);
+    const list = q.closest(".accts.keys"), fresh = renderKeyAccounts(p);
+    const fbar = fresh.querySelector(".keys-tools"), fq = fbar?.querySelector(".keys-filter");
+    if (!list || !fq) { renderProviders(); return; }
+    replaceKeeping(bar, [...fbar.childNodes].map((n) => n === fq ? q : n));
+    list.className = fresh.className;
+    replaceKeeping(list, [...fresh.childNodes].map((n) => n === fbar ? bar : n));
   };
   q.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") { if (q.value) q.oninput(q.value = ""); else { delete keysOpen[p.id]; renderProviders(); } } };
   const count = el("span", "hint keys-count", fold.matched.length === all.length ? t("{n} keys", { n: all.length }) : t("{n} of {m} keys", { n: fold.matched.length, m: all.length }));
@@ -11791,11 +11806,8 @@ function keyFoldRows(p, fold) {
   else if (fold.matched.length > fold.shown.length) after.push(el("div", "hint keys-rest", t("{n} more — type to narrow them down", { n: fold.matched.length - fold.shown.length })));
   return { before: [bar], after };
 }
-function focusKeyFilter(id, at) {
-  const q = document.querySelector(`.keys-filter[data-provider="${CSS.escape(id)}"]`);
-  if (!q) return;
-  q.focus({ preventScroll: true });
-  if (at != null) q.setSelectionRange(at, at);
+function focusKeyFilter(id) {
+  document.querySelector(`.keys-filter[data-provider="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
 }
 
 // splitKeys is the keys in text pasted at once, as provider.SplitKeys
@@ -14574,7 +14586,7 @@ function renderUsage() {
 // server pages it (/api/usage/requests) and saves it whole as CSV.
 
 let ledger = null; // the page shown: { rows, offset, total, agents, …totals }
-let ledOffset = 0, ledPurpose = "", ledAgent = "", ledProvider = "", ledAccount = "", ledCallerKey = "", ledFailed = false, ledQuery = "", ledModel = "", ledRoute = 0, ledComputer = "", ledDay = "";
+let ledOffset = 0, ledPurpose = "", ledAgent = "", ledProvider = "", ledAccount = "", ledCallerKey = "", ledFailed = false, ledQuery = "", ledModel = "", ledRoute = 0, ledComputer = "", ledDay = "", ledVia = "";
 
 // computerOpts are the Computer filter's choices: this computer, the others
 // together, and each other one, as sync shares their usage (#542); none
@@ -14596,10 +14608,10 @@ try {
 
 let ledRouteInfo = null, ledBeforeRoute = null;
 window.openUsageRoute = (route) => {
-  if (!ledBeforeRoute) ledBeforeRoute = { period, ledOffset, ledPurpose, ledAgent, ledProvider, ledAccount, ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer, ledDay };
+  if (!ledBeforeRoute) ledBeforeRoute = { period, ledOffset, ledPurpose, ledAgent, ledProvider, ledAccount, ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer, ledDay, ledVia };
   ledRoute = route.id;
   ledRouteInfo = route;
-  ledOffset = 0; ledPurpose = ""; ledAgent = ""; ledProvider = ""; ledAccount = ""; ledCallerKey = ""; ledFailed = false; ledQuery = ""; ledModel = ""; ledComputer = "";
+  ledOffset = 0; ledPurpose = ""; ledAgent = ""; ledProvider = ""; ledAccount = ""; ledCallerKey = ""; ledFailed = false; ledQuery = ""; ledModel = ""; ledComputer = ""; ledVia = "";
   ledDay = "";
   $("#ledQ").value = "";
   period = "all";
@@ -14617,6 +14629,7 @@ function ledParams(extra) {
   if (ledAccount) q.set("account", ledAccount);
   if (ledComputer) q.set("computer", ledComputer);
   if (ledCallerKey) q.set("callerKey", ledCallerKey);
+  if (ledVia) q.set("via", ledVia);
   if (ledRoute) q.set("route", ledRoute);
   if (ledFailed) q.set("failed", "1");
   if (ledModel) q.set("model", ledModel);
@@ -15470,6 +15483,57 @@ function renderLedger() {
     if (l.errors) sum.push(t("{n} failed", { n: l.errors }));
   }
   $("#ledSum").textContent = sum.join(" · ");
+  // the two sources and their total, in the same block of cells as the totals
+  // above them: what magpie carried, what it only read about in the agents'
+  // own session files, and the two together. Each is a filter: picking one
+  // lists only its requests, and the total is the way back. Its own numbers
+  // are counted with the pick cleared (usage.RequestPage), so all three stay
+  // switchable whichever is on.
+  const via = $("#ledVia");
+  const thru = l.through || { calls: 0 }, dir = l.direct || { calls: 0 };
+  if (thru.calls + dir.calls > 0) {
+    // the total is the two sources added up, not the page's own totals: those
+    // are the rows the filter keeps, so with one source picked the total cell
+    // would read that one's figures under the whole period's count
+    const all = {};
+    for (const k of ["calls", "errors", "input", "output", "cache_read", "cache_write", "cost", "timed", "ttft_ms", "decode_ms", "decode_out"]) {
+      all[k] = (thru[k] || 0) + (dir[k] || 0);
+    }
+    const tile = (b, label, calls, tot, pick) => {
+      const on = ledVia === pick;
+      b.className = "blk" + (on ? " on" : "");
+      b.type = "button";
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+      b.title = pick ? t("Show only these requests") : t("Show every request again");
+      const v = el("span", "v", ledNum(calls));
+      // the unit, so a bare number isn't read as the tokens below it
+      v.append(el("em", "", t(calls === 1 ? "request" : "requests")));
+      b.replaceChildren(el("span", "k", t(label)), v,
+        el("span", "sub", t("{n} tokens", { n: fmtN(allTokens(tot)) })));
+      b.onclick = () => {
+        const next = ledVia === pick ? "" : pick;
+        if (next === ledVia) return;
+        ledVia = next;
+        ledOffset = 0;
+        loadLedger().catch((e) => status(e.message, "err"));
+      };
+      return b;
+    };
+    // the three cells are the same elements from one redraw to the next, so
+    // one being pressed or focused is never swapped out from under a reader
+    let cells = [...via.children];
+    if (cells.length !== 3) {
+      cells = [el("button"), el("button"), el("button")];
+      via.replaceChildren(...cells);
+    }
+    tile(cells[0], "all requests", thru.calls + dir.calls, all, "");
+    tile(cells[1], "through magpie", thru.calls, thru, "through");
+    tile(cells[2], "not through magpie", dir.calls, dir, "direct");
+    via.hidden = false;
+  } else {
+    via.replaceChildren();
+    via.hidden = true;
+  }
   const routeFilter = $("#ledRoute");
   routeFilter.hidden = !ledRoute;
   $("#ledRouteLabel").textContent = ledRouteInfo ? t("Request: {what}", { what: new Date(ledRouteInfo.time).toLocaleString(intlLang() || "en") + " · " + ledRouteInfo.model }) : "";
@@ -15477,7 +15541,7 @@ function renderLedger() {
   $("#ledRouteClear").setAttribute("aria-label", t("Clear filter"));
   $("#ledRouteClear").onclick = () => {
     ledRoute = 0; ledRouteInfo = null;
-    if (ledBeforeRoute) ({ period, ledOffset, ledPurpose = "", ledAgent, ledProvider, ledAccount = "", ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer = "", ledDay = "" } = ledBeforeRoute);
+    if (ledBeforeRoute) ({ period, ledOffset, ledPurpose = "", ledAgent, ledProvider, ledAccount = "", ledCallerKey, ledFailed, ledQuery, ledModel, ledComputer = "", ledDay = "", ledVia = "" } = ledBeforeRoute);
     ledBeforeRoute = null;
     $("#ledQ").value = ledQuery;
     loadLedger().catch((e) => status(e.message, "err"));
@@ -15488,7 +15552,7 @@ function renderLedger() {
   const pager = $("#ledPager");
   if (!l.total) {
     wrap.classList.add("none");
-    const filtered = ledPurpose || ledDay || ledRoute || ledAgent || ledProvider || ledAccount || ledComputer || ledCallerKey || ledModel || ledFailed || ledQuery.trim();
+    const filtered = ledPurpose || ledDay || ledRoute || ledAgent || ledProvider || ledAccount || ledComputer || ledCallerKey || ledModel || ledVia || ledFailed || ledQuery.trim();
     const none = { today: "No calls today.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[period];
     wrap.replaceChildren(el("div", "led-none", filtered ? t("No requests match these filters.") : t(none)));
     ledFit();
@@ -15532,7 +15596,14 @@ function renderLedger() {
     td(who, "", [r.kind, r.session && t("session {id}", { id: r.session })].filter(Boolean).join(" · "));
     td(r.req || "—", "model" + (r.req ? "" : " faint"), r.req || t("Not kept for requests before this version"));
     const local = r.source === "log";
-    const where = local ? (r.session_account || t("Local session")) : t(r.providerName) + (r.host ? " · " + r.host : "");
+    // A session file names the provider it was set up to call, which is
+    // where a call that went straight to a vendor went: nothing stood
+    // between the agent and it. It is the file's own record and not a route
+    // magpie saw, so the id the file carries is shown as it is — never
+    // resolved to a provider's name, which would promote an unknown request
+    // to an official provider — and the row keeps saying it is a local
+    // session. A row whose file names none says only that.
+    const where = local ? (r.session_account || r.session_provider || t("Local session")) : t(r.providerName) + (r.host ? " · " + r.host : "");
     const wc = td(el("div", "where-name", where), "where", where);
     const badges = el("div", "source-badges");
     if (local && r.session_account && r.session_official_login) {
@@ -15550,9 +15621,13 @@ function renderLedger() {
     }
     const proto = ledProtoBadge(r);
     if (proto) badges.append(proto);
-    if (local && r.session_account) {
+    // the badge says where the row came from, beside a name that is not
+    // that: a row whose name already says it has nothing to add
+    if (local && (r.session_account || r.session_provider)) {
       const k = el("span", "src local", t("Local session"));
-      k.title = t("Read from the agent's session file. The account is shown only when local metadata identifies it; no service provider is inferred.");
+      k.title = r.session_provider
+        ? t("Read from the agent's session file, which names the provider it was set up to call. The name shown is that record, not a route magpie saw.")
+        : t("Read from the agent's session file. The account is shown only when local metadata identifies it; no service provider is inferred.");
       badges.append(k);
     }
     if (badges.childElementCount) wc.append(badges);
@@ -20278,8 +20353,10 @@ if (mode === "window" && params.get("view") === "usage") {
   ledAgent = params.get("agent") || "";
   ledPurpose = params.get("purpose") || "";
   ledComputer = params.get("computer") || "";
+  const v = params.get("via") || "";
+  ledVia = v === "through" || v === "direct" ? v : "";
   const u = new URL(location.href);
-  for (const k of ["tab", "provider", "agent", "computer", "card", "purpose"]) u.searchParams.delete(k);
+  for (const k of ["tab", "provider", "agent", "computer", "card", "purpose", "via"]) u.searchParams.delete(k);
   history.replaceState(null, "", u);
 }
 if (mode === "window" && ["providers", "gateway", "routing", "usage", "sessions", "library", "plugins", "settings"].includes(params.get("view"))) show(params.get("view"));
