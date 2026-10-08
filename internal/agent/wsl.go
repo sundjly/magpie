@@ -22,6 +22,7 @@ import (
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/wslrun"
 )
 
@@ -391,6 +392,10 @@ var wslKinds = []wslKind{
 		}},
 	{id: "empryo", name: "Empryo", dir: ".empryo", bin: "empryo", in: empryoIn,
 		restart: "reads its config at start-up — restart open empryo sessions to use this."},
+	// Ante ships macOS and Linux builds alone, and suggests WSL on Windows,
+	// so a Windows machine's Ante is usually this one
+	{id: "ante", name: "Ante", dir: ".ante", bin: "ante", in: anteIn,
+		restart: "reads its catalog at start-up — restart open ante sessions to use this."},
 	{id: "muse", name: "Muse Code", dir: ".config/muse", bin: "muse", in: museIn,
 		restart: "reads its settings at start-up — restart open muse sessions to use this."},
 	{id: "qoder", name: "Qoder", dir: ".qoder", bin: "qodercli", in: qoderIn,
@@ -702,7 +707,7 @@ func asleep(live *Agent, k wslKind, d distro) *Agent {
 
 // wslAgents are the agents in this machine's WSL distros; none off Windows.
 func wslAgents() []*Agent {
-	if !wslOn {
+	if !wslLooks() {
 		return nil
 	}
 	return wslAgentsOf(wslDistros())
@@ -725,7 +730,7 @@ func wslAgentsOf(ds []distro) []*Agent {
 // opens it, for internal/sessions to read their sessions in; none off
 // Windows. A stopped distro's is its home as last probed.
 func wslHomes() []sessions.WSLHome {
-	if !wslOn {
+	if !wslLooks() {
 		return nil
 	}
 	var out []sessions.WSLHome
@@ -768,6 +773,10 @@ const (
 
 // wslOn is whether there is WSL to look in: on Windows, or in tests.
 var wslOn = runtime.GOOS == "windows"
+
+// wslLooks is whether magpie looks in WSL on its own: there is WSL, and
+// Settings' Detect agents in WSL is on (#1264).
+func wslLooks() bool { return wslOn && !settings.Load().NoWSLAgents }
 
 // wslRun runs wsl.exe; a var for tests.
 var wslRun = func(timeout time.Duration, args ...string) ([]byte, error) {
@@ -923,7 +932,7 @@ func wslUp(distro string) bool {
 // WSLRunning is whether the WSL distro runs now (wslUp); false off
 // Windows. What another package does in a distro on its own, rather than
 // at the user's asking, asks it first.
-func WSLRunning(distro string) bool { return wslOn && wslUp(distro) }
+func WSLRunning(distro string) bool { return wslLooks() && wslUp(distro) }
 
 // wslSave writes wsl.json if anything in it changed.
 func wslSave() {

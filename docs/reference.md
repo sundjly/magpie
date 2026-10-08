@@ -95,6 +95,7 @@ line; agents connected to magpie lose it when it quits.
 | VS Code (Chat) | `~/Library/Application Support/Code/User/settings.json` + `chatLanguageModels.json` (`~/.config/Code/User` on Linux, `%APPDATA%\Code\User` on Windows) | model (`chat.defaultModel`; a `magpie` Custom Endpoint group, its catalog in Chat's model picker; VS Code 1.122+, no Copilot sign-in or key needed). Each profile's own pair under `User/profiles/<id>/` (listed in `globalStorage/storage.json`) gets the same, unless the profile uses the default's |
 | VS Code Insiders (Chat) | the same files under `Code - Insiders/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscode-insiders`, since its chat's User-Agent is VS Code's |
 | VSCodium (Chat) | the same files under `VSCodium/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscodium`, so Usage counts them as VSCodium; its Chat features must be turned on (`chat.disableAIFeatures=false`, and `defaultChatAgent` plus `trustedExtensionAuthAccess` for GitHub.copilot-chat in its product.json). With the Marketplace's GitHub Copilot Chat 0.48.1, which has no Custom Endpoint provider, the group is written for its OpenAI Compatible provider (`customoai`, the token sent as `x-api-key`), which lists models only while Copilot Chat is signed in to GitHub with a personal Copilot plan |
+| Copilot (JetBrains) | `byok.json` in `~/.config/github-copilot` (`$XDG_CONFIG_HOME/github-copilot` when set, `%USERPROFILE%\AppData\Local\github-copilot` on Windows), the Copilot language server's own file, which Xcode's and Eclipse's Copilot read too | provider (a `magpie` custom endpoint provider beside the user's: every magpie model at the gateway's `/v1/chat/completions`, sent with `magpie-copilot-jetbrains`; a model hidden in Manage Models stays hidden through a sync; off removes magpie's three keys alone). Found by the `github-copilot-intellij` plugin in a JetBrains IDE or Android Studio. Listed after the IDE restarts, and only while Copilot is signed in to GitHub on a plan with Bring Your Own Key (Free, Pro, Pro+; Business and Enterprise when the organisation allows it); the model is picked in Copilot Chat |
 | JetBrains Air | `acp.json` in `~/Library/Application Support/JetBrains/Air` (`~/.config/JetBrains/Air` on Linux, `%APPDATA%\JetBrains\Air` on Windows) + `magpie-opencode.json` beside it | model (a `Magpie` ACP agent: OpenCode's `opencode acp` on magpie's provider alone, its models and routing groups in Air's model menu; needs OpenCode installed) |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
@@ -109,6 +110,7 @@ line; agents connected to magpie lose it when it quits.
 | Kimi Code    | `~/.kimi/config.toml` (`$KIMI_SHARE_DIR`) | model (a `magpie` provider; magpie's models in Kimi's /model) |
 | Muse Code    | `~/.config/muse/settings.json` (`$XDG_CONFIG_HOME`) | model (endpoint_transport to the gateway, auth none; magpie's models in Muse's list) |
 | Empryo       | `~/.empryo/config.json` | defaultModel (a `magpie` provider at the gateway in `providers`) |
+| Ante         | `~/.ante/catalog.json` and `settings.json` (`$ANTE_HOME`) | provider, model (a `magpie` provider on OpenAiCompatible, with no auth of magpie's: the gateway lets this machine in with any token and Ante counts a provider with none as authenticated; magpie's models in Ante's model picker, and Ante started on magpie, which is what its settings' `provider` decides) |
 | MiniMax Code (mcode) | `~/.minimax/config.yaml` (`$MINIMAX_DATA_DIR`) | model (a `magpie` custom provider; magpie's models in its /model) |
 | Droid (Factory) | `~/.factory/settings.json` (`$FACTORY_HOME_OVERRIDE`) | model (magpie's models as BYOK `customModels`, in Droid's /model) |
 | Cline (CLI)  | `~/.cline/data/settings/providers.json` (`$CLINE_DIR`) | model, effort (magpie takes its openai-compatible provider) |
@@ -126,6 +128,72 @@ line; agents connected to magpie lose it when it quits.
 Provider-scoped agents (OpenCode, MiMo Code, Pi, OmO, Aside, Goose, Crush, omp, Hermes Agent) take `provider/model`.
 Only agents that are installed or configured are shown.
 
+### Notes on some agents
+
+#### Reasonix Studio
+
+Reasonix Studio is detected from its desktop installation or a native Go
+`reasonix` 2.x or 1.39.x CLI; historical npm wrappers and a shared config alone
+do not count. Tested with
+[Studio 2.24.0](https://github.com/esengine/DeepSeek-Reasonix/releases/tag/studio-v2.24.0).
+
+Pick the Executor model in the app, or use
+`magpie reasonix magpie/deepseek/deepseek-chat` (`magpie reasonix
+magpie/group/code` for a routing group). Select Plan independently with
+`magpie reasonix planner magpie/deepseek/deepseek-chat`, or use `magpie reasonix
+planner off` to disable the separate planner. `magpie reasonix effort high` sets
+an advertised Executor reasoning level. `magpie reasonix default` restores the
+previous Executor selection; `magpie reasonix planner default` restores Plan.
+Magpie's provider and private `.env` key are removed when neither role needs
+them. Restart Studio for new sessions; project/session overrides still take
+precedence. Other providers and credentials are preserved. A non-managed
+provider named `magpie` is a conflict, reported without overwriting it. Studio
+and the native CLI share these files, so updating only Studio does not isolate
+their settings.
+
+The released-client stream/tool contract test is run with
+`MAGPIE_TEST_REASONIX_CLI=/path/to/reasonix go test ./internal/agent -run
+'^TestReasonixStudioCLIIntegration$' -count=1`. It uses isolated settings and
+a local test upstream, with no vendor credentials.
+
+#### VSCodium Chat
+
+VSCodium's Chat features are disabled by default. To use the Chat model
+picker with magpie, set `"chat.disableAIFeatures": false` in VSCodium's
+settings and add the `defaultChatAgent` and `trustedExtensionAuthAccess`
+entries required by [VSCodium's Copilot guide](https://github.com/VSCodium/vscodium/blob/master/docs/ext-github-copilot.md)
+to VSCodium's `product.json`. The guide also explains how to install a
+compatible GitHub Copilot Chat extension, since the Open VSX registry does
+not normally provide Microsoft's extension. Restart VSCodium, or run
+**Developer: Reload Window**, after changing these files. Magpie's models
+then appear under the `magpie` custom endpoint group.
+
+#### Zed-compatible Agent paths
+
+Magpie can use a Zed-compatible fork or installation whose executable or
+configuration directory is different from the upstream defaults. Set these
+variables before starting Magpie:
+
+```sh
+export MAGPIE_ZED_BIN=/Applications/ZedG.app/Contents/MacOS/zedg
+export MAGPIE_ZED_CONFIG_DIR="$HOME/.config/zed"
+export MAGPIE_ZED_PROCESS_NAMES=zedg,ZedG
+magpie serve
+```
+
+`MAGPIE_ZED_BIN` controls installation detection, `MAGPIE_ZED_CONFIG_DIR`
+selects the directory containing `settings.json`, and
+`MAGPIE_ZED_PROCESS_NAMES` supplies comma-separated process names used for
+restart notices. The existing Zed configuration adapter is reused, so this is
+intended for forks that keep Zed's `settings.json` and Agent model schema, such
+as [ZedG](https://github.com/x6nux/zed-globalization). These variables affect
+the Magpie process in which they are set; put them in the service environment
+when running Magpie under systemd or Docker. They configure a Zed-compatible
+Agent on the same machine as Magpie; they do not discover or modify an Agent
+running on another host. On macOS, if the configured binary does not resolve to
+a `.app` bundle, Magpie falls back to the standard Zed application locations
+when authorizing the gateway credential.
+
 ## Providers and the gateway
 
 Every model an agent can pick is spelled `provider/model` and served by
@@ -140,6 +208,8 @@ magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… model
 magpie providers                        # host, key, exposed models, who uses what
 magpie provider deepseek                # one provider in detail
 magpie provider models deepseek         # re-fetch the vendor's list (add ids to choose which to expose)
+magpie provider models deepseek +deepseek-v4 -deepseek-chat   # expose one more, take one out; the rest stay
+magpie provider models deepseek a b c   # the whole list of models to expose, replacing it (all: the default)
 magpie provider refresh deepseek        # re-fetch it, and drop picks it no longer has (the TUI: m)
 magpie provider test deepseek           # one tiny request per API, with latency
 magpie provider key deepseek sk-…       # replace the key
@@ -307,8 +377,8 @@ openai/gpt-5 anthropic/*` (`all` takes the restriction off). A pattern is
 serves the call, so a bare model name is resolved first, or a routing group,
 `group/<id>` (`group/*` for every group). A key that names a group may use
 the group with every member in it, though not those members asked for by
-name. Such a key sees only its models in `/v1/models` and the Anthropic and
-Gemini lists, a routing group it doesn't name only when it may use every
+name. Such a key sees only its models in `/v1/models`, `/v1/codex/models`
+and the Anthropic and Gemini lists, a routing group it doesn't name only when it may use every
 member, and is refused any other model with a 403 in the API's error shape
 before a provider is asked; a fallback it may not use is skipped. A key with
 no models listed may use every model.
@@ -347,6 +417,35 @@ Sharing listens on every interface, unless `MAGPIE_ADDR` names a host of its
 own: `MAGPIE_ADDR=127.0.0.1:3425` behind Tailscale Serve, or one interface's
 address, stays where it is while shared, and what reaches it from elsewhere
 still needs an enabled gateway key (#1112).
+
+**Codex on another computer** (#1281) can name the shared magpie its model
+provider, with a gateway key, and read magpie's models in Codex's own
+catalog shape from `GET /v1/codex/models`. `/v1/models` is OpenAI's list,
+which Codex can't read, and `/backend-api/codex/models` is the ChatGPT
+backend's, for a Codex signed in to ChatGPT on the gateway's own computer;
+a gateway key gets a 401 there.
+
+```toml
+model_provider = "magpie"
+model = "provider/model"
+
+[model_providers.magpie]
+name = "magpie"
+base_url = "http://192.168.1.20:3425/v1"
+model_catalog_url = "http://192.168.1.20:3425/v1/codex/models"
+env_key = "MAGPIE_API_KEY"   # the gateway key
+wire_api = "responses"
+supports_websockets = false
+```
+
+The list is the models the shared magpie shows Codex (its Agents page
+picks), each as the `model_catalog_json` magpie writes for a Codex on its
+own computer describes it, and only the models the key may use. Codex 0.161
+reads it by default; 0.160 needs `[features] api_key_model_discovery = true`.
+Codex reads at most 1 MiB of a catalog, and every entry carries Codex's
+prompt, so past about 125 models the list keeps the first that fit and the
+answer's `X-Magpie-Left-Out` header says how many it left out: pick fewer
+for Codex, or hold the key to fewer.
 
 A request that reaches loopback through a proxy or tunnel on this computer
 (Cloudflare Tunnel's `cloudflared`, ngrok, Tailscale serve or funnel, frp's
@@ -735,8 +834,11 @@ your choice across reloads.
 Codex title helpers with an explicit parent or fork source join their originating
 chat, retaining their title badge and contributing to its cost. Titles without
 ancestry and ordinary forked chats stay separate.
-Codex chat names come from its local name index and follow renames. Unknown or
-remote-only names fall back to the ID; the full ID remains in the heading tooltip.
+Codex chat names come from its local name index and follow renames. Other
+agents' sessions (Claude Code and the rest the Sessions page reads) take the
+name the Sessions page shows for them, read from their own files on this
+computer. Unknown or remote-only names fall back to the ID; the full ID
+remains in the heading tooltip.
 Expand a session to see each request. Each request and session shows its estimated cost at the effective model
 prices, including cache reads and writes. Session totals cover the listed
 requests only (the live trace or the selected day's retained history), and a
@@ -984,12 +1086,20 @@ It exposes:
 | `/v1/messages/count_tokens` | Anthropic token counting |
 | `/v1beta/models/{model}:generateContent` | Google Gemini (also `:streamGenerateContent`, `:countTokens`) |
 | `/v1/models`, `/v1beta/models` | the catalog            |
+| `/v1/codex/models`       | the catalog as Codex's `model_catalog_url` reads it ([Codex on another computer](#providers-and-the-gateway)) |
 
 Each `/v1/models` entry includes `reasoning` and `supported_reasoning_levels`
-(`[{"effort":"low"}, ...]`). A routing group lists only the levels every
-member supports. `native_endpoints` (`["/v1/messages"]`) names the APIs a
-request for the model is passed straight through on; it is left out of a
-routing group, and of a model every request to which is translated anyway.
+(`[{"effort":"low"}, ...]`). A routing group is marked `reasoning` when any
+member thinks, even where it offers no levels to pick from (a member known
+to take none still leaves the group none); `supported_reasoning_levels`
+lists only the levels every member supports, as before. A member magpie
+knows does not think is sent no reasoning ask when the group routes to it,
+so the effort the group is asked for reaches the members that take it and
+doesn't turn a vendor away as a 400; a member nothing speaks for is sent
+what the agent asked, as before. `native_endpoints`
+(`["/v1/messages"]`) names the APIs a request for the model is passed
+straight through on; it is left out of a routing group, and of a model every
+request to which is translated anyway.
 
 Requests pass straight through when the vendor speaks the agent's API and
 are translated otherwise, streaming, tool calls and reasoning included. The

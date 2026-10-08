@@ -71,8 +71,8 @@ type describeFor struct {
 	session string
 }
 
-func withDescribeFor(ctx context.Context, agent, model, session string) context.Context {
-	return context.WithValue(ctx, describeForKey{}, describeFor{&CallFor{Agent: agent, Model: model}, session})
+func withDescribeFor(ctx context.Context, agent, model, session string, unknown bool) context.Context {
+	return context.WithValue(ctx, describeForKey{}, describeFor{&CallFor{Agent: agent, Model: model, Unknown: unknown}, session})
 }
 
 func describedFor(ctx context.Context) *CallFor {

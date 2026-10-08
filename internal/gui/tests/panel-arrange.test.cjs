@@ -152,8 +152,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await page.evaluate(() => window.__scrolled), 0, "nothing scrolled itself");
 
       // a menu bar cell for the hidden one opens its card all the same
-      await page.evaluate(() => panelQuotaFocus("deepseek"));
-      await page.waitForFunction(() => document.querySelector('#panelQuota .pq-card[data-card="deepseek"]')?.classList.contains("flash"));
+      // Reduced motion makes the flash one frame long, which a poll can miss:
+      // what lit up is recorded as it is lit
+      await page.evaluate(() => {
+        window.__flashed = [];
+        new MutationObserver((ms) => {
+          for (const m of ms) if (m.target.matches?.(".pq-card.flash")) window.__flashed.push(m.target.dataset.card);
+        }).observe(document.querySelector("#panelQuota"), { subtree: true, attributes: true, attributeFilter: ["class"] });
+        panelQuotaFocus("deepseek");
+      });
+      await page.waitForFunction(() => window.__flashed.includes("deepseek") && document.querySelector('#panelQuota .pq-card[data-card="deepseek"]'));
       assert.equal(await page.locator("#panelQuota .pq-foot .pq-hidden").count(), 0, "the one asked for isn't counted as hidden");
       // put away, the panel hides it again
       await page.evaluate(() => {

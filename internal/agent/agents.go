@@ -34,6 +34,7 @@ func init() {
 	// the Sessions page reads the sessions of the agents in WSL distros
 	sessions.WSLHomes = wslHomes
 	sessions.WSLRunning = WSLRunning
+	sessions.WSLOff = func() bool { return !wslLooks() }
 }
 
 // others are clients that reach the gateway without being agents magpie
@@ -83,6 +84,7 @@ func All() []*Agent {
 		vscode(home, cfg),
 		vscodeInsidersAgent(home, cfg),
 		vscodium(home, cfg),
+		copilotJetBrains(home),
 		air(home, cfg),
 		copilot(home),
 		crush(home, cfg),
@@ -97,6 +99,7 @@ func All() []*Agent {
 		kimi(home),
 		muse(cfg),
 		empryo(home),
+		ante(home),
 		miniMax(home),
 		droid(home),
 		cline(home),

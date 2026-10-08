@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -318,6 +319,9 @@ type settingsJSON struct {
 	AddrEnv string `json:"addrEnv,omitempty"`
 	// Dir is the data folder beside a portable magpie (#508)
 	Portable bool `json:"portable,omitempty"`
+	// WSL is whether there is WSL to look in for agents (Windows), for
+	// Settings' Detect agents in WSL (#1264)
+	WSL bool `json:"wsl,omitempty"`
 	// Mac apps that explicitly handle .command files, for resumed sessions.
 	TerminalApps    []terminalChoice `json:"terminalApps,omitempty"`
 	TerminalDefault string           `json:"terminalDefault,omitempty"`
@@ -471,6 +475,7 @@ func searchState(s *settingsJSON) {
 func settingsState() settingsJSON {
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
 	s.AddrEnv = os.Getenv("MAGPIE_ADDR")
+	s.WSL = runtime.GOOS == "windows"
 	s.Web = webPage.Load()
 	s.GatewayOn, s.GatewayWhy = gatewayMode(s.Web)
 	s.LANKey = "" // the retained credential belongs on disk, not in UI state
@@ -1012,6 +1017,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.CodexAgentsV1 = cur.CodexAgentsV1
 		in.FullContext = cur.FullContext // set on its own (full-context below)
 		in.CompactAt = cur.CompactAt     // and so is the threshold
+		// Claude Desktop's list, set in its row on the Agents page
+		in.DesktopLongest = cur.DesktopLongest
 
 		in.CodexTitles = cur.CodexTitles // set on its own (codex-titles below)
 		// and so is the model Codex's auto-review runs on (codex-auto-review)
@@ -1158,6 +1165,22 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		if err := provider.SetCodexAgentsV1(in.On); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
+	// whether Claude Desktop lists a model of 1M or more once, by its 1M id
+	// (settings.DesktopLongest, #1272): it reads the list as it starts
+	mux.HandleFunc("POST /api/settings/desktop-longest", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ On bool }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		s := settings.Load()
+		s.DesktopLongest = in.On
+		if err := settings.Save(s); err != nil {
 			fail(rw, err)
 			return
 		}

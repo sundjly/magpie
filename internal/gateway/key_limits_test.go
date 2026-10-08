@@ -300,6 +300,10 @@ func TestRestingKeyReadAgainInAnOrderedGroup(t *testing.T) {
 	if !ok {
 		t.Fatal("no group")
 	}
+	// its card read first: no reading of the plan's own is out when the
+	// key refuses, whose reading again after it would come before the
+	// limit is raised, and read it unraised
+	provider.KeyBalances(context.Background()) // its card: its week used up
 	s := &Server{}
 	first := func() (string, *Rest) {
 		out, pl := s.planGroup(g, ms, provider.Responses)
@@ -317,7 +321,6 @@ func TestRestingKeyReadAgainInAnOrderedGroup(t *testing.T) {
 	}
 	a := cs[0]
 	t.Cleanup(func() { clearRest(a.restKey()) })
-	provider.KeyBalances(context.Background()) // its card: its week used up
 	quota := []byte(`{"error":{"message":"api key 7天限额已用完","type":"rate_limit_exceeded"}}`)
 	if r := s.restAfter(a, 429, http.Header{}, quota); r.Why != failQuota || r.By != "window" {
 		t.Fatalf("out of its week: rests by %s (%s)", r.By, r.Why)
