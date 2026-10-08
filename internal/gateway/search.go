@@ -60,6 +60,11 @@ type CallFor struct {
 	// The Routing view says which, so a user whose model does see knows
 	// to say so (#1287).
 	Unknown bool `json:"unknown,omitempty"`
+	// Missing, on an image's description, is the Image recognition model
+	// the user picked in Settings that magpie can't find any more: the
+	// model that described is the one magpie picks in its place
+	// (VisionMissing), and the Routing view names both.
+	Missing string `json:"missing,omitempty"`
 }
 
 func searchFor(ctx context.Context) *CallFor {

@@ -48,6 +48,8 @@ const providerUsage = `usage:
   magpie provider queue <id> [length [seconds]]
                                           how many may wait for each account or key past its limit, and how long;
                                           past either a request is turned away with a 429 (0: no bound)
+  magpie provider rpm <id> [n|off]        how many requests each account or key sends the vendor in any minute;
+                                          one more waits for room, up to 2 minutes, then is turned away with a 429
   magpie provider listed <id> yes|no      no: its models serve only through routing groups, not in the list
   magpie provider off|on <id>             switch it off (kept, but no agent or request uses it), or on again
   magpie provider test <id> [model…]      send a tiny request through each endpoint, or to each model
@@ -480,6 +482,8 @@ func providerCmd(args []string) error {
 		return accountConcurrencyCmd(rest)
 	case "queue":
 		return queueCmd(rest)
+	case "rpm":
+		return rpmCmd(rest)
 	case "listed":
 		// no: the provider's models leave the list agents see and serve
 		// only through the routing groups they are in
@@ -1270,6 +1274,41 @@ func queueCmd(rest []string) error {
 		wait = fmt.Sprintf("%ds", p.QueueWait)
 	}
 	fmt.Printf("%s · queue for each account or key: %s waiting, each for %s\n", p.Name, length, wait)
+	return nil
+}
+
+// rpmCmd shows, or sets, how many requests each of a provider's accounts
+// or keys sends the vendor in any minute (coeo91 on Discord: OpenRouter's
+// free models take 20).
+func rpmCmd(rest []string) error {
+	if len(rest) < 1 || len(rest) > 2 {
+		return fmt.Errorf("magpie provider rpm <id> [n|off]")
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	if len(rest) > 1 {
+		n := 0
+		switch s := strings.ToLower(strings.TrimSpace(rest[1])); s {
+		case "off", "none", "no", "-":
+		default:
+			if n, err = strconv.Atoi(s); err != nil {
+				return fmt.Errorf("requests a minute is a whole number, or off, not %q", rest[1])
+			}
+		}
+		if err := provider.SetRPM(p.ID, n); err != nil {
+			return err
+		}
+		if p, err = provider.Find(p.ID); err != nil {
+			return err
+		}
+	}
+	if n := p.RPMLimit(); n > 0 {
+		fmt.Printf("%s · each account or key: at most %d requests a minute\n", p.Name, n)
+	} else {
+		fmt.Printf("%s · each account or key: no limit on requests a minute\n", p.Name)
+	}
 	return nil
 }
 

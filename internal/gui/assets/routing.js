@@ -257,14 +257,16 @@
   // the reasoning was written before the stream showed any, OpenAI's
   // encrypted and its summary sent when done, and counting it read
   // gpt-6.1-sol at 163 tok/s. The reply's reasoning is its served try's.
-  function decodeOf(r, ms, ttft, firstText) {
+  // The window is no longer than its content took to come (flow): a reply
+  // held back and sent in one burst tells no speed (John on Discord).
+  function decodeOf(r, ms, ttft, firstText, flow = r.flow) {
     const think = reasoningOf(r), n = think > 0 ? r.out - think : r.out, from = think > 0 ? firstText : ttft;
-    const w = ms - from;
+    const w = flow > 0 ? Math.min(ms - from, flow) : ms - from;
     return n > 0 && ttft > 0 && from > 0 && w >= 100 && n * 1000 <= 10000 * w ? { n, w } : null;
   }
   const reasoningOf = (r) => r.reasoning ?? (r.usage?.length ? r.usage[r.usage.length - 1].reasoning || 0 : 0);
-  const speedOf = (r, ms = r.ms, ttft = r.ttft, firstText = r.firstText) => {
-    const d = decodeOf(r, ms, ttft, firstText);
+  const speedOf = (r, ms = r.ms, ttft = r.ttft, firstText = r.firstText, flow = r.flow) => {
+    const d = decodeOf(r, ms, ttft, firstText, flow);
     return d ? d.n / (d.w / 1000) : 0;
   };
   function promptOf(r) {
@@ -326,7 +328,7 @@
   function firstNote(r, tr) {
     let s = tr.ttft ? " · " + t("first token in {ms}", { ms: took(tr.ttft) }) : "";
     if (tr.ttft && tr.firstText > tr.ttft) s += " · " + t("first text in {ms}", { ms: took(tr.firstText) });
-    const v = speedOf(r, tr.ms, tr.ttft, tr.firstText);
+    const v = speedOf(r, tr.ms, tr.ttft, tr.firstText, tr.flow);
     if (v) s += " · " + t("{n} tok/s", { n: Math.round(v) });
     const { prompt, read } = promptOf(r);
     if (prompt) s += " · " + t("request cache hit rate {p}", { p: pct(100 * read / prompt) });
@@ -1501,6 +1503,9 @@
     // why the model was counted as unable to see, and where the user says
     // otherwise or picks the describer (#1287: a DeepSeek model's images
     // went to Codex's GPT, and nothing said why or where to change it)
+    // the Image recognition model the user picked is missing: the one
+    // magpie picks described in its place, and the row says so
+    if (r.kind === "vision" && r.for?.missing) return t("{picked}, the Image recognition model picked in Settings, isn't set up any more, so magpie had {describer}, its automatic choice, describe an image for {agent}'s {model} in its place. Pick another in Settings › Models › Image recognition. Not a turn of the conversation.", { picked: r.for.missing, agent: agentName(r.for.agent), model: r.for.model, describer: r.model });
     if (r.kind === "vision" && r.for?.unknown) return t("magpie had {describer} describe an image for {agent}'s {model}: nothing magpie knows says {model} can see images, so it is counted as text-only and given the description in the image's place. If it does see them, tick “Accepts images” for it in its provider's models. Settings › Models › Image recognition picks the model that describes. Not a turn of the conversation.", { agent: agentName(r.for.agent), model: r.for.model, describer: r.model });
     if (r.kind === "vision") return r.for
       ? t("magpie had {describer} describe an image for {agent}'s {model}, which its provider's list or its own setting says takes text only: {model} is given the description in the image's place. Settings › Models › Image recognition picks the model that describes. Not a turn of the conversation.", { agent: agentName(r.for.agent), model: r.for.model, describer: r.model })
@@ -2645,8 +2650,12 @@
   }
   const slug = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   let groups = null, gEdit = null; // gEdit: { id: "" for a new one, draft }
-  async function loadGroups() {
-    try { groups = await api("groups"); } catch { return; }
+  // quiet: the window focused again; the same groups aren't drawn again
+  async function loadGroups(quiet) {
+    let next;
+    try { next = await api("groups"); } catch { return; }
+    if (quiet === true && groups && JSON.stringify(next) === JSON.stringify(groups)) return;
+    groups = next;
     if (!gEdit && !gsec.contains(document.activeElement)) renderGroups(); // not under someone's hands
   }
   const groupDirty = () => !!gEdit && gEdit.was !== undefined &&
@@ -3843,7 +3852,7 @@
   }
   // loaded when the view is shown, and again when the window comes back
   new MutationObserver(() => { if (!$("#view-routing").hidden) loadGroups(); }).observe($("#view-routing"), { attributes: true, attributeFilter: ["hidden"] });
-  window.addEventListener("focus", () => { if (shown()) loadGroups(); });
+  window.addEventListener("focus", () => { if (shown()) loadGroups(true); });
   // newGroupWith: a new group's editor, opened with the model in it — a
   // model of a provider kept for routing groups that no group has, which
   // agents can reach no other way. The picker and the provider's editor

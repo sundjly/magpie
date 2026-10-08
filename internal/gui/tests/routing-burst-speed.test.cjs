@@ -17,11 +17,14 @@ const at = (i) => new Date(now.getTime() - (i + 1) * 60e3).toISOString();
 const key = { id: "antigravity", provider: "antigravity", name: "Antigravity", kind: "provider", model: "gemini-3.8-flash" };
 // newest first: the report's burst, a 500 ms burst, then ordinary replies
 // (100 tok/s and 50 tok/s; a few rows, so the stage above holds still)
-const timing = [[8264, 24360, 24359], [8264, 1500, 1000], [1200, 15000, 3000], [100, 3000, 1000], [100, 3000, 1000], [100, 3000, 1000]];
-const routes = timing.map(([out, ms, ttft], i) => ({
+// and last, a reply whose first words came at 5.1 s and the rest held back
+// and sent at once (John on Discord: Kimi Code, 1,367 tok/s): its flow says
+// its content took 2 ms to come
+const timing = [[8264, 24360, 24359], [8264, 1500, 1000], [1200, 15000, 3000], [100, 3000, 1000], [100, 3000, 1000], [100, 3000, 1000], [2187, 6700, 5100, 2]];
+const routes = timing.map(([out, ms, ttft, flow], i) => ({
   id: 100 - i, seq: 100 - i, time: at(i), agent: "codex", model: "antigravity/gemini-3.8-flash", provider: "antigravity",
-  order: [key], tries: [{ id: key.id, model: key.model, start: at(i), done: true, status: 200, ms, ttft }],
-  done: true, status: 200, ms, ttft, tokens: out + 4087, out,
+  order: [key], tries: [{ id: key.id, model: key.model, start: at(i), done: true, status: 200, ms, ttft, flow }],
+  done: true, status: 200, ms, ttft, flow, tokens: out + 4087, out,
 }));
 
 function serve(lang) {
@@ -97,6 +100,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // ordinary replies keep theirs
       assert.match(await story(2), want[lang].normal);
       assert.match(await story(3), want[lang].slow);
+      // a burst after its first words: no speed, not 1,367 tok/s
+      const held = await story(timing.length - 1);
+      assert.doesNotMatch(held, want[lang].speed);
+      assert.doesNotMatch(held, /1367|1,367/);
       assert.deepEqual(errors, []);
     });
   }

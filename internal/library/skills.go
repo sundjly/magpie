@@ -1645,6 +1645,71 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 	return nil
 }
 
+// RemoveFoundSkill takes a skill the agents have of their own out of every
+// agent that has it (#1303), without bringing it into the library first:
+// each agent's folder, and its copies of the very same files, go to the
+// backups; its links are taken away. Its entry in the shared
+// ~/.agents/skills, or a folder of it left in the library's own, goes to
+// the backups too, as agents read those. A folder elsewhere that the
+// agents only linked to is left where it is, and so is another skill by
+// that name (Others): that is another skill.
+func RemoveFoundSkill(name string) (*Result, error) {
+	return change(func(l *Library) error {
+		found := foundSkills(l)
+		i := slices.IndexFunc(found, func(f FoundSkill) bool { return f.Name == name })
+		if i < 0 {
+			return fmt.Errorf("no agent has a skill called %s that the library hasn't", name)
+		}
+		f := found[i]
+		type entry struct{ who, p string }
+		var es []entry
+		for _, id := range slices.Concat(f.Agents, f.Copies) {
+			if t := targetByID(id); t != nil && t.Skills != "" {
+				es = append(es, entry{id, filepath.Join(t.Skills, name)})
+			}
+		}
+		if f.Shared != "" {
+			es = append(es, entry{"agents", f.Shared})
+		}
+		if f.Library != "" {
+			es = append(es, entry{"library", f.Library})
+		}
+		// links first, so none is left pointing at a folder already set
+		// aside; an agent reading the very same folder as another has its
+		// entry gone already
+		slices.SortStableFunc(es, func(a, b entry) int {
+			la, lb := linked(a.p), linked(b.p)
+			switch {
+			case la == lb:
+				return 0
+			case la:
+				return -1
+			}
+			return 1
+		})
+		seen := map[string]bool{}
+		for _, e := range es {
+			if seen[e.p] {
+				continue
+			}
+			seen[e.p] = true
+			if _, err := os.Lstat(e.p); errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if linked(e.p) {
+				if err := os.Remove(e.p); err != nil {
+					return err
+				}
+				continue
+			}
+			if _, err := setAside(e.who, e.p); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // ---- files ----------------------------------------------------------------
 
 func copyDir(from, to string) error {

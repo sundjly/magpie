@@ -82,7 +82,14 @@ type Record struct {
 	// the tries that failed first are before it, and TTFT-Sent is how
 	// long the vendor took to its first content. 0 where it isn't known
 	// (a reply not streamed, or a vendor magpie doesn't reach over HTTP).
-	Sent   int64 `json:"sent_ms,omitempty"`
+	Sent int64 `json:"sent_ms,omitempty"`
+	// Flow: the ms the reply's content took to come, from where its speed
+	// is counted (DecodeOf): from a tenth of its content to nine tenths,
+	// spread over the whole. A reply a vendor held and let go in one burst
+	// has a flow of next to none, however long its end came after its
+	// first content, and so tells no speed (John on Discord: a Kimi Code
+	// reply read 1,367 tok/s). 0 where it isn't known.
+	Flow   int64 `json:"flow_ms,omitempty"`
 	Status int   `json:"status"`
 	// Error is why a call failed, in the vendor's words and cut short;
 	// ErrType what its body called the error (rate_limit_error,
@@ -345,14 +352,21 @@ func DecodeWindow(out int, ms, ttft int64) int64 {
 // hold, and counting them read a 2,000-token think and a 200-token answer
 // in 1.5 s as 1,467 tok/s. Its time goes to the wait before the answer.
 // One with reasoning and no text (all tool calls) tells no speed. The
-// window is DecodeWindow's: 0 for a reply that tells none.
-func DecodeOf(out, reasoning int, ms, ttft, firstText int64) (tokens int, w int64) {
+// window is DecodeWindow's: 0 for a reply that tells none. flow, when
+// known (Record.Flow), is how long its content took to come, and the
+// window is no longer than it: a reply whose first words came at once
+// and the rest held back and sent in a burst at its end wrote nothing
+// in between, and its tokens over the wait read an impossible speed.
+func DecodeOf(out, reasoning int, ms, ttft, firstText, flow int64) (tokens int, w int64) {
 	start := ttft
 	if reasoning > 0 {
 		out, start = out-reasoning, firstText
 	}
 	if ttft <= 0 {
 		return 0, 0
+	}
+	if flow > 0 && start > 0 && start+flow < ms {
+		ms = start + flow
 	}
 	if w = DecodeWindow(out, ms, start); w == 0 {
 		return 0, 0
@@ -362,7 +376,7 @@ func DecodeOf(out, reasoning int, ms, ttft, firstText int64) (tokens int, w int6
 
 // Decode is the record's DecodeOf.
 func (r Record) Decode() (tokens int, w int64) {
-	return DecodeOf(r.Output, r.Reasoning, r.Millis, r.TTFT, r.FirstText)
+	return DecodeOf(r.Output, r.Reasoning, r.Millis, r.TTFT, r.FirstText, r.Flow)
 }
 
 // FormatCost renders an effective-price cost, kept in USD everywhere it's

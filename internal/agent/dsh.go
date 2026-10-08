@@ -1484,12 +1484,15 @@ func dshWiredOnce() string {
 	if dir == "" {
 		return ""
 	}
+	files := dshProfiles(dir)
+	if len(files) == 0 {
+		// no dsh: the catalog isn't built for nothing every round, ~34 MB
+		// of garbage a minute in a magpie at rest
+		return ""
+	}
+	files = append(files, dshHomePatch(dir)) // left as it is without magpie's route
 	var trouble []string
 	models := magpieModels("dsh")
-	files := dshProfiles(dir)
-	if len(files) > 0 {
-		files = append(files, dshHomePatch(dir)) // left as it is without magpie's route
-	}
 	for _, f := range files {
 		written, err := dshRouteAgain(f, models, gateway.URL())
 		if err != nil {

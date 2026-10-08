@@ -30,6 +30,9 @@ const row = (i, model, out, ttft) => ({
 const ROWS = [row(0, "glm-fast", 135, 600), row(1, "kimi-slow", 20, 600), row(2, "glm-fast", 135, 600)];
 ROWS.push({ ...row(3, "glm-fast", 135, 0), ttft_ms: undefined, ms: 3000 });
 for (let i = 4; i < 30; i++) ROWS.push(row(i, "glm-fast", 135, 600));
+// one whose content came in a burst (flow_ms, John on Discord: a Kimi Code
+// reply read 1,367 tok/s): its tokens over the wait tell no speed
+ROWS[4].flow_ms = 2;
 
 const FAST = { id: "glm-fast", calls: 28, input: 1, output: 3780, cache_read: 0, cache_write: 0, cost: 0.3, timed: 27, ttft_ms: 27 * 600, decode_ms: 27 * 1800, decode_out: 27 * 135 };
 const SLOW = { id: "kimi-slow", calls: 1, input: 1, output: 20, cache_read: 0, cache_write: 0, cost: 0.01, timed: 1, ttft_ms: 600, decode_ms: 2000, decode_out: 20 };
@@ -119,6 +122,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal((await cell(0).textContent()).trim(), w.fast);
         assert.equal((await cell(1).textContent()).trim(), w.slow);
         assert.equal((await cell(3).textContent()).trim(), "—");
+        assert.equal((await cell(4).textContent()).trim(), "—");
 
         // the table fits the window; what it leaves out is in the details
         const wrap = p.locator("#ledWrap");
