@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
@@ -628,7 +629,7 @@ func claudeIn(at place) *Agent {
 			forget(capsKey)
 			return nil
 		}
-		desktop := at.id == "" && at.sys == nil && desktopWired(desktopPathsOf(desktopDirs(runtime.GOOS, at.home, os.Getenv)))
+		desktop := at.id == "" && at.sys == nil && desktopWired(desktopPathsOf(desktopDirs(desktopdir.OS, at.home, os.Getenv)))
 		v := claudeCapabilities(models, desktop)
 		if v == "" {
 			return dropCaps()

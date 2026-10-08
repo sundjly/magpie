@@ -98,14 +98,12 @@ func (c candidate) isOpenRouterFree() bool {
 }
 
 // restID is the candidate's model's own rest key: a free OpenRouter
-// model's, whose rate limit is its free-tier limit, and a subscription's,
-// out of a pool of its allowance that counts some models only (pooled).
-// An account-level rest stays on restKey.
+// model's, whose rate limit is its free-tier limit, a subscription's, out
+// of a pool of its allowance that counts some models only (pooled), and
+// any key's or account's model its vendor said it doesn't serve it
+// (modelRefused). An account-level rest stays on restKey.
 func (c candidate) restID() string {
-	if c.isOpenRouterFree() || c.p.Account != nil {
-		return c.restKey() + "/" + c.model
-	}
-	return c.restKey()
+	return c.restKey() + "/" + c.model
 }
 
 // pooled says whether the candidate's subscription, refused for its
@@ -710,6 +708,22 @@ var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billi
 // key, or this way — words another provider, or key, may not answer with.
 var unservedWords = regexp.MustCompile(`(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|模型.{0,12}(不存在|不支持|无权|未开通)`)
 
+// modelRefused says the vendor turned the request away over its model
+// alone — not one this key's plan, or this key, may use: SenseNova's 403
+// "model is not available in the current token plan" for
+// deepseek-v4.1-flash, while the same key serves deepseek-v4-flash
+// (#1235). The key or account isn't at fault, so only its model rests,
+// and its other models are asked as before. A refusal that also says
+// quota, credit or a rate limit is about the account, and rests it.
+func modelRefused(status int, body []byte) bool {
+	switch status {
+	case 400, 403, 404, 422:
+	default:
+		return false
+	}
+	return unservedWords.Match(body) && !quotaWords.Match(body) && !refusedWords.Match(body)
+}
+
 // refusedWords are how a vendor says it won't take requests from this
 // client at all — WorkBuddy's "Illegal API invocation from an unapproved
 // channel" to a chat opening with another agent's own system prompt — a
@@ -734,6 +748,34 @@ var shapeWords = regexp.MustCompile(`(?i)failed to deserialize|unknown (item |co
 func shapeRefused(status int, body []byte) bool {
 	return (status == 400 || status == 422) && shapeWords.Match(body) &&
 		!quotaWords.Match(body) && !unservedWords.Match(body) && !refusedWords.Match(body)
+}
+
+// protectionWords are how the ChatGPT backend answers a long Codex
+// conversation it won't take as it is: 502 "response protection is
+// unavailable" (vs on Discord, 0.1.1108). It comes back the same for the
+// same history on every account and model the backend serves, and the
+// history as plain text is answered, so it is about the request, not the
+// account: asked again there, it only drains the accounts' allowances.
+var protectionWords = regexp.MustCompile(`(?i)response protection is unavailable`)
+
+// protectionRefused says the vendor turned the request's content away
+// with protectionWords: the account is not at fault, and none of its
+// provider's other accounts or models is asked the same.
+func protectionRefused(status int, body []byte) bool {
+	return status >= 400 && protectionWords.Match(body)
+}
+
+// elsewhere is, of the candidates left, those not at c's provider, whose
+// every account and model the same request reaches the same backend
+// through.
+func elsewhere(left []candidate, c candidate) []candidate {
+	var out []candidate
+	for _, x := range left {
+		if x.p.ID != c.p.ID {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // retryable says whether another provider may do better with a request
@@ -763,7 +805,7 @@ func retryable(status int, body []byte) bool {
 // vendor turned away as it reads, would fail the same at the next asked:
 // nobody rests for it.
 func lateRests(msg string) bool {
-	return !tooLong(http.StatusBadRequest, msg) && !refusedWords.MatchString(msg)
+	return !tooLong(http.StatusBadRequest, msg) && !refusedWords.MatchString(msg) && !protectionWords.MatchString(msg)
 }
 
 // unsaidMargin is how far past a model's window a request's estimate

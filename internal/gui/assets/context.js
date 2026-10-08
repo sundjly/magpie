@@ -616,4 +616,7 @@
   }
   window.loadContext = loadContext;
   window.renderContext = renderContext;
+  // opened on the Context tab (?view=usage): app.js showed it, and may have
+  // read the state, before this file was here to load it
+  if (view === "usage" && usageTab === "context") loadContext().catch((e) => status(e.message, "err"));
 })();

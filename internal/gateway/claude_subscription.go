@@ -526,8 +526,8 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, con
 		// tokens a check on the subscription (0xAncientTwo)
 		args = append(args, "--thinking", "disabled")
 	}
-	if len(req.Schema) > 0 {
-		args = append(args, "--json-schema", string(req.Schema))
+	if len(req.Format.schema()) > 0 {
+		args = append(args, "--json-schema", string(req.Format.schema()))
 	}
 	work, err := claudeWorkDir()
 	var sessions []string
@@ -582,7 +582,7 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, con
 	}
 	cmd.Stdout, cmd.Stderr = stdoutW, stderrW
 
-	run := &subscriptionRun{bridge: b, token: token, model: model, cmd: cmd, tmp: tmp, schema: len(req.Schema) > 0, pending: map[string]chan mcpToolResult{}, stdin: stdin, owner: owner, effort: req.Effort, sessions: sessions}
+	run := &subscriptionRun{bridge: b, token: token, model: model, cmd: cmd, tmp: tmp, schema: len(req.Format.schema()) > 0, pending: map[string]chan mcpToolResult{}, stdin: stdin, owner: owner, effort: req.Effort, sessions: sessions}
 	run.safeguardBeta = req.SafeguardBeta
 	if user, _ := ownerAccount(owner); user != "" {
 		run.loginVersion = provider.ClaudeLoginVersion(user)
@@ -871,7 +871,7 @@ func newLooseTurn(owner string, req *Request, msgs []Message) *looseTurn {
 		}
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%t\x00%s\x00%s\x00%t\x00%s\x00%d\x00%d", owner, req.Model, req.Effort != "", req.ThinkOff, req.ToolChoice, req.System, req.WebSearch, req.Schema, len(msgs), start)
+	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%t\x00%s\x00%s\x00%t\x00%s\x00%d\x00%d", owner, req.Model, req.Effort != "", req.ThinkOff, req.ToolChoice, req.System, req.WebSearch, req.Format.schema(), len(msgs), start)
 	hashMessages(h, msgs[:start], nil)
 	l := &looseTurn{key: hex.EncodeToString(h.Sum(nil))}
 	words := messageWords(msgs)
@@ -1529,7 +1529,7 @@ func (r *subscriptionRun) park() {
 func turnKey(owner string, req *Request, msgs []Message) string {
 	h := sha256.New()
 	tools, _ := json.Marshal(req.Tools)
-	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%t\x00%s\x00%s\x00%s\x00%t\x00%s", owner, req.Model, req.Effort != "", req.ThinkOff, req.ToolChoice, req.System, tools, req.WebSearch, req.Schema)
+	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%t\x00%s\x00%s\x00%s\x00%t\x00%s", owner, req.Model, req.Effort != "", req.ThinkOff, req.ToolChoice, req.System, tools, req.WebSearch, req.Format.schema())
 	hashMessages(h, msgs, nil)
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -2884,6 +2884,14 @@ func (r *subscriptionRun) launch() error {
 // how it ended, or that magpie ended it, and the last it wrote to stderr —
 // the cause comes last, after any warnings before it.
 func (r *subscriptionRun) tell(line []byte) error {
+	// one magpie ended is not written to: until Wait has reaped it, its
+	// input still takes a write, which no one will read
+	r.mu.Lock()
+	killed := r.killed
+	r.mu.Unlock()
+	if killed {
+		return r.whyEnded()
+	}
 	_, err := r.stdin.Write(append(line, '\n'))
 	if err == nil {
 		return nil
@@ -2899,6 +2907,12 @@ func (r *subscriptionRun) tell(line []byte) error {
 	case <-time.After(outputDrain + time.Second):
 		return err
 	}
+	return r.whyEnded()
+}
+
+// whyEnded says how the run's Claude Code ended, or that magpie ended it,
+// and the last it wrote to stderr.
+func (r *subscriptionRun) whyEnded() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	why := "exited before it read its input"
@@ -3060,6 +3074,11 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 		return writeError(w, from, 400, err.Error()), err.Error()
 	}
 	req.Model = model
+	if req.Format != nil && req.Format.schema() == nil {
+		// --json-schema takes a schema only: any JSON object is asked for
+		// in words
+		req = req.inSystem()
+	}
 	if len(req.Safeguards) > 0 {
 		req.SafeguardBeta = "dangerous-tool-use-2026-09-03"
 		for _, beta := range strings.Split(r.Header.Get("anthropic-beta"), ",") {

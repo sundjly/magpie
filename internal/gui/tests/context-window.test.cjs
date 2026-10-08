@@ -180,3 +180,31 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     }
   }
 }
+
+// context.js comes after app.js, which shows the page and reads the state
+// before it is there: the state answered first, the tab still loads at once
+// rather than at the refresh's first tick, five seconds on
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: the Context tab loads when context.js arrives after the state`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await (await browser.newContext({ viewport: { width: 1100, height: 900 } })).newPage();
+    const errors = [], asked = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    const base = serve("en", asked);
+    let answered;
+    const stateDone = new Promise((res) => { answered = res; });
+    await page.route("**/*", async (r) => {
+      const p = new URL(r.request().url()).pathname;
+      if (p === "/context.js") await stateDone.then(() => new Promise((res) => setTimeout(res, 150)));
+      await base(r);
+      if (p === "/api/state") answered();
+    });
+    await page.addInitScript(() => { try { localStorage.clear(); localStorage.setItem("magpie.usageTab", "context"); } catch {} });
+    await page.goto("http://magpie.test/?view=usage");
+    await page.locator(".ctx-agent", { hasText: "Codex" }).waitFor({ timeout: 2500 });
+    assert.equal(asked[0], "7");
+    assert.doesNotMatch(await page.locator("#status").innerText(), /loadContext|not a function/);
+    assert.deepEqual(errors, []);
+  });
+}

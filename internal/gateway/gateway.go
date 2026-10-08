@@ -1327,10 +1327,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// a Codex subagent's task its lead sealed — the lead answered by a
 	// ChatGPT account, the group's own or Codex's — goes only to a ChatGPT
 	// account, the lead's first (#619), or back to the Responses provider
-	// that answered the lead, a relay of the ChatGPT backend (#1109); with
-	// none, it is turned away before anyone is asked
+	// that answered the lead, a relay of the ChatGPT backend (#1109); a
+	// lead's turn with its subagent's sealed reply in it, back to the one
+	// that has answered the lead's conversation (#1237); with none, it is
+	// turned away before anyone is asked
 	sealedTask := from == provider.Responses && hasSealedAgentMessage(body)
 	sealedLead := ""
+	var sealers []string
 	if sealedTask {
 		parent := metadata.Parent
 		if parent == "" {
@@ -1341,7 +1344,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			scope = provider.GroupPrefix + g.ID
 		}
 		sealedLead = leadProvider(scope, parent)
-		if !(isGroup && slices.ContainsFunc(ms, func(m provider.Member) bool { return s.sealedReader(m.Provider, m.Model, sealedLead) }) || !isGroup && s.sealedReader(p, model, sealedLead)) {
+		sealers = []string{sealedLead, leadProvider(scope, conversationID(r.Header, body))}
+		if !(isGroup && slices.ContainsFunc(ms, func(m provider.Member) bool { return s.sealedReader(m.Provider, m.Model, sealers) }) || !isGroup && s.sealedReader(p, model, sealers)) {
 			call.Status, call.Error = 400, "sealed subagent task"
 			writeError(w, from, 400, sealedTaskError(call.Model, sealedLead))
 			turnedAway()
@@ -1461,7 +1465,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	agentPick := provider.AgentEffort(agent)
 	if sealedTask {
-		cands, pl = s.sealedReaders(cands, pl, sealedLead)
+		cands, pl = s.sealedReaders(cands, pl, sealers)
 	}
 	var accountHeld bool // every candidate was an account or key the calling key may not use
 	if keyHeld || accHeld {
@@ -2188,7 +2192,29 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
-		if wait, ok := passing(hw.code(), hw.header, hw.errBody(), again); ok && !last && hw.failed() && spentAfter(cands[i+1:]) {
+		// the ChatGPT backend's 502 "response protection is unavailable"
+		// (vs on Discord): the same history fails the same on every one
+		// of its accounts and models, so none of them is asked it again,
+		// nor this one after a moment, and nobody rests — 62 compactions
+		// had cost 616 tries, and the accounts their allowances. Another
+		// vendor left in the group is asked, once
+		protected := !hw.passing && !hw.refused && protectionRefused(hw.code(), hw.errBody())
+		if protected {
+			if other == nil {
+				other = &Try{Status: call.Status, Error: call.Error}
+			}
+			try.Fail = failOther
+			if left := elsewhere(cands[i+1:], c); len(left) > 0 {
+				try.Fail = failShape
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+				skipped = append(skipped, c.label()+": "+call.Error)
+				cands = append(cands[:i+1:i+1], left...)
+				continue
+			}
+			cands = cands[:i+1]
+			last = true
+		}
+		if wait, ok := passing(hw.code(), hw.header, hw.errBody(), again); ok && !protected && !last && hw.failed() && spentAfter(cands[i+1:]) {
 			// the others left are out of their allowance (Discord, waroy: a
 			// Codex account run out, Grok busy a moment): this one is the
 			// last that may answer, and is tried again as the last is
@@ -2215,7 +2241,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
-		if wait, ok := passing(hw.code(), hw.header, hw.errBody(), again); ok && hw.failed() {
+		if wait, ok := passing(hw.code(), hw.header, hw.errBody(), again); ok && !protected && hw.failed() {
 			// nobody else is left: the same one again, after a moment
 			try.Fail, try.Again = failureOf(c, hw.code(), hw.errBody()), wait.Milliseconds()
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
@@ -3329,6 +3355,9 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 		if forcesTool(req.ToolChoice) && !s.fits(p.ID, forcedRefused(model), to) {
 			req = unforced(req)
 		}
+		if req.Format != nil && !s.fits(p.ID, formatRefused(model), to) {
+			req = req.inSystem()
+		}
 		if to == provider.Anthropic && p.IsBedrock() && req.Metadata != nil {
 			// not the plain id Bedrock checks metadata.user_id against (#176)
 			r := *req
@@ -3401,6 +3430,15 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 			// of Google after all, or Google changing them): asked as
 			// before, with reasoning_effort, and not sent them again
 			s.markUnfit(p.ID, thinkingConfigField, to)
+			continue
+		}
+		if req.Format != nil && refusesFormat(res.StatusCode, b) {
+			// structured output turned away by the model or the relay in
+			// front of it (DeepSeek takes json_object only; a schema
+			// Anthropic can't hold): asked again with the format in the
+			// system prompt, and so from then on
+			s.markUnfit(p.ID, formatRefused(model), to)
+			req = req.inSystem()
 			continue
 		}
 		if offEffort(req.Effort) && res.StatusCode == http.StatusBadRequest && effortLevelsNamed.Match(b) {
