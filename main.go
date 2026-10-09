@@ -212,6 +212,9 @@ func run(args []string) error {
 	// a model Claude Code names that magpie doesn't serve goes to the one
 	// it is set to use for that tier
 	gateway.StandIn = agent.StandIn
+	// a Codex that reaches magpie for account failover alone is handed
+	// only its own models (#1385)
+	gateway.CodexOwnOnly = agent.CodexOwnOnly
 	// the setup kept the same on every computer, by whichever serves
 	gateway.WhileServing = append(gateway.WhileServing, davsync.Run)
 	// and dsh's patch lists, which dsh reads live: a route left behind by
@@ -519,6 +522,10 @@ func list(agents []*agent.Agent, detectedOnly bool, dimFrom int) error {
 				r.name = faint.Render(a.Name) + " " + faint.Render("hidden")
 			}
 			r.vals = strings.Join(parts, label.Render("  ·  "))
+			// through magpie for account failover while not connected (#1385)
+			if said := a.FailoverSaid(); said != "" {
+				r.vals += label.Render("  ·  " + said)
+			}
 			if a.Import != nil {
 				if a.Added != nil && a.Added() {
 					r.vals = value.Render("magpie added")

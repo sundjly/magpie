@@ -60,6 +60,11 @@ type Model struct {
 	// Tiers, in one ChatGPT account's own model list, are the service
 	// tiers its plan offers on the model ("priority", "ultrafast").
 	Tiers []string `json:",omitempty"`
+	// OwnTier is set on a model of a provider the user added by its
+	// address, which the gateway sends the tier Codex asks for as it is
+	// (gateway Request.Tier): Codex offers it the tiers of its own entry
+	// for the same model, Fast on another GPT model.
+	OwnTier bool `json:",omitempty"`
 	// AgentsV2 is set on a model Codex is told multi-agent V2 for, so its
 	// Ultra hands work to Codex's agents: one offering Ultra that no
 	// ChatGPT account answers for (provider.Entry's).

@@ -70,7 +70,7 @@ func parseChat(body []byte) (*Request, error) {
 		return nil, fmt.Errorf("invalid request: %v", err)
 	}
 	r := &Request{Model: c.Model, MaxTokens: c.MaxCompletionTokens, Temp: c.Temperature, TopP: c.TopP,
-		Stream: c.Stream, Effort: effortOf(c.ReasoningEffort), Parallel: c.ParallelToolCalls, Fast: c.ServiceTier == "priority",
+		Stream: c.Stream, Effort: effortOf(c.ReasoningEffort), Parallel: c.ParallelToolCalls, Fast: c.ServiceTier == "priority", Tier: c.ServiceTier,
 		CacheKey: c.PromptCacheKey, Format: openAIFormat(c.ResponseFormat)}
 	if r.MaxTokens == 0 {
 		r.MaxTokens = c.MaxTokens
@@ -408,6 +408,9 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 	// another's chat upstream may not know the tier
 	if r.Fast && host == "cursor" {
 		out["service_tier"] = "priority"
+	}
+	if r.OwnTier && r.Tier != "" {
+		out["service_tier"] = r.Tier
 	}
 	if r.MaxTokens > 0 {
 		if strings.HasSuffix(host, "openai.com") {

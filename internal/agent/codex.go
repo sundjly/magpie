@@ -490,6 +490,22 @@ func codexIn(at place) *Agent {
 		}
 		return nil
 	}
+	// failingOver: Codex reaches magpie for account failover alone, by the
+	// base URL failover wrote (codex.failover) or by CC Switch's OpenAI
+	// mirror pointed at magpie for it (codex.mirror_failover), with nothing
+	// of magpie's connected. It read as not connected while every request
+	// went through magpie, magpie's models in its list (#1385).
+	failingOver := func() bool {
+		if wired() || asProvider() {
+			return false
+		}
+		s := stashLoad()
+		if p := get("model_provider"); p != "" && p != "openai" {
+			t, _ := edit.GetTOMLTable(path, "model_providers."+p)
+			return s[at.key("codex.mirror_failover")] == p && t["base_url"] == at.codexURL()
+		}
+		return viaBase() && s[at.key("codex.failover")] == "1"
+	}
 	modelOptions := func(withMagpie bool) []Option {
 		var own []Option
 		// each of Codex's own says which way it goes, as Claude Code's do:
@@ -778,10 +794,11 @@ func codexIn(at place) *Agent {
 			}
 			return true, settle()
 		},
-		Joined: joined,
-		Beside: beside,
-		Routed: routed,
-		OwnVia: codexOwnViaMagpie,
+		Joined:      joined,
+		Beside:      beside,
+		Routed:      routed,
+		FailingOver: failingOver,
+		OwnVia:      codexOwnViaMagpie,
 		Sync: func() error {
 			// model_provider = "magpie" left with its table gone (taken by
 			// another tool, or a hand edit), which keeps Codex from loading
@@ -849,6 +866,10 @@ func codexIn(at place) *Agent {
 						return err
 					}
 				}
+			case failingOver():
+				// the list the gateway hands a Codex there for failover
+				// alone: its own models, without magpie's (#1385)
+				return codexStaleCache(filepath.Join(dir, "models_cache.json"), provider.CodexOwnListTag())
 			case viaBase():
 				if err := codexStaleCache(filepath.Join(dir, "models_cache.json"), provider.CodexListTag()); err != nil {
 					return err
@@ -1322,6 +1343,35 @@ func codexFailover() bool {
 		}
 	}
 	return false
+}
+
+// CodexOwnOnly reports whether the Codex that asks the gateway for its
+// model list there (/backend-api/codex/models) reaches magpie for account
+// failover alone (FailingOver), to be handed only its own models (#1385).
+// That is this machine's Codex; a request doesn't say whether it came from
+// a Codex in a WSL distro instead, so one there connected to magpie (what
+// magpie set on it, or its joined/beside mark in the stash) keeps magpie's
+// models in the list. No distro is probed for it.
+func CodexOwnOnly() bool {
+	home, err := os.UserHomeDir()
+	if err != nil || !codex(home).FailingOver() {
+		return false
+	}
+	appliedMu.Lock()
+	set := appliedLoad()
+	appliedMu.Unlock()
+	for id := range set {
+		if strings.HasPrefix(id, "codex@wsl:") {
+			return false
+		}
+	}
+	// a distro's name may have dots of its own (Ubuntu-24.04)
+	for k, v := range stashLoad() {
+		if strings.HasPrefix(k, "codex@wsl:") && v == "1" && (strings.HasSuffix(k, ".joined") || strings.HasSuffix(k, ".beside")) {
+			return false
+		}
+	}
+	return true
 }
 
 // codexChatGPT reports whether Codex is signed in to a ChatGPT account:

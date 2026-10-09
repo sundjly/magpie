@@ -1065,6 +1065,18 @@ function connectLine(a, kind) {
   if (!a.wired) {
     const src = a.source || "";
     if (a.id === "agy") say(t("Not connected · once connected, start it with magpie's command"));
+    // not connected, yet through magpie for account failover (#1385): it
+    // read as Codex on its own while magpie served every request, so the
+    // line says why, and the accounts that turn it off are a click away
+    else if (a.failover) {
+      say(t("Not connected · goes through magpie only to fail over to your other ChatGPT accounts"));
+      words.title = t("magpie set openai_base_url in {agent}'s config.toml, so a request the ChatGPT account {agent} is signed in to has no allowance for goes on to your other ChatGPT accounts on in magpie. {agent} keeps to its own models. To stop it, switch those accounts off under Providers › Codex; connecting {agent} adds magpie's models.", { agent: a.name });
+      const go = el("button", "ag-acc", t("ChatGPT accounts"));
+      go.type = "button";
+      go.title = words.title;
+      go.onclick = (e) => { e.stopPropagation(); openProvider("codex"); };
+      line.append(go);
+    }
     else if (src === "sub") say(t("Not connected · now on its Claude subscription"));
     else if (src === "chatgpt") say(t("Not connected · now signed in with ChatGPT · OpenAI's models stay available once connected"));
     else if (src === "key") say(t("Not connected · now on an API key of its own"));
@@ -6720,7 +6732,9 @@ async function openProvider(id) {
   if (!await show("providers")) return;
   closeModal();
   adding = false; editing = id; draft = null; presetQuery = "";
-  renderProviders();
+  // the list not in yet (the tab not opened before), show's load draws it
+  // with this one open
+  if (providers) renderProviders();
   syncURL();
 }
 

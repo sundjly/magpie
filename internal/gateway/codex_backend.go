@@ -1035,9 +1035,14 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 			codexcat.AutoReview(o)
 		}
 	}
-	ms := provider.CodexListed()
+	// a Codex here for account failover alone, not connected to magpie,
+	// keeps to its own models (#1385: 62 of magpie's were in its list)
+	var ms []catalog.Model
+	if !codexOwnOnly() {
+		ms = provider.CodexListed()
+	}
 	// the list is the backend's and magpie's, and so is its ETag
-	w.Header().Set("ETag", codexcat.WithTag(etag, provider.CodexListTag()))
+	w.Header().Set("ETag", codexcat.WithTag(etag, codexListTag()))
 	all := append(own, codexcat.Entries(ms, len(own)+100)...)
 	if at, ok := provider.CodexOrder(); ok {
 		codexcat.Order(all, at)
@@ -1050,8 +1055,24 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 // change to either has Codex ask for the list again.
 func modelsEtag(h http.Header) {
 	if v := h.Get("X-Models-Etag"); v != "" {
-		h.Set("X-Models-Etag", codexcat.WithTag(v, provider.CodexListTag()))
+		h.Set("X-Models-Etag", codexcat.WithTag(v, codexListTag()))
 	}
+}
+
+// CodexOwnOnly reports whether the Codex asking for its model list at
+// CodexPath reaches magpie for account failover alone, not connected to
+// it (agent.CodexOwnOnly): it is then handed only its own models (#1385).
+// Set by main; nil, every Codex gets magpie's models too.
+var CodexOwnOnly func() bool
+
+func codexOwnOnly() bool { return CodexOwnOnly != nil && CodexOwnOnly() }
+
+// codexListTag is the tag of the list codexModels hands out now.
+func codexListTag() string {
+	if codexOwnOnly() {
+		return provider.CodexOwnListTag()
+	}
+	return provider.CodexListTag()
 }
 
 // codexInput restores summaries magpie made. For a magpie model, it also

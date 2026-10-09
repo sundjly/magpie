@@ -185,8 +185,12 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 	capped := func(user string, q SubscriptionQuota) bool {
 		return capReached(q, AccountCapsOf(agent, user), now)
 	}
+	// an account the Codex app holds (codexHeld: not allowed, no credits
+	// to go on with) is spent whatever its windows read: the app sends
+	// nothing for it, and a workspace seat at its owner's limit or a spend
+	// cap is held with every window under the share
 	if first != nil && first.On && first.Lapsed == "" {
-		if q, known := u[first.User]; known && q.Error == "" && !usedPast(q, backShare, now) && !capped(first.User, q) {
+		if q, known := u[first.User]; known && q.Error == "" && !q.Held && !usedPast(q, backShare, now) && !capped(first.User, q) {
 			return from, first.User, true, true
 		}
 	}
@@ -195,11 +199,11 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 	// A window whose reset has passed counts as started again (usedPast),
 	// on every account, however its reading came
 	q, known := u[from]
-	if keep || !known || q.Error != "" || !usedPast(q, share, now) && !capped(from, q) {
+	if keep || !known || q.Error != "" || !q.Held && !usedPast(q, share, now) && !capped(from, q) {
 		return "", "", false, false
 	}
 	for _, l := range spares {
-		if q, known := u[l.User]; known && q.Error == "" && !usedPast(q, share, now) && !capped(l.User, q) {
+		if q, known := u[l.User]; known && q.Error == "" && !q.Held && !usedPast(q, share, now) && !capped(l.User, q) {
 			return from, l.User, false, true
 		}
 	}

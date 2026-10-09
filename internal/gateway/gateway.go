@@ -872,10 +872,14 @@ func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 // unprefixed is the model magpie serves by an id Claude Desktop was given
 // for it (claudeLooking): anthropic/magpie-<number>, mythos-magpie-<number>,
 // magpie-<number>.anthropic.<Claude model>, or, as it listed them
-// before, "anthropic/" put in front of magpie's id. An id that is magpie's
-// as it stands (a provider named anthropic) is left alone.
+// before, "anthropic/" put in front of magpie's id — or by its flat
+// spelling (unflat). An id that is magpie's as it stands (a provider named
+// anthropic) is left alone.
 func unprefixed(id string) string {
 	if real, ok := aliased(id); ok {
+		return real
+	}
+	if real := unflat(id); real != id {
 		return real
 	}
 	rest, ok := strings.CutPrefix(id, "anthropic/")
@@ -3520,6 +3524,12 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 				r.OffLevel, req = l, &r
 			}
 		}
+		// the tier the client asked for goes to a provider the user added
+		// by its address as it was asked (Request.Tier)
+		if own := p.Preset == "" && p.Account == nil && s.fits(p.ID, tierField, to); own != req.OwnTier {
+			r := *req
+			r.OwnTier, req = own, &r
+		}
 		body, err := build(to, req, model, buildHost(p), p.RejectsTemperature(model))
 		if err != nil {
 			return nil, to, err
@@ -3636,6 +3646,15 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 				continue
 			}
 		}
+		if req.OwnTier && req.Tier != "" && slices.Contains(refusedOptional(res.StatusCode, b, body), tierField) {
+			// the field turned away: asked again without it, and not sent
+			// it again. A value it doesn't offer reaches the client as the
+			// upstream said it, as on a relayed request
+			s.markUnfit(p.ID, tierField, to)
+			r := *req
+			r.Tier, req = "", &r
+			continue
+		}
 		if req.CacheKey != "" && badRequest(res.StatusCode) && !wrongEndpoint(res.StatusCode, b) && !provider.CopilotRefusal(b) {
 			// a vendor that turns away fields it doesn't know is asked again
 			// without the cache key, and not sent it again once that works —
@@ -3690,10 +3709,14 @@ func refusesField(status int, body []byte, field string) bool {
 	return badRequest(status) && bytes.Contains(body, []byte(field))
 }
 
+// tierField is the client's service tier as a request carries it upstream
+// (Request.Tier); a provider that refused it is remembered under it in unfit.
+const tierField = "service_tier"
+
 // optionalFields are request fields OpenAI's APIs (or an agent's own
 // vendor, Kimi's and Qwen's thinking switches) take that a request does
 // without: an upstream that refuses one by name is asked again without it.
-var optionalFields = []string{"store", "metadata", "service_tier", cacheKeyField, "prompt_cache_retention",
+var optionalFields = []string{"store", "metadata", tierField, cacheKeyField, "prompt_cache_retention",
 	"safety_identifier", "stream_options", "parallel_tool_calls", "verbosity", "thinking", "enable_thinking"}
 
 // refusedOptional lists optional fields an upstream explicitly rejects as
@@ -4370,7 +4393,25 @@ func validateModel(model string) (string, error) {
 	if p, m, ok := strings.Cut(model, "/"); ok && (p == "" || m == "") {
 		return "", errors.New("invalid request: expected provider/model with both parts nonempty")
 	}
-	return model, nil
+	return unflat(model), nil
+}
+
+// unflat is the catalog id a flat one stands for (provider.Unflat): MiniMax
+// Code asks for "bb-codex~gpt-6.1-sol", as its SubAgents can't name a model
+// with a slash in it (#1387). The request goes on as the catalog id, so its
+// key's models, its routing, the middleware and the usage row see that. An
+// id that resolves as it is stays as it is.
+func unflat(id string) string {
+	if !strings.Contains(id, provider.FlatSep) || strings.Contains(id, "/") {
+		return id
+	}
+	if _, _, ok := provider.Resolve(id); ok {
+		return id
+	}
+	if real, ok := provider.Unflat(id); ok {
+		return real
+	}
+	return id
 }
 
 // requestModel checks the envelope without restricting vendor-specific fields.
