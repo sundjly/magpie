@@ -140,7 +140,10 @@ func TestDescriptionSaysWhyTheModelCantSee(t *testing.T) {
 		}
 	}
 	img := 0
-	src := func() string { img++; return fmt.Sprintf("data:image/png;base64,%s", base64.StdEncoding.EncodeToString([]byte(fmt.Sprint("img", img)))) }
+	src := func() string {
+		img++
+		return fmt.Sprintf("data:image/png;base64,%s", base64.StdEncoding.EncodeToString([]byte(fmt.Sprint("img", img))))
+	}
 	bodies := map[string]func(model string) (string, string){
 		"responses": func(m string) (string, string) {
 			return "/v1/responses", `{"model":"` + m + `","input":[{"role":"user","content":[{"type":"input_text","text":"read"},{"type":"input_image","image_url":"` + src() + `"}]}]}`

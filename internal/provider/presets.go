@@ -543,8 +543,17 @@ var presetAliases = map[string]struct{ preset, region string }{
 }
 
 // Preset finds a preset by id, or by an id it carried before
-// (presetAliases).
+// (presetAliases), or a partner listed now or before (partners.go).
 func Preset(id string) *PresetDef {
+	if pr := builtinPreset(id); pr != nil {
+		return pr
+	}
+	return partnerPreset(id)
+}
+
+// builtinPreset is the preset of that id built into magpie, partners'
+// aside.
+func builtinPreset(id string) *PresetDef {
 	if a, ok := presetAliases[id]; ok {
 		id = a.preset
 	}

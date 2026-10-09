@@ -2410,6 +2410,8 @@ const (
 	runExpired     = "process expired"
 	noRunWaiting   = "no run waiting"
 	accountChanged = "account changed"
+	// another request has the run's calls answered, or is answering them
+	answeredElsewhere = "answered by another request"
 )
 
 // match is findRun, and how the results found their run (byExactID,
@@ -3134,9 +3136,18 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 	}
 
 	run, results, how := s.subscription.match(req)
+	// Another request has the run's calls answered, or is answering them,
+	// or the run ended. Claude Code's fork sub-agents each start from their
+	// lead's conversation as it stands, a result for each of its calls and
+	// their directive after, so the lead's next turn and every fork it
+	// started answer the same calls at once; a client may also send a turn
+	// again while the first is still answered. The run takes one set of
+	// results only, and is not waiting for this request's once it is past
+	// the turn they were for: this request is its own conversation from
+	// here and gets a run of its own, told it whole. A 409 isn't retried,
+	// and the fork died with it (ylorn on Discord).
 	if run != nil && !run.claimResume() {
-		msg := "the agent's turn is already being resumed"
-		return writeError(w, from, http.StatusConflict, msg), msg
+		run, how = nil, answeredElsewhere
 	}
 	// Tool-call IDs find the process that made them, independently of the
 	// account routing selected. Continuing a different owner's process would

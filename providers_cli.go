@@ -29,7 +29,7 @@ const providerUsage = `usage:
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
                                           again, it adds another (deepseek-2); k=v pairs too: id, name, header.X-Foo
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.token, models.url, search
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, gemini, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.token, models.url, search
   magpie provider set <id> k=v…           change a provider's settings, with the same k=v pairs as add
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
@@ -48,6 +48,8 @@ const providerUsage = `usage:
   magpie provider queue <id> [length [seconds]]
                                           how many may wait for each account or key past its limit, and how long;
                                           past either a request is turned away with a 429 (0: no bound)
+  magpie provider rpm <id> [n|off]        how many requests each account or key sends the vendor in any minute;
+                                          one more waits for room, up to 2 minutes, then is turned away with a 429
   magpie provider listed <id> yes|no      no: its models serve only through routing groups, not in the list
   magpie provider off|on <id>             switch it off (kept, but no agent or request uses it), or on again
   magpie provider test <id> [model…]      send a tiny request through each endpoint, or to each model
@@ -188,13 +190,22 @@ func presets() error {
 		have[p.ID], have[p.Preset] = true, true
 	}
 	kind := provider.Kind("")
-	for _, pr := range provider.Presets() {
+	// partners first, as the app lists them: their heading says they pay
+	all := []provider.PresetDef{}
+	var shown []string
+	for _, pa := range provider.PartnersNow(3 * time.Second) {
+		all = append(all, pa.PresetDef)
+		shown = append(shown, pa.ID)
+	}
+	provider.CountPartner(provider.PartnerShown, shown...)
+	provider.NoticePartners(shown...)
+	for _, pr := range append(all, provider.Presets()...) {
 		if pr.Kind != kind {
 			kind = pr.Kind
-			fmt.Println(faint.Render("  " + map[provider.Kind]string{provider.KindVendor: "vendors", provider.KindRelay: "relays", provider.KindLocal: "local"}[kind]))
+			fmt.Println(faint.Render("  " + map[provider.Kind]string{provider.KindPartner: "partners (sponsors)", provider.KindVendor: "vendors", provider.KindRelay: "relays", provider.KindLocal: "local"}[kind]))
 		}
 		name := bold.Render(pr.Name)
-		if pr.Sponsored {
+		if pr.Sponsored && pr.Kind != provider.KindPartner {
 			name += " " + faint.Render("sponsored")
 		}
 		state := muted.Render("magpie provider add " + pr.ID + " <key>")
@@ -226,7 +237,9 @@ func models(args []string) error {
 		}
 		entries, hidden = provider.CatalogFor(agentID)
 	}
-	if len(entries) == 0 && agentID != "" {
+	if _, only := provider.PickedModels(agentID); len(entries) == 0 && agentID != "" && only {
+		fmt.Println(amber.Render("!"), agentID, "is shown none of them: it is shown only the models picked for it, and none is", muted.Render("· tick some in its list on the Agents page, or magpie visible "+agentID+" --show-new"))
+	} else if len(entries) == 0 && agentID != "" {
 		names, _ := provider.VisibleTo(agentID)
 		fmt.Println(amber.Render("!"), agentID, "is shown none of them: nothing is in", strings.Join(names, ", "), muted.Render("· magpie visible "+agentID+" all shows it every model"))
 	} else if len(entries) == 0 && bad != nil {
@@ -480,6 +493,8 @@ func providerCmd(args []string) error {
 		return accountConcurrencyCmd(rest)
 	case "queue":
 		return queueCmd(rest)
+	case "rpm":
+		return rpmCmd(rest)
 	case "listed":
 		// no: the provider's models leave the list agents see and serve
 		// only through the routing groups they are in
@@ -662,6 +677,7 @@ func showProvider(p provider.Provider) error {
 	kv("chat", p.Chat)
 	kv("responses", p.Responses)
 	kv("anthropic", p.Anthropic)
+	kv("gemini", p.Gemini)
 	if p.Searches {
 		kv("search", "by itself"+muted.Render("  a client's web search goes to it as sent"))
 	}
@@ -760,6 +776,10 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.Responses = v
 		case "anthropic":
 			p.Anthropic = v
+		case "gemini":
+			// a Gemini API's base (…/v1beta), Google's or one that
+			// answers as it does (#1346)
+			p.Gemini = v
 		case "decide":
 			// a System One root (…/systemone is asked under it): the
 			// provider routes groups, its models any name (#647)
@@ -1270,6 +1290,41 @@ func queueCmd(rest []string) error {
 		wait = fmt.Sprintf("%ds", p.QueueWait)
 	}
 	fmt.Printf("%s · queue for each account or key: %s waiting, each for %s\n", p.Name, length, wait)
+	return nil
+}
+
+// rpmCmd shows, or sets, how many requests each of a provider's accounts
+// or keys sends the vendor in any minute (coeo91 on Discord: OpenRouter's
+// free models take 20).
+func rpmCmd(rest []string) error {
+	if len(rest) < 1 || len(rest) > 2 {
+		return fmt.Errorf("magpie provider rpm <id> [n|off]")
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	if len(rest) > 1 {
+		n := 0
+		switch s := strings.ToLower(strings.TrimSpace(rest[1])); s {
+		case "off", "none", "no", "-":
+		default:
+			if n, err = strconv.Atoi(s); err != nil {
+				return fmt.Errorf("requests a minute is a whole number, or off, not %q", rest[1])
+			}
+		}
+		if err := provider.SetRPM(p.ID, n); err != nil {
+			return err
+		}
+		if p, err = provider.Find(p.ID); err != nil {
+			return err
+		}
+	}
+	if n := p.RPMLimit(); n > 0 {
+		fmt.Printf("%s · each account or key: at most %d requests a minute\n", p.Name, n)
+	} else {
+		fmt.Printf("%s · each account or key: no limit on requests a minute\n", p.Name)
+	}
 	return nil
 }
 

@@ -47,6 +47,22 @@ filter only when that request is excluded. Usage's purpose picker remains a
 single choice sent to the ledger API. See `purpose-filter.test.cjs` and
 `routing-purpose-state.test.cjs`.
 
+### Routing key folds
+
+Three or more API keys of one provider standing next to each other for one
+model (same fixed effort, fallback and group-in-group heading) fold into one
+stage row, `li.rt-fold` in [`routing.js`](../../internal/gui/assets/routing.js)
+(`FOLD_AT`, `rebuild`). It shows the key count and the keys' state together:
+the key that is lit and what it is doing, how many are available and how
+many rest. Requests that land on a folded key fly to the fold (`shownRow`).
+Clicking it (or Enter / Space) shows each key in place, wired from the fold.
+Accounts and keys folds the same provider's keys into one `.rt-keys` row
+with their summed tally. Which folds are open is kept per reader in
+localStorage `magpie.routingKeysOpen` (`provider/model` on the stage,
+`provider/*` in the list). Display only: the gateway's order and choice of
+key don't change. Two keys stay two rows. See
+`routing-keys-fold.test.cjs`.
+
 ### Desktop fonts
 
 Settings → General offers independent interface and code fonts, each with

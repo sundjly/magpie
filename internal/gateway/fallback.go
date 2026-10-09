@@ -1553,6 +1553,52 @@ func (h *holdWriter) release() {
 // watchEvery is how often watch looks at a try.
 var watchEvery = time.Second
 
+// keepQueued keeps the agent of a stream alive while its try waits for a
+// slot of its key's or account's (MaxConcurrency) or for room in its
+// minute (MaxRPM), before anything is sent to the vendor: past
+// keepHeldAfter it is sent the stream's 200 and SSE comments
+// (keepAlive), every keepaliveEvery for as long as the wait lasts, as a
+// try's held stream is. A wait of up to 2 minutes for the minute, or
+// QueueWait's for a slot, sent the agent nothing at all, which an agent's
+// or a proxy's timeout for its headers ended first (coeo91 on Discord:
+// WorkBuddy, Trae and Qoder said the request timed out). Once they are
+// sent the try is held (hold), so that a failure, or the queue turning it
+// away, reaches the agent as the stream's error (failTo), and another
+// candidate may still answer in the same stream. A wait shorter than
+// keepHeldAfter sends nothing, its 429 still a status with its
+// Retry-After. The returned func ends it, and returns once it has.
+func (h *holdWriter) keepQueued() func() {
+	if !h.streams || h.alive == nil || h.alive.proto == provider.Gemini {
+		return func() {}
+	}
+	done, over := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(over)
+		tick := time.NewTicker(watchEvery)
+		defer tick.Stop()
+		began := time.Now()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				h.mu.Lock()
+				if (time.Since(began) >= keepHeldAfter || h.alive.sent) && (h.ctx == nil || h.ctx.Err() == nil) {
+					h.keepAlive()
+					if h.alive.sent {
+						h.hold = true
+					}
+				}
+				h.mu.Unlock()
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-over
+	}
+}
+
 // watch lets the try go — stop, with slow said — once firstWait passes
 // with no first content and nothing of it sent to the agent: the stream
 // held, or no reply begun at all. And it keeps the agent of a stream alive

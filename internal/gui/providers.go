@@ -62,6 +62,7 @@ type providerJSON struct {
 	Chat      string            `json:"chat"`
 	Responses string            `json:"responses"`
 	Anthropic string            `json:"anthropic"`
+	Gemini    string            `json:"gemini,omitempty"` // a Gemini API's base (#1346)
 	Decide    string            `json:"decide,omitempty"` // a decision API: it only routes groups
 	Catalog   string            `json:"catalog"`
 	Website   string            `json:"website"`
@@ -149,6 +150,9 @@ type providerJSON struct {
 	// (0: no bound)
 	QueueLimit int `json:"queueLimit,omitempty"`
 	QueueWait  int `json:"queueWait,omitempty"`
+	// how many requests each key or account sends the vendor in any
+	// minute, 0 for no limit (coeo91 on Discord)
+	MaxRPM int `json:"maxRPM,omitempty"`
 	// what it charges against the official price, 0 for that (#819)
 	PriceRate float64     `json:"priceRate,omitempty"`
 	Models    []modelJSON `json:"models"`            // everything the vendor lists, exposed ones flagged
@@ -282,6 +286,12 @@ type presetJSON struct {
 	// ZhipuTeam: a key of it may be on a team's GLM Coding Plan, whose
 	// organization and project the editor offers to take
 	ZhipuTeam bool `json:"zhipuTeam,omitempty"`
+	// a partner's tagline by language, and the languages it is listed in
+	Notes map[string]string `json:"notes,omitempty"`
+	Langs []string          `json:"langs,omitempty"`
+	// New: a partner listed since the add sheet last showed the partners,
+	// and not added; the add button marks it
+	New bool `json:"new,omitempty"`
 }
 
 type gatewayJSON struct {
@@ -405,13 +415,13 @@ func agentUses(agents []*agent.Agent, findGroup func(string) (provider.Group, []
 func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	out := providerJSON{
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
-		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), DecideTest: p.AsksDecideModels(),
+		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), DecideTest: p.AsksDecideModels(),
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, Headers: p.Headers, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
 		Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Unlisted: p.Unlisted, Off: p.Off, Contexts: p.Contexts,
 		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(), PriceRate: p.PriceRate,
-		AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait,
+		AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM,
 		Outputs: provider.OutputsOf(p.ID), Compacts: provider.CompactsOf(p.ID),
 	}
 	if out.Fallback == nil {
@@ -636,6 +646,10 @@ func providersState() providersJSON {
 		have[p.ID], have[p.Preset] = true, true
 		s.Providers = append(s.Providers, providerInfo(p, uses))
 	}
+	// partners first, as the add sheet lists them
+	for _, pa := range provider.Partners() {
+		s.Presets = append(s.Presets, presetJSON{PresetDef: pa.PresetDef, Added: have[pa.ID], Notes: pa.Notes, Langs: pa.Langs, New: !have[pa.ID] && !provider.PartnerNoticed(pa.ID)})
+	}
 	for _, pr := range provider.Presets() {
 		team := provider.TakesZhipuTeam(provider.Provider{Chat: pr.Chat, Responses: pr.Responses, Anthropic: pr.Anthropic})
 		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID], ZhipuTeam: team})
@@ -826,6 +840,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// null for no bound; a save that leaves them out keeps them
 			QueueLimit json.RawMessage `json:"queueLimit"`
 			QueueWait  json.RawMessage `json:"queueWait"`
+			// MaxRPM is how many requests each key or account sends the
+			// vendor in any minute: a number, 0 or null for no limit; a
+			// save that leaves it out keeps it
+			MaxRPM json.RawMessage `json:"maxRPM"`
 			// Limit, for accountconcurrency: the account's or key's own
 			// limit, 0 for none, null for the provider's (#892)
 			Limit *int `json:"limit"`
@@ -970,7 +988,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		case "save":
 			// a preset needs nothing but the key; a saved provider keeps
 			// its key when the form left it blank
-			if pr, err := provider.FromPreset(in.Preset); err == nil && in.Chat == "" && in.Responses == "" && in.Anthropic == "" {
+			if pr, err := provider.FromPreset(in.Preset); err == nil && in.Chat == "" && in.Responses == "" && in.Anthropic == "" && in.Gemini == "" {
 				pr.Key, pr.Models, pr.Fallback, pr.Headers, pr.BalanceToken, pr.Contexts = in.Key, in.Models, in.Fallback, in.Headers, in.BalanceToken, in.Contexts
 				pr.ZhipuTeam = in.ZhipuTeam
 				pr.Searches = in.Searches
@@ -1010,6 +1028,16 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				return
 			}
 			in.QueueLimit, in.QueueWait = ql, qw
+			rpm, keepRPM, err := queueOf(req.MaxRPM, "requests a minute")
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			if err := provider.CheckRPM(rpm); err != nil {
+				fail(rw, err)
+				return
+			}
+			in.MaxRPM = rpm
 			rate, keepRate, err := priceRateOf(req.PriceRate)
 			if err != nil {
 				fail(rw, err)
@@ -1071,6 +1099,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				}
 				if keepQW && old != nil {
 					in.QueueWait = old.QueueWait
+				}
+				if keepRPM && old != nil {
+					in.MaxRPM = old.MaxRPM
 				}
 				if keepRate && old != nil {
 					in.PriceRate = old.PriceRate
@@ -1701,6 +1732,23 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
+	// the add sheet counts what it showed of the partners and what was
+	// opened of them (provider.CountPartner); only listed partners count.
+	// Those shown are no longer new (provider.NoticePartners).
+	mux.HandleFunc("POST /api/partner", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			What string
+			IDs  []string
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in)
+		if len(in.IDs) <= provider.MaxPartners {
+			provider.CountPartner(in.What, in.IDs...)
+			if in.What == provider.PartnerShown {
+				provider.NoticePartners(in.IDs...)
+			}
+		}
+		rw.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("POST /api/open", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ URL string }
 		_ = json.NewDecoder(r.Body).Decode(&in)
@@ -1723,7 +1771,7 @@ func typed(p, in provider.Provider, proxy *string) provider.Provider {
 	for _, f := range []struct {
 		to *string
 		v  string
-	}{{&p.Chat, in.Chat}, {&p.Responses, in.Responses}, {&p.Anthropic, in.Anthropic}, {&p.Decide, in.Decide}, {&p.ModelsURL, in.ModelsURL}} {
+	}{{&p.Chat, in.Chat}, {&p.Responses, in.Responses}, {&p.Anthropic, in.Anthropic}, {&p.Gemini, in.Gemini}, {&p.Decide, in.Decide}, {&p.ModelsURL, in.ModelsURL}} {
 		if v := strings.TrimSpace(f.v); v != "" {
 			*f.to = v
 		}

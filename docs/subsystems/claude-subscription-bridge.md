@@ -94,6 +94,21 @@ A run started anew still sends every image in the conversation. Replacing
 earlier images with a placeholder would change what the model sees, and
 magpie doesn't do it.
 
+## Tool results another request answers first
+
+A request with tool results finds the run waiting on those calls (`match`)
+and claims it (`claimResume`) until the reply it is resumed for ends. More
+than one request can carry results for the same calls: Claude Code's fork
+sub-agents each start from their lead's conversation as it stands, its
+reply's calls answered with the placeholder "Fork started — processing in
+background" and the fork's directive after, and they come at once with the
+lead's own next turn; a client may also send a turn again while the first
+is still answered. The first to claim the run goes on in it. Each of the
+others, and one whose run has ended, is a conversation of its own from
+there and gets a run started anew (`answeredElsewhere` in the log). It is
+never refused: Claude Code doesn't retry a 409, and the agent that sent it
+stops (ylorn on Discord).
+
 ## The account's allowance on the reply (#1257)
 
 Claude Code tells a run's account allowance in its stream-json
@@ -118,7 +133,7 @@ carries none.
 ## Verification
 
 ```sh
-go test -tags nogui ./internal/gateway/ -run 'ClaudeRewritten|ClaudeSessionTempFiles|ClaudeLetGo|ClaudeSessionFiles|ClaudeOldSessions|ClaudeSubscriptionReplySaysTheAllowance|ClaudeAllowanceHeaders' -count=1
+go test -tags nogui ./internal/gateway/ -run 'ClaudeRewritten|ClaudeSessionTempFiles|ClaudeLetGo|ClaudeSessionFiles|ClaudeOldSessions|ClaudeSubscriptionReplySaysTheAllowance|ClaudeAllowanceHeaders|ClaudeForksAnsweringTheLeadsCalls' -count=1
 ```
 
 `claude_rewritten_test.go` has a case for each relaxation and one for each
