@@ -70,7 +70,9 @@ var cliSpecs = map[string]cliSpec{
 		}},
 	"codex": {npm: []string{"@openai/codex"}, brew: []string{"codex"},
 		self: func(bin, real string) []string {
-			// its standalone installer's ~/.codex/packages/standalone/releases/…
+			// its standalone installer's ~/.codex/packages/standalone/releases/…,
+			// reached on Windows through install.ps1's junctions
+			// (%LOCALAPPDATA%\Programs\OpenAI\Codex\bin → …\current\bin)
 			if strings.Contains(real, "/.codex/packages/standalone/") {
 				return []string{bin, "update"}
 			}
@@ -129,7 +131,7 @@ var brewPath = regexp.MustCompile(`/(Cellar|Caskroom)/([^/]+)/`)
 // howInstalled says how the CLI at bin was installed, from where it is;
 // nil when that says nothing sure.
 func howInstalled(spec cliSpec, bin string) *updater {
-	real, err := filepath.EvalSymlinks(bin)
+	real, err := proc.RealPath(bin)
 	if err != nil {
 		real = bin
 	}
@@ -387,9 +389,11 @@ func (m *memo) forget(key string) {
 var versions, latests memo
 
 // installedVersion is what the CLI at bin says its version is, asked again
-// only once the binary changes.
+// only once the binary changes: the file its links and junctions lead to,
+// its size or its time (an update's release folder is a new path even where
+// the archive gave every version's binary the same time).
 func installedVersion(bin string) string {
-	real, err := filepath.EvalSymlinks(bin)
+	real, err := proc.RealPath(bin)
 	if err != nil {
 		real = bin
 	}

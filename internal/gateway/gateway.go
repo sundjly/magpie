@@ -799,11 +799,26 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 		// for another magpie: how it searches the web for each model
 		magpie := r.Header.Get(provider.DrawersHeader) != ""
 		searches := magpie && canSearch()
+		// for another magpie, what each model costs here, so its usage
+		// there is counted at the same price: told only to this computer
+		// and to one this magpie is shared with by a gateway key, as the
+		// prices are the user's own settings
+		var st settings.Settings
+		var find func(string) (provider.Group, []provider.Member, bool)
+		prices := r.Header.Get(provider.PricesHeader) != "" && (local(r) || sharedWith(r))
+		if prices {
+			st, find = settings.Load(), provider.GroupFinder()
+		}
 		for i, e := range shown {
 			m := modelObject(e)
 			if magpie {
 				if how := webSearchOf(e, searches); how != "" {
 					m["web_search"] = how
+				}
+			}
+			if prices {
+				if pr, ok := provider.EntryPriceIn(st, find, e); ok {
+					m["magpie_price"] = pr
 				}
 			}
 			// for another magpie: its name as the agents' lists here call
@@ -1370,9 +1385,25 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		if isGroup {
 			scope = provider.GroupPrefix + g.ID
 		}
+		conv := conversationID(r.Header, body)
 		sealedLead = leadProvider(scope, parent)
-		sealers = []string{sealedLead, leadProvider(scope, conversationID(r.Header, body))}
-		if !(isGroup && slices.ContainsFunc(ms, func(m provider.Member) bool { return s.sealedReader(m.Provider, m.Model, sealers) }) || !isGroup && s.sealedReader(p, model, sealers)) {
+		sealers = []string{sealedLead, leadProvider(scope, conv)}
+		readable := func() bool {
+			return isGroup && slices.ContainsFunc(ms, func(m provider.Member) bool { return s.sealedReader(m.Provider, m.Model, sealers) }) || !isGroup && s.sealedReader(p, model, sealers)
+		}
+		if !readable() {
+			// affinity let the lead go (a day since, a restart, its reply
+			// broken off): the usage log still has who answered it (#1367)
+			logged := loggedAnswerers(parent, conv)
+			sealers = append(sealers, logged...)
+			if sealedLead == "" && len(logged) > 0 {
+				sealedLead = logged[0]
+			}
+		}
+		if sealedLead == "" {
+			sealedLead = sealers[1] // a lead's own turn: who answered it
+		}
+		if !readable() {
 			call.Status, call.Error = 400, "sealed subagent task"
 			writeError(w, from, 400, sealedTaskError(call.Model, sealedLead))
 			turnedAway()

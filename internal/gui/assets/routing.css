@@ -57,6 +57,18 @@
 .rt-accts li.rt-sub svg { flex: none; color: var(--fg-2); }
 .rt-accts li.rt-sub code.mdl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rt-accts li.rt-sub i { margin-left: auto; font-style: normal; font-size: 10.5px; font-weight: 560; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--fg-2); white-space: nowrap; }
+/* it folds from its heading (Aiirobyte on Discord): folded, it says what
+   it routes to together on a line of its own */
+.rt-accts li.rt-sub { flex-wrap: wrap; row-gap: 4px; cursor: pointer; user-select: none; }
+.rt-accts li.rt-sub .n { white-space: nowrap; }
+.rt-accts li.rt-sub .n:empty, .rt-accts li.rt-sub em:empty { display: none; }
+.rt-accts li.rt-sub .chev { display: inline-flex; color: var(--muted); transition: transform .2s; }
+.rt-accts li.rt-sub .chev svg { color: inherit; }
+.rt-accts li.rt-sub:hover .chev { color: var(--fg); }
+.rt-accts li.rt-sub.open .chev { transform: rotate(180deg); }
+.rt-accts li.rt-sub em { flex: 1 0 100%; min-width: 0; white-space: normal; padding-left: 21px; }
+.rt-accts li.rt-sub:focus { outline: none; }
+.rt-accts li.rt-sub:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
 .rt-accts li.idle { display: block; color: var(--muted); border-style: dashed; text-align: center; }
 .rt-accts b { font-weight: 560; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rt-accts b > span:not(.ic) { font-weight: 450; color: var(--muted); }

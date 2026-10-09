@@ -3924,7 +3924,7 @@
   // The dialog is the providers page's; while the library has it, its
   // backdrop and Escape close it here.
   $("#modal").addEventListener("click", (e) => {
-    if (modal && e.target === e.currentTarget) { e.stopImmediatePropagation(); closeLibModal(); }
+    if (modal && modalBackdrop(e)) { e.stopImmediatePropagation(); closeLibModal(); }
   }, true);
   document.addEventListener("keydown", (e) => {
     if (!confirmationPending && modal && e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closeLibModal(); }

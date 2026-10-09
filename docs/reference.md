@@ -650,6 +650,13 @@ a price missing one would understate the rest of every call; `0` is a model
 served at no cost, which is a price, not the absence of one. Decimals take a
 point or, in the app's boxes, a comma (`0,25`).
 
+A **Kimi Code** membership's models are counted at the Kimi API model each
+one is, not at the $0 models.dev lists them at for the plan: `k3` and
+`k3-256k` at `kimi-k3`, `kimi-for-coding-highspeed` at
+`kimi-k2.7-code-highspeed`. `kimi-for-coding` is K2.8 Preview, which the API
+doesn't sell, so it has no price until you give it one
+(`magpie model price kimi-code/kimi-for-coding …`).
+
 A **fifth number** is a 1-hour cache write's price. Anthropic bills a cache
 write kept for 5 minutes at 1.25× input and one kept for an hour at 2× input,
 and its usage says which were which (`cache_creation.ephemeral_5m_input_tokens`
@@ -1011,6 +1018,10 @@ Codex and most other subscriptions read every
 account from the vendor this way. A Codex account is also known from each
 reply ChatGPT sends magpie for it, which says what the account has used:
 an account near its usage cap is held from the next turn on (#1295). A
+usage cap is set on the account's row for each of its windows, and a
+window can have one of its own, set from its meter: a five-hour window at
+50% and a weekly one at 40%, or no cap on one window. The account is held
+while any window is past its own. A
 usage cap is still a stop on what magpie has read, not a guarantee: a turn
 already under way can take an account past it, so a 99% cap doesn't
 promise 1% is left. Claude is different: magpie never asks

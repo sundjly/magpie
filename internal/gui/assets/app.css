@@ -877,6 +877,25 @@ body.window .field.solo { grid-column: auto; }
   .led-strip .blk:nth-child(n + 3) { border-top: 1px solid var(--line-2); }
   .led-strip .blk:last-child:nth-child(odd) { grid-column: 1 / -1; }
 }
+/* the heatmap (#1369): 53 weeks of days, Monday on top, the cells growing a
+   little to take a wide card and scrolling sideways in it when narrow */
+.led-heat { position: relative; margin-bottom: 10px; padding: 10px 14px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.led-heat[hidden] { display: none; }
+.heat-title { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.heat-title b { font-size: 12.5px; font-weight: 600; }
+.heat-title span { font-size: 11px; color: var(--muted); }
+.heat-scroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: thin; padding-bottom: 4px; }
+.heat-grid { display: grid; grid-template-columns: auto repeat(53, minmax(10px, 1fr)); grid-template-rows: auto repeat(7, auto); gap: 3px; min-width: min-content; max-width: calc(3em + 53 * 21px); font-size: 10px; color: var(--muted); }
+.heat-grid i { aspect-ratio: 1; border-radius: 3px; min-width: 0; }
+.heat-grid i:hover { outline: 1px solid var(--fg-2); outline-offset: -1px; }
+/* the days of the week stay at the card's edge as the weeks scroll under them */
+.heat-grid .wd { position: sticky; left: 0; z-index: 1; align-self: stretch; display: flex; align-items: center; padding-right: 6px; line-height: 1; white-space: nowrap; background: var(--card); box-shadow: 3px 0 0 var(--card); }
+.heat-grid .mo { min-width: 0; white-space: nowrap; overflow: hidden; line-height: 1.2; padding-bottom: 2px; }
+.heat-foot { display: flex; justify-content: flex-end; margin-top: 4px; }
+.heat-tip { position: absolute; z-index: 3; display: flex; flex-direction: column; gap: 2px; padding: 6px 9px; background: var(--pop-bg); border-radius: 8px; box-shadow: var(--shadow); font-size: 11.5px; white-space: nowrap; pointer-events: none; font-variant-numeric: tabular-nums; }
+.heat-tip[hidden] { display: none; }
+.heat-tip b { font-weight: 600; }
+.heat-tip span { color: var(--muted); }
 /* over the requests: their sum, and at its right the request archive's switch */
 .led-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin: 0 2px 7px; min-width: 0; }
 .led-head .led-sum { margin: 0; min-width: 0; }
@@ -1958,6 +1977,9 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .acc .text.quiet { opacity: 0; transition: opacity .15s; }
 .acc:hover .text.quiet { opacity: 1; }
 .acc .text.quiet:focus-visible { opacity: 1; }
+/* an account signed out (#1363) shows its Remove without a hover: it is
+   one of the two ways out of that state, beside Sign in again */
+.acc.signed-out .text.quiet { opacity: 1; }
 .acc.new { animation: sub-in .5s cubic-bezier(.2, .8, .2, 1); }
 .acc.new .dot { animation: copy-pop .45s cubic-bezier(.2, .8, .2, 1); }
 @keyframes sub-in { from { opacity: 0; transform: translateY(-4px); background: var(--pill-hover); } }
@@ -2119,6 +2141,13 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .acc .aq-track.capped { position: relative; overflow: visible; }
 .acc .aq-track.capped i { overflow: hidden; }
 .acc .aq-cap { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--accent); }
+/* a window's meter sets its own cap (willz on Discord): a button that
+   looks as the meter does, and the window's own cap beside its figure */
+.acc .aq-win { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.acc .aq-set { padding: 1px 4px; margin: -1px -4px; border-radius: 4px; cursor: default; }
+.acc .aq-set:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acc .aq-set:hover, .acc .aq-set.open { background: var(--pill-hover); }
+.acc .aq-own { color: var(--accent); font-weight: 500; }
 .acc .aq-w b { color: var(--fg-2); font-weight: 600; font-variant-numeric: tabular-nums; }
 .acc .aq-w.full b, .acc .aq-w.full .aq-r { color: var(--fg); }
 .acc .aq-w.full .aq-track i { background: var(--fg); }

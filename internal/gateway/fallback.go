@@ -51,8 +51,8 @@ type candidate struct {
 	capped *capHold
 }
 
-// capHold is how an account is held at its usage cap: the cap, the share
-// of the fullest window at or past it, and when the last such window
+// capHold is how an account is held at its usage cap: the cap of the
+// fullest window at or past its own cap, that window's share used, and when the last such window
 // renews (zero when one doesn't say). noCredits: it is a Codex account
 // held at 100% as it is set not to spend its credits (cap is 100 then).
 type capHold struct {
@@ -491,23 +491,24 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 }
 
 // capHeld is how the account acct of p is held at its usage cap for
-// model at now, or at 100% as a Codex account set not to spend its
-// credits; nil when nothing holds it or it is below the share. Its windows
+// model at now — a window at or past its own cap, else the account's — or
+// at 100% as a Codex account set not to spend its credits; nil when
+// nothing holds it or every window is below its share. Its windows
 // are those last read (allowances), as smart routing weighs them.
 func capHeld(p, acct provider.Provider, model string, now time.Time) *capHold {
 	if acct.Account == nil {
 		return nil
 	}
 	a := acct.Account
-	share, noCredits := provider.HoldShare(p, a.Agent, a.User)
-	if share <= 0 {
+	caps := provider.HoldCaps(p, a.Agent, a.User)
+	if !caps.Holds() {
 		return nil
 	}
-	held, used, back := allowances(a.UsageAgent())[a.User].CapHeld(model, share, now)
-	if !held {
+	h := allowances(a.UsageAgent())[a.User].CapHeld(model, caps, now)
+	if h == nil {
 		return nil
 	}
-	return &capHold{cap: share, used: used, back: back, noCredits: noCredits}
+	return &capHold{cap: h.Cap, used: h.Used, back: h.Back, noCredits: h.Credits}
 }
 
 // cappedError says why a request for model went nowhere when every account

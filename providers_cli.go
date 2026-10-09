@@ -42,6 +42,9 @@ const providerUsage = `usage:
   magpie provider account-cap <id> [account [percent|off]]
                                           use a subscription account up to a share of each usage window (e.g. 70):
                                           at it, routing takes the account for used up until the window renews
+  magpie provider account-cap <id> <account> --window <name> [percent|none|default]
+                                          a share for one window alone (e.g. "5 hours" 50): none is no cap on it,
+                                          default has it follow the account's cap
   magpie provider account-concurrency <id> [account|key [n|off|default]]
                                           how many requests one account or key has out at once, over every model,
                                           routing group and agent: its own, off for none, default for the provider's
@@ -1133,10 +1136,30 @@ func accountModelsCmd(rest []string) error {
 
 // accountCapCmd shows, or sets with a share or off, the usage cap of a
 // subscription's accounts: the share of each window one is used to at most
-// (provider.AccountCaps).
+// (provider.AccountCaps); with --window <name>, the share of that window
+// alone (provider.AccountWindowCaps).
 func accountCapCmd(rest []string) error {
-	if len(rest) < 1 {
-		return fmt.Errorf("magpie provider account-cap <id> [account [percent|off]]")
+	usage := fmt.Errorf("magpie provider account-cap <id> [account [percent|off]]\n       magpie provider account-cap <id> <account> --window <name> [percent|none|default]")
+	window, windowSet := "", false
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		if v, ok := strings.CutPrefix(a, "--window="); ok {
+			window, windowSet = v, true
+			rest = slices.Delete(slices.Clone(rest), i, i+1)
+			i--
+			continue
+		}
+		if a == "--window" {
+			if i+1 >= len(rest) {
+				return usage
+			}
+			window, windowSet = rest[i+1], true
+			rest = slices.Delete(slices.Clone(rest), i, i+2)
+			i--
+		}
+	}
+	if len(rest) < 1 || windowSet && (len(rest) < 2 || strings.TrimSpace(window) == "") {
+		return usage
 	}
 	p, err := provider.Find(rest[0])
 	if err != nil {
@@ -1146,12 +1169,23 @@ func accountCapCmd(rest []string) error {
 		return fmt.Errorf("%s has keys, not subscription accounts with usage windows to cap", p.Name)
 	}
 	if len(rest) > 2 {
-		cap, err := provider.ParseCap(rest[2])
-		if err != nil {
-			return err
-		}
-		if err := provider.SetAccountCap(p.ID, rest[1], cap); err != nil {
-			return err
+		if windowSet {
+			cap, err := parseWindowCap(rest[2])
+			if err != nil {
+				return err
+			}
+			err = provider.SetWindowCap(p.ID, rest[1], window, cap)
+			if err != nil {
+				return err
+			}
+		} else {
+			cap, err := provider.ParseCap(rest[2])
+			if err != nil {
+				return err
+			}
+			if err := provider.SetAccountCap(p.ID, rest[1], cap); err != nil {
+				return err
+			}
 		}
 		if p, err = provider.Find(p.ID); err != nil {
 			return err
@@ -1169,13 +1203,40 @@ func accountCapCmd(rest []string) error {
 		return nil
 	}
 	for _, r := range refs {
-		if c := p.AccountCap(r); c > 0 {
-			fmt.Printf("%s · capped at %d%% of each usage window\n", r, c)
+		caps := p.CapsOf(r)
+		if caps.All > 0 {
+			fmt.Printf("%s · capped at %d%% of each usage window\n", r, caps.All)
+		} else if len(caps.Windows) > 0 {
+			fmt.Println(r, muted.Render("· no cap on its other windows: used to 100%"))
 		} else {
 			fmt.Println(r, muted.Render("· no cap: used to 100%"))
 		}
+		for _, w := range slices.Sorted(maps.Keys(caps.Windows)) {
+			if c := caps.Windows[w]; c >= 100 {
+				fmt.Printf("  %s · no cap on this window\n", w)
+			} else {
+				fmt.Printf("  %s · capped at %d%%\n", w, c)
+			}
+		}
 	}
 	return nil
+}
+
+// parseWindowCap reads a window's own share as the CLI takes it: "50",
+// "50%", none (off, 100) for no cap on that window, default (-) to follow
+// the account's cap.
+func parseWindowCap(s string) (int, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "default", "account", "-", "0":
+		return 0, nil
+	case "none", "off", "no", "100", "100%":
+		return 100, nil
+	}
+	n, err := provider.ParseCap(s)
+	if err != nil {
+		return 0, fmt.Errorf("a window's cap is a share from %d to %d (percent), none for no cap on it, or default to follow the account's cap, not %q", provider.MinCap, provider.MaxCap, s)
+	}
+	return n, nil
 }
 
 // accountConcurrencyCmd shows, or sets, the limit on requests at once of a

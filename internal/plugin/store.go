@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,7 @@ import (
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/steady"
+	"github.com/yetone/magpie/internal/update"
 )
 
 // Entry is one plugin the user added.
@@ -337,7 +339,11 @@ func Target(spec string) string {
 
 // Add installs a plugin and adds it to the list, in place of one of the
 // same package. A package is installed with its scripts left unrun.
-func Add(ctx context.Context, spec string) (Entry, error) {
+func Add(ctx context.Context, spec string) (Entry, error) { return add(ctx, spec, "") }
+
+// add is Add, an npm package installed at the version given when there is
+// one (installAt), its spec kept as given.
+func add(ctx context.Context, spec, version string) (Entry, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return Entry{}, errors.New("no plugin given")
@@ -368,7 +374,11 @@ func Add(ctx context.Context, spec string) (Entry, error) {
 		if Name(spec) == spec {
 			spec += "@latest"
 		}
-		if err := install(ctx, spec); err != nil {
+		if version != "" {
+			if err := installAt(ctx, Name(spec), version); err != nil {
+				return Entry{}, err
+			}
+		} else if err := install(ctx, spec); err != nil {
 			return Entry{}, err
 		}
 	}
@@ -455,12 +465,24 @@ func notPlugin(target string) error {
 }
 
 // Update installs the version of each npm plugin its spec says now
-// (latest, for the most part), and fetches each git one again.
+// (latest, for the most part: npm's newest, asked now, installAt), and
+// fetches each git one again.
 func Update(ctx context.Context) error {
 	var errs []error
 	for _, e := range Load().Plugins {
 		if !IsPath(e.Spec) {
-			if err := reinstall(ctx, e.Spec); err != nil {
+			v := ""
+			if !IsGit(e.Spec) && !Pinned(e.Spec) {
+				v = newestOf(ctx, Name(e.Spec))
+			}
+			var err error
+			if v != "" {
+				err = installAt(ctx, Name(e.Spec), v)
+			} else {
+				// pinned, a git one, or npm not answering: as its spec says
+				err = reinstall(ctx, e.Spec)
+			}
+			if err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", e.Spec, err))
 				continue
 			}
@@ -573,6 +595,86 @@ func install(ctx context.Context, spec string) error {
 		return fmt.Errorf("bun add %s: %v: %s", spec, err, lastLines(string(out), 6))
 	}
 	return nil
+}
+
+// installAt installs the version of the npm package given, not a tag, and
+// checks it is the one installed. Asked for pkg@latest, bun resolves
+// "latest" by its own config: a minimumReleaseAge in the user's bunfig
+// holds back every version younger than it, and a registry of the user's
+// own (an .npmrc) may not have the newest yet. Either way bun installs an
+// older version and exits 0, so an update said it was done and nothing
+// changed (sweanng424 on Discord: Factory stayed at 0.1.18 with 0.1.21 out,
+// through restarts and the hourly updates). Asked for the version, bun
+// says why it can't install it.
+func installAt(ctx context.Context, pkg, version string) error {
+	if err := install(ctx, pkg+"@"+version); err != nil {
+		// what bun said comes first: the page's status line shows the
+		// start of a long message
+		if m := minAge.FindStringSubmatch(err.Error()); m != nil {
+			return fmt.Errorf("%s %s isn't installed yet: Bun's minimumReleaseAge (in a .bunfig.toml) holds back versions published less than %s ago, and magpie installs it once it is older (%w)", pkg, version, ageText(m[1]), err)
+		}
+		var said []string
+		for _, l := range strings.Split(err.Error(), "\n") {
+			if l = strings.TrimSpace(l); strings.HasPrefix(l, "error:") {
+				said = append(said, strings.TrimSpace(strings.TrimPrefix(l, "error:")))
+			}
+		}
+		if len(said) > 0 {
+			return fmt.Errorf("%s %s isn't installed: %s (%w)", pkg, version, strings.Join(said, "; "), err)
+		}
+		return err
+	}
+	if got := Installed(pkg); got == "" || update.Newer(version, got) {
+		if got == "" {
+			got = "nothing"
+		}
+		return fmt.Errorf("bun add %s@%s installed %s", pkg, version, got)
+	}
+	return nil
+}
+
+// minAge is bun's word for a version its minimumReleaseAge holds back.
+var minAge = regexp.MustCompile(`minimum-release-age: (\d+) seconds`)
+
+// ageText is a number of seconds as a reader says it: 2 days, 12 hours.
+func ageText(secs string) string {
+	n, err := strconv.Atoi(secs)
+	switch {
+	case err != nil:
+		return secs + " seconds"
+	case n >= 86400 && n%86400 == 0:
+		return plural(n/86400, "day")
+	case n >= 3600 && n%3600 == 0:
+		return plural(n/3600, "hour")
+	case n >= 60 && n%60 == 0:
+		return plural(n/60, "minute")
+	}
+	return plural(n, "second")
+}
+
+func plural(n int, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return strconv.Itoa(n) + " " + unit + "s"
+}
+
+// newestOf is npm's newest version of the package, asked now, "" when npm
+// didn't say; what it says is kept, as Info keeps it (tests stub it).
+var newestOf = func(ctx context.Context, name string) string {
+	c, cancel := context.WithTimeout(ctx, checkEach)
+	info, err := npmAsk(c, name)
+	cancel()
+	if err == nil || errors.Is(err, errNotFound) {
+		npmMu.Lock()
+		npmCached()[name] = npmEntry{info, time.Now()}
+		saveNPM()
+		npmMu.Unlock()
+	}
+	if err != nil {
+		return ""
+	}
+	return info.Version
 }
 
 // piAgent is the package pi's extensions import pi from; the host loads

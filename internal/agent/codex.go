@@ -22,6 +22,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/sessions"
 )
 
 // Codex talks the OpenAI Responses API. Signed in to ChatGPT, it is
@@ -172,7 +173,12 @@ func codexIn(at place) *Agent {
 			// model is never given the tool, so a Codex on magpie can't draw
 			// (the request that names model/draws never happens at all).
 			// uses_openai_actor_authorization() is exactly this check.
-			edit.KV{Path: "http_headers", Value: edit.Raw(`{ "x-openai-actor-authorization" = "magpie" }`)},
+			// An Inline table: a config that holds the headers as their own
+			// [model_providers.magpie.http_headers] table, or as dotted keys,
+			// gets the header set there, the user's others kept; written
+			// inline beside that table it defined http_headers twice and
+			// every model switch failed (wztlink1013 on Discord).
+			edit.KV{Path: "http_headers", Value: edit.Inline{{Path: "x-openai-actor-authorization", Value: "magpie"}}},
 		)
 	}
 	hasProvider := func() bool {
@@ -259,10 +265,50 @@ func codexIn(at place) *Agent {
 		}
 		return out
 	}
+	// putThreadTables writes a table for each provider a Codex thread was
+	// started on that config.toml has none of, pointed at magpie. The
+	// Codex app resumes a thread on its own provider, and without that
+	// table it loads no config for it: "Model provider `custom` not found",
+	// a thread started through CC Switch reopened after CC Switch rewrote
+	// config.toml without its table (#1372). Codex's built-in providers
+	// need none, and magpie's own is putProvider's. A table written so
+	// stays, as magpie's own does, for the threads that name it.
+	putThreadTables := func() error {
+		// the providers config.toml has, however spelled (a table, inline,
+		// dotted keys); one that doesn't parse is left alone
+		raw, err := edit.Read(path)
+		if err != nil {
+			return nil
+		}
+		var cfg struct {
+			Providers map[string]any `toml:"model_providers"`
+		}
+		if toml.Unmarshal(raw, &cfg) != nil {
+			return nil
+		}
+		for _, id := range sessions.CodexThreadProviders(dir) {
+			if _, ok := cfg.Providers[id]; ok || id == magpieID || codexBuiltinProvider[id] {
+				continue
+			}
+			if err := edit.SetTOMLTable(path, "model_providers."+id,
+				edit.KV{Path: "name", Value: id},
+				edit.KV{Path: "base_url", Value: at.v1()},
+				edit.KV{Path: "wire_api", Value: "responses"},
+				edit.KV{Path: "experimental_bearer_token", Value: at.gwKey()},
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	// takeTables points CC Switch's tables at magpie, each one's own base
 	// URL kept in the stash for giveTables (a table already on magpie's
-	// keeps the one kept for it)
+	// keeps the one kept for it), and writes the tables threads name that
+	// are gone (putThreadTables)
 	takeTables := func() error {
+		if err := putThreadTables(); err != nil {
+			return err
+		}
 		was := map[string]string{}
 		json.Unmarshal([]byte(stashLoad()[at.key("codex.tables")]), &was)
 		for id, u := range ccSwitchTables() {
@@ -1029,6 +1075,15 @@ func codexIn(at place) *Agent {
 // into Codex's config: "custom", and "cc-switch", "cc-switch-2"… from its
 // older versions. Its "cc-switch-official" is its own proxy to OpenAI.
 var ccSwitchProvider = regexp.MustCompile(`^(custom|cc-switch(-[0-9]+)?)$`)
+
+// codexBuiltinProvider is the providers Codex has built in, which a thread
+// can name with no table in config.toml (codex-rs model-provider-info:
+// built_in_model_providers); "ollama-chat" is one it no longer has, and
+// tells the user how to fix itself.
+var codexBuiltinProvider = map[string]bool{
+	"openai": true, "amazon-bedrock": true, "amazon-bedrock-runtime": true,
+	"ollama": true, "lmstudio": true, "ollama-chat": true,
+}
 
 func contains(xs []string, x string) bool {
 	for _, v := range xs {
