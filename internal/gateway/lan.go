@@ -315,6 +315,9 @@ func accountOf(p provider.Provider) string {
 }
 
 func appendUsage(r *http.Request, rec usage.Record) {
+	if rec.Session == "" {
+		rec.Session = sessionOf(r.Header)
+	}
 	who := access.Caller(r.Context())
 	rec.CallerKeyID, rec.CallerKeyName = who.KeyID, who.KeyName
 	rec.Local = local(r)

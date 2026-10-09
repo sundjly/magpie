@@ -1010,12 +1010,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		settings.CarryPerModel(&in, &cur)
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.LANKeyID = cur.LANKeyID
-		in.Port = cur.Port                               // set on its own (port below), which moves the gateway
-		in.CORSOrigins = cur.CORSOrigins                 // set on its own (cors below)
-		in.GitHubToken = cur.GitHubToken                 // set on its own (github-token below), never sent to the page
-		in.RequestArchive = cur.RequestArchive           // the Gateway page's, set on its own
-		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB // in settings.json only
-		in.RedactRules = cur.RedactRules                 // the masking rules, set on their own
+		in.Port = cur.Port                                 // set on its own (port below), which moves the gateway
+		in.CORSOrigins = cur.CORSOrigins                   // set on its own (cors below)
+		in.GitHubToken = cur.GitHubToken                   // set on its own (github-token below), never sent to the page
+		in.RequestArchive = cur.RequestArchive             // the Gateway page's, set on its own
+		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB   // in settings.json only
+		in.GatewayConversations = cur.GatewayConversations // Sessions' explicit recording consent
+		in.RedactRules = cur.RedactRules                   // the masking rules, set on their own
 		// used or left is the Usage page's toggle as much as Settings', set on its own
 		in.QuotaLeft = cur.QuotaLeft
 		in.UsageOrder = cur.UsageOrder // the Usage page's, dragged there
@@ -1032,6 +1033,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.CodexTitles = cur.CodexTitles // set on its own (codex-titles below)
 		// and so is the model Codex's auto-review runs on (codex-auto-review)
 		in.CodexAutoReview = cur.CodexAutoReview
+		// and the model Codex's subagents are put on, set in Codex's row
+		in.CodexSubagentModel = cur.CodexSubagentModel
 		in.ChinaMirror = cur.ChinaMirror // the Plugins page's, set on its own
 		// which Codex accounts spend a reset by themselves, set on the Usage card
 		in.CodexAutoReset = cur.CodexAutoReset

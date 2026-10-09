@@ -44,6 +44,22 @@ type aBlock struct {
 	CacheControl map[string]string `json:"cache_control,omitempty"`
 }
 
+// MarshalJSON writes a thinking block's text even when it is empty.
+// Messages requires the field: a signed block with no text (Claude Code's
+// thinking when its display is omitted) sent without it is refused,
+// "messages.N.content.0.thinking.thinking: Field required" (#1447). Every
+// other block keeps its omitempty fields.
+func (b aBlock) MarshalJSON() ([]byte, error) {
+	type plain aBlock
+	if b.Type != "thinking" {
+		return json.Marshal(plain(b))
+	}
+	return json.Marshal(struct {
+		plain
+		Thinking string `json:"thinking"`
+	}{plain(b), b.Thinking})
+}
+
 // ephemeral marks a prompt-cache breakpoint.
 var ephemeral = map[string]string{"type": "ephemeral"}
 
@@ -471,6 +487,10 @@ func buildAnthropic(r *Request, model string) []byte {
 	if len(r.Metadata) > 0 {
 		out["metadata"] = r.Metadata
 	}
+	if len(r.Safeguards) > 0 && anthropicModel.MatchString(model) {
+		// auto mode's review, which Claude alone does (automode.go)
+		out["safeguards"] = r.Safeguards
+	}
 	if len(r.Tools) > 0 || r.WebSearch {
 		var tools []map[string]any
 		for _, t := range r.Tools {
@@ -591,6 +611,8 @@ func decodeAnthropic(data string, emit func(Event)) error {
 			Thinking    string `json:"thinking"`
 			Signature   string `json:"signature"`
 			StopReason  string `json:"stop_reason"`
+			// auto mode's review of the reply's calls (automode.go)
+			SafeguardResults json.RawMessage `json:"safeguard_results"`
 		} `json:"delta"`
 		Usage aUsage `json:"usage"`
 		Error struct {
@@ -628,7 +650,11 @@ func decodeAnthropic(data string, emit func(Event)) error {
 		if ev.Delta.StopReason != "" {
 			emit(Event{Kind: KStop, Stop: stopFromAnthropic(ev.Delta.StopReason)})
 		}
-		emit(Event{Kind: KUsage, Usage: ev.Usage.usage()})
+		var review json.RawMessage
+		if r := ev.Delta.SafeguardResults; len(r) > 0 && string(r) != "null" {
+			review = r
+		}
+		emit(Event{Kind: KUsage, Usage: ev.Usage.usage(), SafeguardResults: review})
 	case "error":
 		emit(Event{Kind: KError, Text: ev.Error.Message, Code: refusedCode(data)})
 	}

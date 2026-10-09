@@ -27,6 +27,7 @@
   let loading = 0;
   let fitObserver = null;
   let focus = null;           // { agent, id, until }: a session to bring into sight once drawn
+  let recordingBusy = false;
 
   const TRASH = "M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M7 7v4M9 7v4";
   const TERM = "M3 4.5 6 7.5 3 10.5M7.5 11.5h5.5";
@@ -134,6 +135,64 @@
     load(name);
   }
 
+  // The gateway conversations setting (#1355): a card above the list, shown
+  // only where it applies — when this agent has sessions seen through the
+  // gateway, in gateway mode, or once recording is on or text is kept. A
+  // switch that says what it keeps and where, and, while there is kept
+  // text, a delete that says what it deletes and asks first in magpie's own
+  // dialog (lee on Discord: a bare checkbox and a lone trash icon under the
+  // tabs read as stray controls).
+  const recordingApplies = () => typeof data?.recording === "boolean"
+    && (data.recording || data.recorded || (typeof gatewayMode !== "undefined" && gatewayMode) || !!data.sessions?.some((s) => s.gateway));
+
+  function recordingCard() {
+    const on = data.recording;
+    const card = el("div", "list row sm-record" + (on ? " on" : ""));
+    const sw = el("button", "lib-switch sm-record-switch" + (on ? " on" : ""));
+    sw.type = "button";
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", String(on));
+    sw.disabled = recordingBusy;
+    sw.append(el("i"));
+    const words = el("div", "sm-record-words");
+    const name = el("span", "sm-record-name", t("Record gateway conversations"));
+    name.id = "smRecordName";
+    sw.setAttribute("aria-labelledby", name.id);
+    words.append(name, el("span", "sm-record-sub", t(on
+      ? "On: what agents send through the gateway, and the replies, are kept on this computer only, for up to 7 days (256 MiB), to read under each gateway session"
+      : "Off: gateway sessions show only what they used. Turned on, their text is kept on this computer only, for up to 7 days (256 MiB)")));
+    sw.onclick = async (e) => {
+      e.stopPropagation();
+      if (sw.disabled) return;
+      if (!on && !await confirmAction(t("Record gateway conversations"), t("Prompts, replies and tool results may contain private code and files. Store them on this server for up to 7 days (256 MiB total)? Recognized secrets are masked, but this is not a privacy guarantee."), t("Enable"))) return;
+      recordingBusy = true;
+      sw.disabled = true;
+      try {
+        const result = await api("sessions/recording", { on: !on });
+        data.recording = result.recording;
+      } catch (err) { status(err.message, "err"); }
+      finally { recordingBusy = false; draw(); }
+    };
+    card.append(sw, words);
+    if (data.recorded) {
+      const clear = el("button", "text sm-record-clear");
+      clear.type = "button";
+      clear.disabled = recordingBusy;
+      clear.append(svg(TRASH, 13, 1.4), el("span", "", t("Delete saved conversations…")));
+      clear.onclick = async (e) => {
+        e.stopPropagation();
+        if (!await confirmAction(t("Stop recording and clear saved conversations"), t("Delete all locally recorded gateway conversation content? Usage totals and native session files are kept."), t("Delete"))) return;
+        recordingBusy = true;
+        clear.disabled = true;
+        try { await api("sessions/recording", { clear: true }); talks.clear(); await load(); }
+        catch (err) { status(err.message, "err"); }
+        finally { recordingBusy = false; draw(); }
+      };
+      card.append(clear);
+    }
+    return card;
+  }
+
   function head() {
     const h = el("div", "usage-head sm-head");
     const wrap = el("div", "sm-switch");
@@ -198,6 +257,7 @@
       return box;
     }
     if (trashOn) { box.append(...trash()); return box; }
+    if (recordingApplies()) box.append(recordingCard());
     if (!data.agents.length) {
       const e = el("div", "empty-state");
       e.append(el("b", "", t("No sessions yet")), el("span", "", t("Claude Code's, Codex's, Hermes's, OpenCode's and Pi's sessions on this computer show up here, by the folder they ran in.")));
@@ -527,6 +587,7 @@
     if (s.path) line(t("File"), s.path + (s.files > 1 ? " " + t("+{n} more", { n: s.files - 1 }) : ""));
     if (s.transcript) {
       const box = el("div", "sess-talk");
+      box.dataset.talk = s.agent + "/" + s.id;
       const b = el("button", "text sess-talk-btn");
       b.type = "button";
       const show = () => {
@@ -624,20 +685,29 @@
     const got = talks.get(k);
     if (!got) {
       box.replaceChildren(el("p", "cx-none", t("Reading…")));
-      talks.set(k, { busy: true });
+      const pending = { busy: true };
+      talks.set(k, pending);
+      const finish = (value) => {
+        // A refresh or clear invalidates older responses, even for the same ID.
+        if (talks.get(k) !== pending) return;
+        talks.set(k, value);
+        if (!talkOpen.has(k)) return;
+        for (const currentBox of page.querySelectorAll(".sess-talk")) {
+          if (currentBox.dataset.talk === k) drawTalk(currentBox, s);
+        }
+      };
       api("sessions/transcript?agent=" + encodeURIComponent(s.agent) + "&id=" + encodeURIComponent(s.id))
-        .then((tr) => talks.set(k, { tr }), (err) => talks.set(k, { err: err.message }))
-        .then(() => { if (box.isConnected && talkOpen.has(k)) drawTalk(box, s); });
+        .then((tr) => finish({ tr }), (err) => finish({ err: err.message }));
       return;
     }
-    if (got.busy) return;
+    if (got.busy) { box.replaceChildren(el("p", "cx-none", t("Reading…"))); return; }
     if (got.err) { box.replaceChildren(el("p", "cx-none", got.err)); talks.delete(k); return; }
     const parts = got.tr?.parts || [];
     const out = [];
-    if (!parts.length) out.push(el("p", "cx-none", t("Nothing was said here")));
+    if (!parts.length) out.push(el("p", "cx-none", t(got.tr?.source === "gateway" ? "No saved gateway content for this session" : "Nothing was said here")));
     for (const p of parts) out.push(ledSaid(p));
     if (got.tr?.cut) out.push(el("p", "cx-none", t("There was more than is shown here")));
-    out.push(el("p", "cx-src", t("Read from the agent's session file; magpie keeps no copy")));
+    out.push(el("p", "cx-src", t(got.tr?.source === "gateway" ? "Recorded gateway traffic only; earlier, expired or uncaptured content may be missing" : "Read from the agent's session file; magpie keeps no copy")));
     box.replaceChildren(...out);
   }
 

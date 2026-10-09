@@ -152,7 +152,8 @@ var featured = []MarketServer{
 }
 
 // magpieCommand stands for this magpie's own binary in a featured server's
-// command, which InstallServer puts in when it is added.
+// command, which InstallServer puts in when it is added, and in a library
+// carried to another computer, which reads it as its own (self_here.go).
 const magpieCommand = "magpie"
 
 // selfServerName is the name magpie's own image generation server is written
@@ -176,10 +177,7 @@ func selfCommand(s *Server) {
 	if s.Command != magpieCommand {
 		return
 	}
-	if exe, err := os.Executable(); err == nil {
-		if r, err := filepath.EvalSymlinks(exe); err == nil {
-			exe = r
-		}
+	if exe, err := selfExe(); err == nil {
 		s.Command = exe
 	}
 	if a := os.Getenv("MAGPIE_ADDR"); a != "" {

@@ -151,6 +151,10 @@ func (l *Library) syncMCP(t *Target, b *backups, res *Result) {
 		}
 		s, _ = t.MCP.side(s)
 		old := entries[s.Name]
+		if err := t.MCP.foreign(old); err != nil {
+			res.fail(id, "mcp:"+s.Name, err)
+			continue
+		}
 		if old != nil {
 			if cur, ok := t.MCP.current(s.Name, old, s); ok && cur.same(s) && t.MCP.has(s) && !t.MCP.behind(s, old) {
 				mine = append(mine, s.Name)

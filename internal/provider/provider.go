@@ -51,6 +51,14 @@ type Provider struct {
 	Preset string   `json:"preset,omitempty"` // preset this was created from, if any
 	Key    string   `json:"key"`              // API key, as typed by the user
 
+	// AccessKeyID and SecretAccessKey are a Volcengine account's access
+	// key (TakesVolcAccessKey), what Ark tells its Coding or Agent Plan's
+	// windows to (volcengine_usage.go); not the plan's inference key in
+	// Key. They are kept, backed up and synced as the keys are: the Secret
+	// is never sent to the GUI, and a backup without keys has neither.
+	AccessKeyID     string `json:"accessKeyID,omitempty"`
+	SecretAccessKey string `json:"secretAccessKey,omitempty"`
+
 	// KeyName names the key in use, and Keys are the provider's other
 	// accounts: keys saved to switch to (see keys.go).
 	KeyName string       `json:"keyName,omitempty"`
@@ -676,6 +684,9 @@ func AddCopy(p Provider, from string) (string, error) {
 	}
 	if p.BalanceToken == "" {
 		p.BalanceToken = src.BalanceToken
+	}
+	if p.AccessKeyID == "" && p.SecretAccessKey == "" {
+		p.AccessKeyID, p.SecretAccessKey = src.AccessKeyID, src.SecretAccessKey
 	}
 	if p.ZhipuTeam == nil {
 		p.ZhipuTeam = src.ZhipuTeam

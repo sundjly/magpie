@@ -29,7 +29,8 @@ const providerUsage = `usage:
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
                                           again, it adds another (deepseek-2); k=v pairs too: id, name, header.X-Foo
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, gemini, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.token, models.url, search
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, gemini, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.token, models.url, search,
+                                          access.key, access.secret (a Volcengine account's access key, for its plan's windows)
   magpie provider set <id> k=v…           change a provider's settings, with the same k=v pairs as add
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
@@ -647,12 +648,12 @@ func announce(id string) error {
 	defer cancel()
 	if ms, err := saved.Fetch(ctx); err == nil {
 		fmt.Println(green.Render("✓"), len(ms), "models from", fetchedFrom(*saved))
-	} else if !saved.Decides() {
+	} else if !saved.DecideOnly() {
 		// the URLs asked and what they said; the base stays as given
 		fmt.Println(amber.Render("!"), muted.Render(err.Error()))
 	}
 	n := len(saved.Exposed())
-	if saved.Decides() {
+	if saved.DecideOnly() {
 		fmt.Println("  it routes groups: magpie group set <id> effort=auto classifier="+saved.ID+"/"+saved.Jev(),
 			muted.Render("· or a rule's intent=…"))
 		return nil
@@ -823,6 +824,12 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.BalancePath = v
 		case "balance.token":
 			p.BalanceToken = v
+		case "access.key":
+			// a Volcengine account's access key, which Ark tells its
+			// Coding or Agent Plan's windows to (#1427)
+			p.AccessKeyID = v
+		case "access.secret":
+			p.SecretAccessKey = v
 		case "models.url":
 			p.ModelsURL = v
 		case "search":

@@ -38,6 +38,25 @@ func DefaultEffort(e []string) string {
 	return e[0]
 }
 
+// TakesEffort is the effort Codex takes for the model id when none is set:
+// the default_reasoning_level of the entry it reads for it. Codex's own
+// model and a ChatGPT account's (codex/) keep their entry from Codex's
+// models_cache.json, so it is that entry's (gpt-6.1-sol: low); one of
+// magpie's other models takes the one Entries writes. "" when the model
+// has no levels, or Codex's entry names none.
+func TakesEffort(ms []catalog.Model, id string) string {
+	e := catalog.Efforts(ms, id)
+	if len(e) == 0 {
+		return ""
+	}
+	slug, chatgpt := strings.CutPrefix(id, "codex/")
+	if raw, ok := CacheEntries()[slug]; ok && (chatgpt || slug == id) {
+		d, _ := raw["default_reasoning_level"].(string)
+		return d
+	}
+	return DefaultEffort(e)
+}
+
 // Catalog renders models as a whole models.json.
 func Catalog(ms []catalog.Model) []byte {
 	out := struct {

@@ -2180,3 +2180,20 @@ keys it matches, the routing header in the other language after
 `setLocale`, the plugins listings arriving while the reader types. In
 English, Chinese, Japanese and German, at 1100px and 440px. `MAGPIE_FILTER_ASSETS` points it
 at another assets folder, to see it fail on the old code.
+
+## Volcengine Ark access key
+
+`volc-access-key.test.cjs` covers #1427: an Ark provider's editor (saved or
+being added) asks for the account's AccessKey ID and Secret Access Key, which
+the Usage page reads the Coding or Agent Plan's windows with. The saved Secret
+is never in the page: only that one is saved, as the placeholder. Save posts
+the ID and a Secret only when a new one was typed; Remove posts
+`clearAccessKey`; an ID with no Secret is refused before anything is posted.
+A relay and DeepSeek have neither field and post none. Every string is in
+zh, zh-TW, ja and de. English and Chinese, Chromium and WebKit.
+`TestProviderSaveKeepsVolcengineSecret` checks the server side.
+
+```sh
+node --test internal/gui/tests/volc-access-key.test.cjs
+go test -tags nogui ./internal/gui -run TestProviderSaveKeepsVolcengineSecret
+```

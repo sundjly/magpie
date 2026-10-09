@@ -1184,10 +1184,16 @@ func TestDshServerName(t *testing.T) {
 func TestDshImportKeepsJS(t *testing.T) {
 	h := sandbox(t)
 	p := filepath.Join(h, ".dsh/profiles/web/cordis.patch.yml")
-	write(t, p, "- insert:\n    - id: mcp-engram\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: engram\n        transport: stdio\n        command: engram\n        cwd: !!js process.cwd()\n        env:\n          HOME: !!js process.env.HOME\n")
+	write(t, p, "- insert:\n    - id: mcp-engram\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: engram\n        transport: stdio\n        command: engram\n        cwd: !!js process.cwd()\n        env:\n          HOME: !!js require('os').homedir()\n")
 	v, _ := Read(nil)
 	if len(v.FoundServers) != 0 {
 		t.Errorf("an env dsh works out read as a server: %+v", v.FoundServers)
+	}
+	// a variable read whole is the library's reference (#1435)
+	write(t, p, "- insert:\n    - id: mcp-engram\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: engram\n        transport: stdio\n        command: engram\n        cwd: !!js process.cwd()\n        env:\n          HOME: !!js process.env.HOME\n")
+	v, _ = Read(nil)
+	if len(v.FoundServers) != 1 || v.FoundServers[0].Server.Env["HOME"] != "${HOME}" {
+		t.Errorf("found: %+v", v.FoundServers)
 	}
 	write(t, p, "- insert:\n    - id: mcp-engram\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: engram\n        transport: stdio\n        command: engram\n        cwd: !!js process.cwd()\n")
 	ok(t)(ImportServer("engram"))
