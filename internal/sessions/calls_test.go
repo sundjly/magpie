@@ -610,7 +610,9 @@ func TestCallsCoworkMSIX(t *testing.T) {
 	data := filepath.Join(local, "Packages", "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude")
 	writeLines(t, filepath.Join(data, "Local State"), `{}`)
 
-	if ds := desktopDataDirs(); len(ds) != 3 || ds[0] != data {
+	// the package's first, then the real ones a newer packaged Desktop
+	// (2.31226) keeps its 3p mode in
+	if ds := desktopDataDirs(); len(ds) != 6 || ds[0] != data || ds[5] != filepath.Join(local, "Claude-3p") {
 		t.Fatalf("dirs: %v", ds)
 	}
 	cw := filepath.Join(data, "local-agent-mode-sessions", "acct", "org", "local_abc", ".claude", "projects", "-sessions-x")

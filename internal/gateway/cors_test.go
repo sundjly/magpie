@@ -149,6 +149,7 @@ func TestCORSKeyThroughTheServer(t *testing.T) {
 	for _, key := range []string{secret, ""} {
 		r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatReq))
 		r.RemoteAddr = "127.0.0.1:50123"
+		r.Host = "127.0.0.1:3425"
 		r.Header.Set("Origin", "http://localhost:3000")
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set(SessionHeader, "browser-chat")
@@ -271,7 +272,7 @@ func TestForeignPagesRefused(t *testing.T) {
 		{"http://tauri.localhost", "127.0.0.1:3425", loop, ""},                       // Tauri's webview on Windows
 		{"https://app.example.com", "127.0.0.1:3425", loop, secret},                  // listed, with its key
 		{"http://192.168.1.5:3425", "192.168.1.5:3425", "192.168.1.9:50123", secret}, // the gateway's own origin, shared on the LAN
-		{"https://magpie.example.com", "magpie.example.com", loop, ""},               // its own origin behind a port-443 name
+		{"https://magpie.example.com", "magpie.example.com", loop, secret},           // its own origin behind a port-443 name, with a key (without one, a rebound page: TestReboundPageRefused)
 		{"null", "127.0.0.1:3425", loop, ""},                                         // a sandboxed frame, a file:// page
 		{"app://cherry", "127.0.0.1:3425", loop, ""},                                 // an Electron renderer
 		{"file://", "127.0.0.1:3425", loop, ""},

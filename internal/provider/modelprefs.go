@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -636,18 +637,24 @@ func Labels(es []Entry) []string {
 	same := map[string]int{}
 	if plain || own {
 		for _, e := range es {
-			same[strings.ToLower(e.Name)]++
+			same[strings.ToLower(e.PlainName())]++
 		}
 	}
 	for i, e := range es {
 		out[i] = e.Label()
 		mine := own && (e.Default != "" || e.Named)
-		if (plain || mine) && e.Name != "" && same[strings.ToLower(e.Name)] == 1 {
-			out[i] = e.Name
+		if name := e.PlainName(); (plain || mine) && name != "" && same[strings.ToLower(name)] == 1 {
+			out[i] = name
 		}
 	}
 	return out
 }
+
+// PlainName is the entry's name alone: a remote magpie's model's without
+// the provider its list put after it by that magpie's own setting, which
+// this one's Provider in model names Off leaves out as well (ARNO on
+// Discord: "· Relay A" and "· routing group" stayed under Off).
+func (e Entry) PlainName() string { return cmp.Or(e.Plain, e.Name) }
 
 // The ways the agents' lists name models (SuffixMode): every name with its
 // provider's after it, as by default; all but the names the user gave

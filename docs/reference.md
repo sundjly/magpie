@@ -85,7 +85,7 @@ line; agents connected to magpie lose it when it quits.
 | Agent        | File                              | Fields          |
 | ------------ | --------------------------------- | --------------- |
 | Claude Code  | `~/.claude/settings.json`         | provider, model, opus/sonnet/haiku/fable, sign-in (through magpie) |
-| Claude Desktop | `Claude/` + `Claude-3p/configLibrary/` in `~/Library/Application Support` (`%LOCALAPPDATA%` on Windows, `~/.config` on Linux). A Desktop installed as an MSIX package on Windows keeps them in its package instead (`%LOCALAPPDATA%\Packages\Claude_<publisher>\LocalCache\Local`, its own data in `LocalCache\Roaming\Claude`), and magpie uses those ([`desktopdir`](../internal/desktopdir/desktopdir.go)) | provider (its third-party gateway mode: Code and Cowork on magpie, no Anthropic sign-in; restart Desktop) |
+| Claude Desktop | `Claude/` + `Claude-3p/configLibrary/` in `~/Library/Application Support` (`%LOCALAPPDATA%` on Windows, `~/.config` on Linux). A Desktop installed as an MSIX package on Windows keeps them in its package instead (`%LOCALAPPDATA%\Packages\Claude_<publisher>\LocalCache\Local`, or `AnthropicPBC.Claude_<publisher>` for the Store's package, its own data in `LocalCache\Roaming\Claude`). Desktop 2.31226 and later, packaged, reads the real `%LOCALAPPDATA%\Claude-3p` instead, so for a packaged Desktop magpie writes both ([`desktopdir`](../internal/desktopdir/desktopdir.go)) | provider (its third-party gateway mode: Code and Cowork on magpie, no Anthropic sign-in; restart Desktop) |
 | Codex        | `~/.codex/config.toml`            | provider, model, effort |
 | Gemini CLI   | `~/.gemini/settings.json`, `~/.gemini/.env` | auth, model |
 | OpenCode     | `~/.config/opencode/opencode.json(c)` (`$OPENCODE_CONFIG_DIR`) | model, small |
@@ -673,6 +673,32 @@ with the same JSON: `param-override` (`param_override`), `model-map`
 middleware's entry in the community `registry.json` has
 `"kind": "middleware"` and no `providers`.
 
+#### Agent plugins
+
+A plugin can add an agent magpie has no setup of its own for. Its
+`package.json` names the module (`"magpie": { "agent": "./agent.js" }`), or
+it is a single `*.agent.js` file:
+
+```js
+export const agent = {
+  id: "aider", name: "Aider", bin: "aider",
+  config: "~/.aider.conf.yml",   // json, yaml or env
+  model: "model",                // the key of the model
+  prefix: "openai/",             // written before magpie's model id
+  ua: ["aider", "litellm"],
+}
+export function connect({ gateway, model, models }) {
+  return { "openai-api-base": gateway.v1, "openai-api-key": gateway.key }
+}
+```
+
+It is then on the Agents page like magpie's own: picking one of magpie's
+models writes the model and what `connect` returns, and its own model or
+Disconnect puts every key back as it was. It runs in moejs like middleware.
+An id magpie's own agents use is refused. In the market an agent's entry has
+`"kind": "agent"` (`@magpie-community/agent-<name>`). The full reference is
+on the site's Plugins page, under Agent plugins.
+
 ### What a model costs
 
 A call is counted at its **effective price**: what you set for that provider
@@ -869,6 +895,7 @@ magpie group add "Opus anywhere" models=claude/claude-opus-5-5,copilot/claude-op
 magpie group opus-anywhere              # one group, its models in order
 magpie group set opus-anywhere models+=openrouter/anthropic/claude-opus-5.5 routing=usage
 magpie group set opus-anywhere models-=copilot/claude-opus-5.5
+magpie group copy opus-anywhere "Opus test"  # the same models, routing and rules, to change on its own
 magpie group rm opus-anywhere           # one magpie found is hidden; magpie group restore <id> brings it back
 magpie claude group/opus-anywhere       # use it
 ```
@@ -1133,12 +1160,15 @@ adding one; use an account you can afford to lose.
 Accounts signed in elsewhere can be imported from their files instead of
 signed in again: *Import accounts from a file…* under a subscription's
 accounts, or `magpie accounts import <codex|claude|antigravity|factory>
-<file>... [--yes]`. For ChatGPT that takes Codex's `auth.json` and the
-exports of Cockpit Tools, CLIProxyAPI and Sub2API, as many files as you
-like. Each ChatGPT sign-in is refreshed before it is added, which checks
-it and makes magpie its only holder: the tool the file came from (Codex on
-another computer, Cockpit Tools, CLIProxyAPI) is signed out of that
-account and has to sign in again. The files are only read. An account
+<file>... [--yes]`. For ChatGPT that takes Codex's `auth.json`, codexbar's
+`~/.codexbar/config.json` (every ChatGPT account it switches between) and
+the exports of Cockpit Tools, CLIProxyAPI and Sub2API, as many files as
+you like. Each ChatGPT sign-in is refreshed before it is added, which
+checks it and makes magpie its only holder: the tool the file came from
+(Codex on another computer, codexbar, Cockpit Tools, CLIProxyAPI) is
+signed out of that account and has to sign in again. A backup carries no
+sign-in, so this is also how accounts move to a new computer: import the
+file from the old one there. The files are only read. An account
 magpie has already is left as it is, two Team seats of one email stay two
 accounts, and an entry with only an access token (a ChatGPT web session)
 is refused, since it would stop working within days with nothing to renew
@@ -1566,6 +1596,7 @@ magpie tray                     # menu bar icon only (use this in your login ite
 magpie tui                      # the same thing, in the terminal; serves the gateway while open when no other magpie does
 magpie web                      # the app's window in a browser (WSL, a server over SSH); --lan, --addr, --no-open, --gateway
                                 # (a new key each run; MAGPIE_WEB_KEY keeps one, for a page run as a service)
+                                # (behind a reverse proxy, MAGPIE_WEB_URL=https://<the page there> prints the link through it)
 magpie ls                       # list every agent and its current settings
 magpie claude opus              # set a model (agent names accept prefixes: cc, oc, gem …)
 magpie codex gpt-5.6-sol
@@ -1640,7 +1671,10 @@ magpie restore --no-library b.magpie-backup # the library here left as it is
 A backup holds your providers (with their keys, unless `--no-keys`), the
 pictures picked for them, the settings, the profiles, every agent's model and
 the library (unless `--no-library`): the instruction sets, the MCP servers and
-the skills with their files (a file over 2 MB is left out). Without keys, a
+the skills with their files, templates and other binaries included (a file
+over 16 MB is left out, and so are the biggest once the skills' files come to
+32 MB; restoring keeps the copy of such a file the other machine already
+has). Without keys, a
 server's environment variables and headers that look like a key go empty.
 Gateway credentials, their names, ids and disabled state travel encrypted
 with Settings too. Restoring Settings replaces the gateway-key store with
@@ -1958,6 +1992,17 @@ day's event then has the id, version and system only. Turn it all off in
 Settings → Privacy → Count me as a user, or with `DO_NOT_TRACK=1` or
 `MAGPIE_NO_STATS=1`. Builds from source never send it. The code is
 [internal/stats](../internal/stats/stats.go).
+
+Partners are also counted where usemagpie.ai sees them, whatever these
+settings say, as any website sees its visits. The partner list
+(`/api/partners`) gives each partner's website and key page as a
+`https://usemagpie.ai/go/<id>/site|keys[/<region>]` link, which sends a
+`magpie partner go` event (the partner, which link, the region, and the
+country Cloudflare gives) before sending the browser on; and one in ten
+fetches of the list sends a `magpie partners fetch` event with weight 10
+and the country, while a partner is listed. Each event has an id of its
+own: no install id, address or account goes with it. The code is
+[site/worker.js](../site/worker.js).
 
 ## Community
 

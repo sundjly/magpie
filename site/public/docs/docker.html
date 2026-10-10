@@ -134,6 +134,12 @@ docker logs magpie</pre>
       <pre id="ex-signin">docker exec -it magpie magpie accounts add codex</pre>
     </div>
     <p>Open the link it prints, sign in, then paste the address the browser ended on. The browser UI can also import sign-ins from a file.</p>
+    <p>A Claude subscription is signed in to and answered through Claude Code, which the image doesn’t have. Have magpie download Anthropic’s own build first: it says the version, where it comes from and where it goes, asks, and checks the download’s SHA-256 against Anthropic’s manifest. It is kept in <code>/config/cache</code>; run it again for a newer one. <code>magpie accounts add claude</code> offers it too when Claude Code is missing.</p>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-claude-code">Copy</button>
+      <pre id="ex-claude-code">docker exec -it magpie magpie claude-code install</pre>
+    </div>
 
     <h2 id="volume"><a class="anchor" href="#volume">What is kept</a></h2>
     <p>Everything magpie writes is under <code>/config</code>, so a restart, or a new container on the same volume, keeps your providers, keys, sign-ins and plugins.</p>
@@ -141,7 +147,7 @@ docker logs magpie</pre>
       <tr><th>Path</th><th>Holds</th></tr>
       <tr><td><code>/config/magpie</code></td><td>magpie’s own files: <code>settings.json</code>, providers, gateway keys, routing groups</td></tr>
       <tr><td><code>/config/home</code></td><td>the container’s <code>HOME</code>: sign-ins kept where their agent keeps them (<code>~/.codex</code>, <code>~/.claude</code>…)</td></tr>
-      <tr><td><code>/config/cache</code></td><td>the model catalog, and Bun, which plugins run on (downloaded the first time one is used)</td></tr>
+      <tr><td><code>/config/cache</code></td><td>the model catalog, Bun, which plugins run on (downloaded the first time one is used), and the Claude Code <code>magpie claude-code install</code> downloaded</td></tr>
       <tr><td><code>/config/data</code>, <code>/config/state</code></td><td>the rest of what magpie keeps</td></tr>
     </table></div>
     <p>A volume made by an older image keeps working: magpie adds the folders it lacks when it starts. Only sign-ins made with that older image, which lived outside the volume, have to be made again.</p>

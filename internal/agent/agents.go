@@ -58,13 +58,25 @@ func Clients() []*Agent {
 	return append(out, others...)
 }
 
-// All returns every agent magpie knows about, detected or not.
+// All returns every agent magpie knows about, detected or not: its own,
+// then those plugins add.
 func All() []*Agent {
-	home, _ := os.UserHomeDir()
-	cfg := appdir.Getenv("XDG_CONFIG_HOME")
+	home, cfg := homes()
+	own := builtins(home, cfg)
+	return append(own, pluggedAgents(home, own, nil)...)
+}
+
+func homes() (home, cfg string) {
+	home, _ = os.UserHomeDir()
+	cfg = appdir.Getenv("XDG_CONFIG_HOME")
 	if cfg == "" {
 		cfg = filepath.Join(home, ".config")
 	}
+	return home, cfg
+}
+
+// builtins are the agents magpie has wiring of its own for.
+func builtins(home, cfg string) []*Agent {
 	return append([]*Agent{
 		claude(home),
 		claudeDesktop(home),

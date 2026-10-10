@@ -234,6 +234,11 @@ func (s *Server) Relisten() error {
 func lanGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		remote := !local(r)
+		if !remote && rebound(r) {
+			log.Printf("refused %s %s: a web page reached loopback under the name %q", r.Method, r.URL.Path, r.Host)
+			writeError(w, provider.Chat, http.StatusForbidden, "magpie doesn't answer a browser that reached it as "+r.Host+" (a web site's name pointed at this computer): call it as localhost or 127.0.0.1, or send an enabled gateway key")
+			return
+		}
 		if remote && !remoteKeyed() {
 			if proxied(r) {
 				log.Printf("refused %s %s through a proxy or tunnel: magpie isn't shared", r.Method, r.URL.Path)
@@ -255,6 +260,59 @@ func lanGuard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// rebound: a browser sent this request to loopback under a hostname that
+// isn't this computer's — a web site whose DNS answered 127.0.0.1 after its
+// page loaded (DNS rebinding). The page is then same-origin with the
+// gateway: it sends no Origin on a GET, or one equal to the Host, so
+// corsGuard lets it by, and on loopback a call needs no key, so the page
+// could read the models and quotas and spend the user's subscriptions.
+// Agents call magpie as localhost or an IP, and send none of a browser's
+// marks; a hostname of this computer's own (MAGPIE_PUBLIC_URL's,
+// MAGPIE_ADDR's, its own name, a container runtime's name for the host)
+// isn't a web site's. An enabled gateway key, which such a page can't
+// know, still lets a call in.
+func rebound(r *http.Request) bool {
+	if !fromBrowser(r) || ownHost(r.Host) {
+		return false
+	}
+	return !slices.ContainsFunc(callerKeys(r), func(k string) bool { _, ok := access.Authenticate(k); return ok })
+}
+
+// fromBrowser: the request carries what a browser puts on every request
+// and a page's script can't take off.
+func fromBrowser(r *http.Request) bool {
+	return r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" ||
+		r.Header.Get("Sec-Fetch-Mode") != "" || strings.HasPrefix(r.UserAgent(), "Mozilla/")
+}
+
+// containerHostNames are the names container runtimes give the host.
+var containerHostNames = []string{"host.docker.internal", "gateway.docker.internal", "host.containers.internal", "host.orb.internal", "docker.for.mac.localhost"}
+
+// ownHost: host (a Host header) names this computer — an IP, localhost,
+// *.localhost, or one of the names above.
+func ownHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if host == "" || net.ParseIP(host) != nil || host == "localhost" || strings.HasSuffix(host, ".localhost") || slices.Contains(containerHostNames, host) {
+		return true
+	}
+	if strings.EqualFold(host, PublicHost()) {
+		return true
+	}
+	if h, _, err := net.SplitHostPort(Addr()); err == nil && strings.EqualFold(host, h) {
+		return true
+	}
+	if name, err := os.Hostname(); err == nil {
+		name = strings.TrimSuffix(strings.ToLower(name), ".local")
+		if name != "" && (host == name || host == name+".local") {
+			return true
+		}
+	}
+	return false
 }
 
 // callerGuard also covers embedded handlers used by the web app and tests.

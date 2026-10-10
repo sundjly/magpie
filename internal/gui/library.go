@@ -325,6 +325,24 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, map[string]any{"servers": m})
 	})
+	// the servers as an agent's project file has them, for the user to
+	// paste into a project magpie doesn't keep (#1478); nothing is written
+	mux.HandleFunc("POST /api/library/mcp/config", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Agent string
+			Names []string
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		c, err := library.ConfigOfServers(in.Agent, in.Names)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, c)
+	})
 	// every change answers with the page as it is after it, and what it did
 	mux.HandleFunc("POST /api/library/{what}/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {

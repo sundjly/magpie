@@ -54,11 +54,18 @@ type Model struct {
 	// window it is told when Context is longer. 0 is none set, for the
 	// one for every model (settings.Compact).
 	Compact int `json:",omitempty"`
+	// Plain, on a model of another magpie's list, is its name there alone
+	// (display_name), when Name is its label there, with that magpie's
+	// provider after it (magpie_label): the name Provider in model names
+	// Off has here (ARNO on Discord).
+	Plain string `json:",omitempty"`
 	// Fast is set on a model Codex may ask for priority processing (its
 	// Fast mode): one a ChatGPT account serves.
 	Fast bool `json:",omitempty"`
 	// Tiers, in one ChatGPT account's own model list, are the service
-	// tiers its plan offers on the model ("priority", "ultrafast").
+	// tiers its plan offers on the model ("priority", "ultrafast"); in
+	// another magpie's, the tiers it offers its Codex on the model
+	// (#1234).
 	Tiers []string `json:",omitempty"`
 	// OwnTier is set on a model of a provider the user added by its
 	// address, which the gateway sends the tier Codex asks for as it is

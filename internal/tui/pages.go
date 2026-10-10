@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -414,11 +415,17 @@ func (m *model) openPresets() {
 	for _, d := range provider.Presets() {
 		items = append(items, agent.Option{Value: d.ID, Note: d.Name + " · " + string(d.Kind)})
 	}
+	for _, c := range customAPIs {
+		items = append(items, agent.Option{Value: c.id, Note: "your own · " + c.name + " API, at its address"})
+	}
 	m.pk = picker{
 		crumbs: []string{"providers", "add"},
-		input:  newInput("a vendor magpie knows (magpie provider add <name> url=… for another)"),
+		input:  newInput("a vendor magpie knows, or custom for your own API"),
 		items:  items,
 		onPick: func(id string) tea.Cmd {
+			if i := slices.IndexFunc(customAPIs, func(c customAPI) bool { return c.id == id }); i >= 0 {
+				return func() tea.Msg { return askMsg{customURLAsk(customAPIs[i])} }
+			}
 			return func() tea.Msg {
 				p, err := provider.FromPreset(id)
 				if err != nil {
@@ -441,6 +448,52 @@ func (m *model) openPresets() {
 	}
 	m.pk.refilter()
 	m.mode = modePick
+}
+
+// customAPI is an API a provider of the user's own is asked on, as the
+// app's custom provider editor names it, and magpie provider add's url=,
+// responses=, anthropic= and gemini= set it.
+type customAPI struct {
+	id, name, example string
+	set               func(p *provider.Provider, url string)
+}
+
+// customAPIs are what a custom provider is added as from the TUI, which
+// had vendors magpie knows alone (hezz1891 on Discord: a server's TUI had
+// no way to add one's own relay).
+var customAPIs = []customAPI{
+	{"custom-openai", "OpenAI compatible (Chat Completions)", "https://api.example.com/v1", func(p *provider.Provider, u string) { p.Chat = u }},
+	{"custom-responses", "OpenAI Responses", "https://api.example.com/v1", func(p *provider.Provider, u string) { p.Responses = u }},
+	{"custom-anthropic", "Anthropic compatible (Messages)", "https://api.example.com", func(p *provider.Provider, u string) { p.Anthropic = u }},
+	{"custom-gemini", "Gemini compatible", "https://api.example.com/v1beta", func(p *provider.Provider, u string) { p.Gemini = u }},
+}
+
+// customURLAsk asks for the base URL of a provider of the user's own on
+// api, then its name and its key, and adds it.
+func customURLAsk(api customAPI) ask {
+	return ask{crumbs: []string{"providers", "add", "custom", "base URL"}, input: newInput(api.example),
+		hint: api.name + " · the base URL, e.g. " + api.example, empty: true,
+		onEnter: func(v string) tea.Cmd {
+			return func() tea.Msg {
+				u, err := url.Parse(v)
+				if v == "" || err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+					return flashMsg{text: "the base URL is an http:// or https:// address, e.g. " + api.example}
+				}
+				in := newInput(u.Hostname())
+				return askMsg{ask{crumbs: []string{"providers", "add", "custom", "name"}, input: in,
+					hint: "its name in magpie · enter for " + u.Hostname(), empty: true,
+					onEnter: func(name string) tea.Cmd {
+						return func() tea.Msg {
+							if name == "" {
+								name = u.Hostname()
+							}
+							p := provider.Provider{Name: name}
+							api.set(&p, strings.TrimRight(v, "/"))
+							return askMsg{addKeyAsk(p)}
+						}
+					}}}
+			}
+		}}
 }
 
 // addKeyAsk asks for the key of p, a preset's provider, and adds it.

@@ -20,8 +20,9 @@ import (
 var versionTail = regexp.MustCompile(`(?:[-_@:](?:\d{4}-\d{2}-\d{2}|\d{2}-\d{2}|\d{6,8}|\d{3,4}|v\d+:\d+|latest|preview|exp))+$`)
 
 // vendorDot is Bedrock's region and maker before a model's name
-// (us.anthropic.claude-…).
-var vendorDot = regexp.MustCompile(`^(?:[a-z]{2,4}\.)?(?:anthropic|amazon|meta|mistral|cohere|ai21|deepseek|qwen|openai|google|moonshotai|minimax|zai)\.`)
+// (us.anthropic.claude-…), the geography of an inference profile as
+// catalog's bedrockGeos has them: global. and us-gov. among them.
+var vendorDot = regexp.MustCompile(`^(?:(?:global|us-gov|[a-z]{2,4})\.)?(?:anthropic|amazon|meta|mistral|cohere|ai21|deepseek|qwen|openai|google|moonshotai|minimax|zai)\.`)
 
 // contextTail is what Claude Code writes after a model's name for the size of
 // its context: claude-opus-5[1m].
@@ -49,12 +50,42 @@ func bareModel(m string) string {
 // model, as AntigravitySentID has it. A vendor's "auto" (Copilot's,
 // Cursor's) asked it to pick, so whichever answers wasn't swapped in, nor
 // is the member another magpie's routing group sent it to (GroupRouted),
-// nor Google's own name for the deployment serving a Gemini model
-// (GeminiServing).
+// nor a vendor's own name for the deployment serving the model
+// (ServingName).
 func Swapped(sent, served string) bool {
 	a, b := bareModel(sent), bareModel(served)
-	return a != "" && b != "" && squash(a) != squash(b) && a != "auto" && squash(bareModel(provider.EffortFamily(a))) != squash(b) && !GroupRouted(sent, served) && !GeminiServing(sent, served)
+	return a != "" && b != "" && squash(a) != squash(b) && a != "auto" && squash(bareModel(provider.EffortFamily(a))) != squash(b) && !GroupRouted(sent, served) && !ServingName(sent, served)
 }
+
+// ServingName reports whether served is the vendor's own name for the
+// deployment serving the model sent, which no request asks for by: Google's
+// for a Gemini model (GeminiServing), xAI's for a Grok one (GrokServing).
+func ServingName(sent, served string) bool {
+	return GeminiServing(sent, served) || GrokServing(sent, served)
+}
+
+// GrokServing reports whether served is xAI's name for the build serving
+// the Grok model sent: the model's own name with "-build" after its
+// version. xAI answers grok-4.7 as grok-4.7-build, and grok-4.6 as
+// grok-4.6-build (#1455, cybershape; two relays' logs say the same), and
+// its own list (SuperGrok's, 2026-10-02) offers grok-4.7 and its fast
+// variant grok-4.7-build-fast, never a grok-4.7-build to ask for. It holds
+// for Grok models only, and for the same variant: grok-4.7 answered as
+// grok-4.7-build-fast (the fast one), grok-4.6-build or grok-4.7-mini is
+// still a swap, as is gpt-5 answered as gpt-5-build.
+func GrokServing(sent, served string) bool {
+	a := squash(bareModel(provider.EffortFamily(bareModel(sent))))
+	b := bareModel(served)
+	m := grokBuild.FindStringSubmatchIndex(b)
+	if m == nil || !strings.HasPrefix(a, "grok") {
+		return false
+	}
+	return squash(b[:m[2]]+b[m[3]:]) == a
+}
+
+// grokBuild is the "-build" after a Grok model's version (grok-4.7-build,
+// grok-4.7-build-fast), the part GrokServing reads past.
+var grokBuild = regexp.MustCompile(`^grok-[0-9][0-9.]*(-build)(?:-|$)`)
 
 // GeminiServing reports whether served is the name Google's backend gives
 // the deployment that serves the Gemini model sent: the model's own name

@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // A Kimi Code plan searches the web with its own key, as kimi-cli's
@@ -45,7 +46,18 @@ type searchCallKey struct{}
 // search: one of p's own (a Kimi Code plan, a Google sign-in), or
 // canSearch.
 func canSearchFor(p provider.Provider) bool {
-	return provider.KimiCodeSearch(p) != "" || googleAccount(p) && searcherModel(p) != "" || canSearch()
+	return searchesOwn(p) || canSearch()
+}
+
+// searchesOwn is whether p searches for its own models: by its Kimi Code
+// plan's search service or a Google sign-in's own Gemini. Never with
+// provider search Off in Settings (#1483), which leaves the search APIs
+// alone.
+func searchesOwn(p provider.Provider) bool {
+	if settings.Load().Searcher == "off" {
+		return false
+	}
+	return provider.KimiCodeSearch(p) != "" || googleAccount(p) && searcherModel(p) != ""
 }
 
 // searchingOn is ctx for the searches made for a model of p.
@@ -60,7 +72,7 @@ func searchingOn(ctx context.Context, p provider.Provider) context.Context {
 // on its own, and not to another subscription's allowance (#757).
 func ownSearcher(ctx context.Context) (provider.Provider, bool) {
 	p, ok := ctx.Value(searchOnKey{}).(provider.Provider)
-	return p, ok && (provider.KimiCodeSearch(p) != "" || googleAccount(p) && searcherModel(p) != "")
+	return p, ok && searchesOwn(p)
 }
 
 // ownSearch searches with the conversation's own provider (ownSearcher).

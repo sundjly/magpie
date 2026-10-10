@@ -22,17 +22,6 @@
   <img src="site/public/img/agents-zh-light.png" width="900" alt="magpie 的 Agents 页：Claude Code 用 Kimi K3，Codex 用 DeepSeek V4 Pro，Gemini CLI 用 GLM-5.3，都在一个列表里选">
 </picture>
 
-<br>
-
-<table>
-<tr>
-<td align="center" width="25%"><h3>45+</h3>个 Agent，一张表</td>
-<td align="center" width="25%"><h3>4</h3>种接口协议，一个网关</td>
-<td align="center" width="25%"><h3>5</h3>种路由模式</td>
-<td align="center" width="25%"><h3>0</h3>个需要手改的配置文件</td>
-</tr>
-</table>
-
 </div>
 
 <br>
@@ -190,6 +179,23 @@ flowchart LR
   <img width="760" src="site/public/img/routing-zh-light.png" alt="路由页：四个 Agent 经过 magpie 连到七个 provider，实时显示">
 </picture>
 
+<table>
+<tr>
+<td width="50%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/public/img/intent-trace-zh-dark.png">
+  <img src="site/public/img/intent-trace-zh-light.png" alt="一轮意图路由，逐步解释">
+</picture>
+</td>
+<td width="50%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/public/img/nested-routing-zh-dark.png">
+  <img src="site/public/img/nested-routing-zh-light.png" alt="路由组里套路由组">
+</picture>
+</td>
+</tr>
+</table>
+
 ### 插件
 
 ```sh
@@ -277,7 +283,7 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
 
 ## 隐私
 
-你的提示词、回复、密钥和账号只发给你用的供应商。正式版 magpie 每天告诉我们一次它在用：一个随机 ID、版本和系统，以及用了哪些 agent、供应商和模型，只用 magpie 自己的 ID（你自己添加的供应商只记作 `custom`），以及添加供应商页里排在最前的合作伙伴每天被展示、打开和添加的次数（只有次数）。不发送名称、URL、账号、密钥、提示词和用量。可以在 **设置 → 隐私** 里关掉一部分或全部，也可以设 `DO_NOT_TRACK=1`。[具体发送哪些内容](docs/reference.md#counting-users)。
+你的提示词、回复、密钥和账号只发给你用的供应商。正式版 magpie 每天告诉我们一次它在用：一个随机 ID、版本和系统，以及用了哪些 agent、供应商和模型，只用 magpie 自己的 ID（你自己添加的供应商只记作 `custom`），以及添加供应商页里排在最前的合作伙伴每天被展示、打开和添加的次数（只有次数）。不发送名称、URL、账号、密钥、提示词和用量。可以在 **设置 → 隐私** 里关掉一部分或全部，也可以设 `DO_NOT_TRACK=1`。合作伙伴的官网和获取 Key 链接经 `usemagpie.ai/go/…` 跳转并计一次点击，usemagpie.ai 也统计合作伙伴列表的拉取次数；这是服务器本身看到的，不受设置影响，不记录 ID 和 IP。[具体发送哪些内容](docs/reference.md#counting-users)。
 
 ## 社区
 

@@ -48,11 +48,33 @@ type Part struct {
 	Images     []Part         // the images the tool returned beside its text
 	Standalone map[string]any // native Responses notification with no call ID
 
-	// thinking
+	// thinking: its signature (Anthropic's, or a Gemini thought's). On a
+	// tool call, and on text, Gemini's thoughtSignature: a tool call's
+	// comes only from Google, as gemini_signature.go carries it, and
+	// text's only from a Gemini API (#1445)
 	Signature string
+	// thinking an upstream sealed, as its API wrote it: Anthropic's
+	// redacted_thinking block, a Responses reasoning item with its id,
+	// summary and encrypted_content. Only that API's builder, encoder and
+	// renderer write it, byte for byte; to any other it is reasoning with
+	// no text, or Text's (#1445). SealedBy is the API (sealAnthropic,
+	// sealResponses).
+	Sealed   json.RawMessage
+	SealedBy string
 
 	// web_search: Text is the query
 	Hits []Hit
+}
+
+// The APIs a Part's Sealed reasoning is in.
+const (
+	sealAnthropic = "anthropic"
+	sealResponses = "responses"
+)
+
+// sealedBy reports whether p is reasoning api sealed.
+func (p Part) sealedBy(api string) bool {
+	return p.Kind == Thinking && p.SealedBy == api && len(p.Sealed) > 0
 }
 
 // Hit is a page a web search found.
@@ -182,8 +204,8 @@ type Request struct {
 	GeminiCompat bool
 	// OffLevel is the level such an API is asked to think at when the
 	// client turned reasoning off: Gemini 3 can't stop thinking, and thinks
-	// least at minimal, or at its lowest level where it has no minimal
-	// (geminiOffLevel). "" is minimal.
+	// least at minimal, or at its lowest level where it has no minimal or
+	// turned minimal away (geminiLevels). "" is minimal.
 	OffLevel string
 	// Resume is set on a request built to go on with a reply the client
 	// already has part of (continuation.go): its last message is that
@@ -231,6 +253,16 @@ const (
 	KError                      // Text
 	KSearch                     // Text (the query), Hits: a web search run for the model
 	KImage                      // Name (media type), Text (base64): an image the model made
+	// KThinkStart: a new block of reasoning begins (Anthropic's thinking
+	// block, a Responses reasoning item, ID its id): what follows is not
+	// the one before's, even with nothing between them
+	KThinkStart
+	// KSealed: Text is reasoning the upstream sealed, whole as its API
+	// wrote it, Name that API (Part.Sealed): Anthropic's redacted_thinking
+	// block, a Responses reasoning item as it was done
+	KSealed
+	// KTextSig: Text is Gemini's thoughtSignature on the text before it
+	KTextSig
 )
 
 // Event is one thing a streaming reply said.
@@ -345,7 +377,9 @@ type Result struct {
 type collector struct {
 	res  Result
 	args strings.Builder // arguments of the open tool call
-	err  string
+	// fresh: a KThinkStart said the next reasoning is a block of its own
+	fresh bool
+	err   string
 	// the error's status and kind, as its event gave them
 	errStatus int
 	errCode   string
@@ -354,6 +388,18 @@ type collector struct {
 func (c *collector) last(k Kind) *Part {
 	if n := len(c.res.Parts); n > 0 && c.res.Parts[n-1].Kind == k {
 		return &c.res.Parts[n-1]
+	}
+	return nil
+}
+
+// open is the reasoning the next of it goes on: the last part, when it is
+// reasoning not sealed whole, and no new block has begun since.
+func (c *collector) open() *Part {
+	if c.fresh {
+		return nil
+	}
+	if p := c.last(Thinking); p != nil && len(p.Sealed) == 0 {
+		return p
 	}
 	return nil
 }
@@ -384,16 +430,40 @@ func (c *collector) add(ev Event) {
 			c.closeTool()
 			c.res.Parts = append(c.res.Parts, Part{Kind: Text, Text: ev.Text})
 		}
+	case KThinkStart:
+		c.fresh = true
+		return
 	case KThink:
-		if p := c.last(Thinking); p != nil {
+		if p := c.open(); p != nil {
 			p.Text += ev.Text
 		} else {
 			c.closeTool()
 			c.res.Parts = append(c.res.Parts, Part{Kind: Thinking, Text: ev.Text})
 		}
 	case KSig:
-		if p := c.last(Thinking); p != nil {
+		// a block signed with no text in it (Claude's thinking when its
+		// display is omitted) is a block all the same (#1445)
+		if p := c.open(); p != nil {
 			p.Signature += ev.Text
+		} else if c.fresh {
+			c.closeTool()
+			c.res.Parts = append(c.res.Parts, Part{Kind: Thinking, Signature: ev.Text})
+		}
+	case KSealed:
+		// a Responses item's summary came before it as reasoning of its
+		// own: the item is that reasoning, sealed
+		if p := c.open(); p != nil && ev.Name == sealResponses && p.Signature == "" {
+			p.Sealed, p.SealedBy = json.RawMessage(ev.Text), ev.Name
+		} else {
+			c.closeTool()
+			c.res.Parts = append(c.res.Parts, Part{Kind: Thinking, Sealed: json.RawMessage(ev.Text), SealedBy: ev.Name})
+		}
+	case KTextSig:
+		if p := c.last(Text); p != nil && p.Signature == "" {
+			p.Signature = ev.Text
+		} else {
+			c.closeTool()
+			c.res.Parts = append(c.res.Parts, Part{Kind: Text, Signature: ev.Text})
 		}
 	case KToolStart:
 		c.closeTool()
@@ -414,6 +484,12 @@ func (c *collector) add(ev Event) {
 	case KImage:
 		c.closeTool()
 		c.res.Parts = append(c.res.Parts, Part{Kind: Image, MediaType: ev.Name, Data: ev.Text})
+	}
+	switch ev.Kind {
+	case KStart, KUsage, KError:
+	default:
+		// what began has had its first content, or something else came
+		c.fresh = false
 	}
 }
 

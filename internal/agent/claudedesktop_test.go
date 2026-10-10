@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/desktopdir"
@@ -353,8 +354,10 @@ func TestClaudeDesktopTiers(t *testing.T) {
 // runs as an MSIX package, its data in
 // %LOCALAPPDATA%\Packages\Claude_<publisher>\LocalCache\Roaming\Claude and
 // nothing in %APPDATA%\Claude. It is detected, and magpie's switch writes
-// the package's folders, which the packaged app reads, not the usual ones
-// it doesn't see.
+// the package's folders, which the packaged app up to 2.x reads. bg5eau on
+// X: 2.31226.1, packaged the same way, reads the real
+// %LOCALAPPDATA%\Claude-3p, so the switch writes the real folders too, and
+// switching off leaves both as they were.
 func TestClaudeDesktopMSIX(t *testing.T) {
 	home, _ := desktopSandbox(t)
 	old := desktopdir.OS
@@ -369,6 +372,11 @@ func TestClaudeDesktopMSIX(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(data, "Local State"), []byte(`{}`), 0o644)
 	os.MkdirAll(filepath.Join(pkg, "Local", "Claude", "logs"), 0o755)
+	// the newer build's own 3p folder: its settings, which stay
+	desktopWrite(t, filepath.Join(local, "Claude-3p", "claude_desktop_config.json"), `{"preferences":{"x":1}}`)
+	p := desktopPathsOf(filepath.Join(pkg, "Local", "Claude"), filepath.Join(pkg, "Local", "Claude-3p"))
+	r := desktopPathsOf(filepath.Join(local, "Claude"), filepath.Join(local, "Claude-3p"))
+	before, beforeReal := desktopTree(t, p), desktopTree(t, r)
 
 	a := claudeDesktop(home)
 	if !a.Detected() {
@@ -380,16 +388,85 @@ func TestClaudeDesktopMSIX(t *testing.T) {
 	if err := a.Field("provider").Set("magpie"); err != nil {
 		t.Fatal(err)
 	}
+	if a.Field("provider").Get() != magpieID {
+		t.Fatal("not on magpie")
+	}
+	for _, q := range []desktopPaths{p, r} {
+		if !desktopWired(q) {
+			t.Fatalf("not wired in %s: %v", q.dir3p, desktopTree(t, q))
+		}
+		for _, f := range []string{q.config, q.config3p} {
+			if m := desktopJSON(t, f); m["deploymentMode"] != "3p" {
+				t.Errorf("%s: %v", f, m)
+			}
+		}
+		if m := desktopJSON(t, q.prof); m["inferenceGatewayBaseUrl"] != gateway.URL() || m["inferenceGatewayAuthScheme"] != "bearer" {
+			t.Errorf("%s: %v", q.prof, m)
+		}
+		if m := desktopJSON(t, q.meta); m["appliedId"] != desktopProfileID {
+			t.Errorf("%s: %v", q.meta, m)
+		}
+	}
+	if m := desktopJSON(t, r.config3p); m["preferences"] == nil {
+		t.Errorf("the real Claude-3p's own settings lost: %v", m)
+	}
+	if c := a.Check(); c != "" {
+		t.Errorf("check: %s", c)
+	}
+	// Desktop's chooser turns the real one back to 1p: the check says so
+	desktopWrite(t, r.config3p, `{"deploymentMode":"1p","preferences":{"x":1}}`)
+	if c := a.Check(); !strings.Contains(c, "no longer 3p") || !strings.Contains(c, r.dir3p) {
+		t.Errorf("check: %q", c)
+	}
+	desktopWrite(t, r.config3p, `{"deploymentMode":"3p","preferences":{"x":1}}`)
+
+	if err := a.Field("provider").Set(""); err != nil {
+		t.Fatal(err)
+	}
+	if got := desktopTree(t, p); !reflect.DeepEqual(got, before) {
+		t.Errorf("package's folders not as they were:\n got %v\nwant %v", got, before)
+	}
+	if got := desktopTree(t, r); !reflect.DeepEqual(got, beforeReal) {
+		t.Errorf("real folders not as they were:\n got %v\nwant %v", got, beforeReal)
+	}
+}
+
+// A packaged Desktop switched on by a magpie that wrote only the
+// package's folders keeps its stash: switching on now writes the real ones
+// too, and off still leaves the package's as they were before magpie.
+func TestClaudeDesktopMSIXStashBefore(t *testing.T) {
+	home, _ := desktopSandbox(t)
+	old := desktopdir.OS
+	desktopdir.OS = "windows"
+	t.Cleanup(func() { desktopdir.OS = old })
+	local := filepath.Join(home, "AppData", "Local")
+	pkg := filepath.Join(local, "Packages", "Claude_pzs8sxrjxfjjc", "LocalCache")
+	desktopWrite(t, filepath.Join(pkg, "Roaming", "Claude", "Local State"), `{}`)
 	p := desktopPathsOf(filepath.Join(pkg, "Local", "Claude"), filepath.Join(pkg, "Local", "Claude-3p"))
-	if !desktopWired(p) || a.Field("provider").Get() != magpieID {
-		t.Fatalf("not wired in the package's folders: %v", desktopTree(t, p))
+	desktopWrite(t, p.config3p, `{"deploymentMode":"1p"}`)
+	before := desktopTree(t, p)
+	// as the magpie before wrote it: the package's set, the plain keys
+	if err := desktopOn(p); err != nil {
+		t.Fatal(err)
 	}
-	if m := desktopJSON(t, p.config3p); m["deploymentMode"] != "3p" {
-		t.Errorf("Claude-3p: %v", m)
+	r := desktopPathsOf(filepath.Join(local, "Claude"), filepath.Join(local, "Claude-3p"))
+
+	a := claudeDesktop(home)
+	if err := a.Field("provider").Set("magpie"); err != nil {
+		t.Fatal(err)
 	}
-	for _, d := range []string{filepath.Join(roaming, "Claude"), filepath.Join(local, "Claude"), filepath.Join(local, "Claude-3p")} {
+	if !desktopWired(r) {
+		t.Fatal("real folders not written")
+	}
+	if err := a.Field("provider").Set(""); err != nil {
+		t.Fatal(err)
+	}
+	if got := desktopTree(t, p); !reflect.DeepEqual(got, before) {
+		t.Errorf("package's folders not as they were:\n got %v\nwant %v", got, before)
+	}
+	for _, d := range []string{r.dir, r.dir3p} {
 		if _, err := os.Stat(d); err == nil {
-			t.Errorf("%s written, which the packaged Desktop doesn't read", d)
+			t.Errorf("%s left behind", d)
 		}
 	}
 }

@@ -1099,6 +1099,19 @@ type holdWriter struct {
 	// ended there
 	loop   *loopGuard
 	looped string
+	// reask, when the try's reply can be asked again in place
+	// (streamTranslated), is told of a loop first, and says whether the
+	// reply is asked again instead of ended: the guard then reads the
+	// next try's afresh
+	reask func(loopTrip) bool
+}
+
+// onLoop sets what is told of a loop before it ends the reply (reask),
+// nil for nobody.
+func (h *holdWriter) onLoop(f func(loopTrip) bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.reask = f
 }
 
 // errSlowStart is what a try's writes get once it was let go for taking
@@ -1190,7 +1203,10 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	}
 	if h.loop != nil && !h.whole && h.status < 400 {
 		if t, ok := h.loop.feed(b); ok {
-			return h.cutLoop(b, t)
+			if h.reask == nil || !h.reask(t) {
+				return h.cutLoop(b, t)
+			}
+			h.loop = &loopGuard{}
 		}
 	}
 	h.see(b)
@@ -1324,6 +1340,20 @@ const holdBuffered = 4 * time.Minute
 // reasoning with it, as soon as it does.
 const holdThinking = 4 * time.Minute
 
+// holdLead is how long a stream with nothing but the frames that come
+// before a reply is held, when its agent is kept alive meanwhile
+// (keptQuiet): as long as one that only reasons, under the 300s Codex
+// waits for its next event. With nothing to keep the agent alive (a
+// Gemini stream), it is let through at holdLongest as before.
+const holdLead = holdThinking
+
+// keptQuiet says whether the agent of a held stream is kept alive with
+// SSE comments while it is held (keepQuiet, keepAlive): it asked for a
+// stream, in a protocol that takes a comment.
+func (h *holdWriter) keptQuiet() bool {
+	return h.streams && h.alive != nil && h.alive.proto != provider.Gemini
+}
+
 // refusesAfterThinking tells whether a model's vendor may end a reply that
 // has only reasoned with its safety filter's refusal: Claude's stop_reason
 // refusal, OpenAI's content_filter or bio_policy, Gemini's SAFETY (#248).
@@ -1377,12 +1407,26 @@ func (h *holdWriter) scan() {
 		h.flow()
 		return
 	}
+	if h.alive.tooQuiet(0) {
+		// Codex has gone as long as it waits for an event: what is held
+		// goes now, or it hangs up (agentQuietMost)
+		h.flow()
+		return
+	}
 	longest := holdLongest
 	if h.buffered {
 		longest = holdBuffered
 	}
 	if h.thinking {
 		longest = max(longest, holdThinking)
+	}
+	if h.keptQuiet() {
+		// a stream of nothing but its frames — response.created, pings,
+		// an empty message begun — while its agent is kept alive with
+		// comments: let through at 15s, the 200 the agent then had made
+		// the vendor's server_is_overloaded 21s later the agent's error,
+		// with the group's next member never asked (#1418)
+		longest = max(longest, holdLead)
 	}
 	// a group that asks the next member when one is slow to start holds
 	// the stream until then, for nothing of it to have reached the agent
@@ -1394,14 +1438,15 @@ func (h *holdWriter) scan() {
 		h.flow()
 		return
 	}
-	if (h.thinking || h.buffered || waiting) && time.Since(h.since) >= keepHeldAfter {
+	if (h.thinking || h.buffered || waiting || h.keptQuiet()) && time.Since(h.since) >= keepHeldAfter {
 		h.keepAlive()
 	}
 }
 
 // keepHeldAfter is how long a stream held for its reasoning waits before
 // its agent is first kept alive, as long as a stream with nothing in it
-// is held (holdLongest); a refusal after it still goes to another account,
+// is held where its agent can't be (holdLongest); a refusal after it still
+// goes to another account,
 // whose stream follows the comments in the same response.
 var keepHeldAfter = holdLongest
 
@@ -1411,6 +1456,27 @@ type keptAlive struct {
 	proto provider.Protocol
 	sent  bool      // the stream's 200 and headers went out
 	at    time.Time // the last comment
+	// told is when the agent was last sent anything of a reply, else when
+	// it asked; streams, whether it asked for a stream
+	told    time.Time
+	streams bool
+}
+
+// agentQuietMost is the longest a streaming Responses agent goes with no
+// event while its tries are held, one after another, and the pauses
+// between them. Codex counts only events toward its stream idle timeout,
+// 300s by default, not the SSE comments keepAlive sends: codex-cli 0.162
+// on a server sending nothing but ": keepalive" every 2s, with
+// stream_idle_timeout_ms 6000, failed "stream disconnected before
+// completion: idle timeout waiting for SSE" and reconnected (fadenoob on
+// Discord). Each try was held for up to holdThinking or holdLead by
+// itself, so a second held try, or a group's pause (#1418), went past it.
+var agentQuietMost = 4 * time.Minute
+
+// tooQuiet says whether a Responses agent that has had no event of its
+// reply would go agentQuietMost without one after d more.
+func (a *keptAlive) tooQuiet(d time.Duration) bool {
+	return a != nil && a.streams && a.proto == provider.Responses && !a.told.IsZero() && time.Since(a.told)+d >= agentQuietMost
 }
 
 // keepAlive tells the agent of a stream held past keepHeldAfter for its
@@ -1457,6 +1523,9 @@ func (h *holdWriter) keepAlive() {
 func (h *holdWriter) sent(b []byte) {
 	if len(b) > 0 {
 		h.wrote, h.atLine = time.Now(), b[len(b)-1] == '\n'
+		if h.alive != nil {
+			h.alive.told = h.wrote
+		}
 	}
 }
 
@@ -1758,6 +1827,12 @@ func (h *holdWriter) keepQuiet() {
 	}
 	if !h.heard.IsZero() && time.Since(h.heard) >= keepaliveLongest {
 		return // a stream stuck this long is left for a timeout to end
+	}
+	if !h.passing && h.stream && h.failure == 0 && !h.whole && h.held.Len() > 0 && h.alive.tooQuiet(0) {
+		// a stream held while its vendor is quiet: Codex would hang up
+		// before the next event let it through (agentQuietMost)
+		h.flow()
+		return
 	}
 	if !h.passing {
 		// only a stream, no reply yet to an agent that asked for one, or

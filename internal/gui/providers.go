@@ -28,6 +28,7 @@ type modelJSON struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`              // the user's name for it, if they gave one
 	Default  string   `json:"default,omitempty"` // its own name, when the user gave it another
+	Plain    string   `json:"plain,omitempty"`   // a remote magpie's model's name there alone, when Name has its provider there after it (catalog.Model's)
 	Kept     []string `json:"kept,omitempty"`    // the reasoning levels the user keeps of Efforts, when not all
 	Efforts  []string `json:"efforts,omitempty"`
 	Given    bool     `json:"given,omitempty"`     // its levels aren't known: Efforts are those it can be given, Kept those it was
@@ -122,6 +123,10 @@ type providerJSON struct {
 	// when they can (provider.ModelTest): the editor says so on a chip's
 	// right-click rather than offer no menu
 	ModelTest string `json:"modelTest,omitempty"`
+	// TestsAs is the agents a model's test can be asked as
+	// (provider.TestAs), for a relay that serves only them: the chip's
+	// right-click offers each, and says why one can't be when it can't
+	TestsAs map[string]string `json:"testsAs,omitempty"`
 	// DecideTest is set when its decision models can each be sent a
 	// System One question (provider.AsksDecideModels): a mixed
 	// provider's Jev too, beside its conversation models
@@ -372,6 +377,10 @@ type providersJSON struct {
 	// signed in to after Codex was switched to another; "" when none is
 	// left behind (provider.CodexDaemonStale).
 	CodexDaemon string `json:"codexDaemon,omitempty"`
+	// CodexApp is the account the Codex desktop app is still signed in to
+	// after Codex was switched to another, until it is quit and opened
+	// again (provider.CodexAppStale)
+	CodexApp string `json:"codexApp,omitempty"`
 	// Plugins are the providers the plugins sign in to, for the add sheet
 	Plugins []pluginSubJSON `json:"plugins"`
 	// OnPlugins are the built-in subscriptions moved onto their plugins,
@@ -439,7 +448,7 @@ func agentUses(agents []*agent.Agent, findGroup func(string) (provider.Group, []
 func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	out := providerJSON{
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
-		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), DecideTest: p.AsksDecideModels(),
+		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), TestsAs: p.TestClients(), DecideTest: p.AsksDecideModels(),
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, Headers: p.Headers, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
 		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
@@ -556,6 +565,8 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		if n, ok := names[m.ID]; ok {
 			j.Default = cmp.Or(m.Name, m.ID)
 			j.Name = n
+		} else {
+			j.Plain = m.Plain
 		}
 		if api, ok := p.ModelAPI(m.ID); ok {
 			j.API = string(api)
@@ -724,6 +735,7 @@ func providersState() providersJSON {
 	}
 	s.Gateway.Archive = archiveState()
 	s.CodexDaemon = provider.CodexDaemonStale()
+	s.CodexApp = provider.CodexAppStale()
 	s.Plugins = pluginSubs()
 	s.Fetching = provider.FetchingNew()
 	return s
@@ -757,6 +769,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 	pluginRoutes(mux, w)
 	traceRoutes(mux)
 	contextRoutesAPI(mux)
+	tuneRoutes(mux)
 	groupRoutes(mux)
 	// how each key's or account's requests stand under its limit on
 	// requests at once (#892), read every two seconds while a provider's
@@ -942,6 +955,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// Test, for test: models to send a request each, in place of
 			// one per endpoint
 			Test []string `json:"test"`
+			// As, for test: the agent the request is asked as
+			// (provider.TestAs: "codex", "claude-code"), "" as magpie
+			As string `json:"as"`
 			// DetectModels, for detect: models to ask on each API, each
 			// answered on its own, in place of Model
 			DetectModels []string `json:"detectModels"`
@@ -1411,12 +1427,12 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 			if len(req.Test) > 0 {
 				// an image model's test draws a picture, which takes longer
-				ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+				ctx, cancel := context.WithTimeout(provider.TestAs(r.Context(), req.As), 3*time.Minute)
 				defer cancel()
 				writeJSON(rw, map[string]any{"results": p.TestModels(ctx, req.Test)})
 				return
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+			ctx, cancel := context.WithTimeout(provider.TestAs(r.Context(), req.As), 25*time.Second)
 			defer cancel()
 			writeJSON(rw, struct {
 				Results  []provider.Result `json:"results"`
@@ -1627,6 +1643,8 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			agent.CodexDaemonRestarted()
 		case "dismiss":
 			provider.DismissCodexDaemon()
+		case "dismiss-app":
+			provider.DismissCodexApp()
 		default:
 			http.NotFound(rw, r)
 			return

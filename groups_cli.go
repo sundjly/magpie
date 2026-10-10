@@ -36,6 +36,8 @@ const groupUsage = `usage:
                                           fast=<m1>[,m2…] (the models sent in their vendor's fast mode; empty for none)
   magpie group pick <id> <model>          route the group manually, every request to that one of its models
                                           (as clicking it on the group's card in the Routing view does)
+  magpie group copy <id> [name]           duplicate a group with its models, routing and rules, listed after it
+                                          (name: "<its name> copy" when left out; also: magpie group duplicate)
   magpie group rm <id>…                   remove groups (one magpie found is hidden instead)
   magpie group restore <id>               bring back a group magpie found that you removed
   magpie group auto [on|off]              whether magpie finds groups on its own (on by default); off, none is
@@ -588,6 +590,23 @@ func groupCmd(args []string) error {
 			return err
 		}
 		fmt.Println(green.Render("✓"), bold.Render(g.Name), "sends every request to", bold.Render(g.Picked()), muted.Render("· routing manual"))
+		return showGroup(g)
+	case "copy", "duplicate", "dup", "clone":
+		if len(rest) < 1 {
+			return fmt.Errorf("magpie group copy <id> [name]")
+		}
+		src, err := findGroup(rest[0])
+		if err != nil {
+			return err
+		}
+		if src.Hidden {
+			return fmt.Errorf("%s was removed: magpie group restore %s brings it back first", src.ID, src.ID)
+		}
+		g, err := provider.CopyGroup(src.ID, strings.Join(rest[1:], " "))
+		if err != nil {
+			return err
+		}
+		fmt.Println(green.Render("✓"), "copied", bold.Render(src.Name), "to", bold.Render(g.Name), muted.Render("· agents pick it as "+provider.GroupPrefix+g.ID))
 		return showGroup(g)
 	case "rule", "rules":
 		return ruleCmd(rest)

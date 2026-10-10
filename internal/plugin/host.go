@@ -839,9 +839,9 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	}
 	var items []item
 	for _, e := range l.Plugins {
-		// a plugin that is only gateway middleware runs in the gateway
-		// (internal/middleware), not here
-		if _, only := Middleware(Target(e.Spec)); !e.Off && !only {
+		// a plugin that is only gateway middleware or an agent runs in
+		// magpie (internal/middleware, internal/agentplug), not here
+		if !e.Off && !InMagpieOnly(Target(e.Spec)) {
 			items = append(items, item{e.Spec, Target(e.Spec), e.Options})
 		}
 	}

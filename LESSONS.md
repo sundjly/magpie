@@ -1,4 +1,4 @@
-<!-- reviewed-through: 3c629133 (2026-10-09 02:48 +0800) -->
+<!-- reviewed-through: c98160c0 (2026-10-10 13:51 +0800) -->
 # Lessons from merged work
 
 magpie's code is written, reviewed, merged and released by agents. Each night
@@ -23,6 +23,16 @@ tagged after a green run. Two more lessons were seen a third day and moved:
 real use before building on it, and GUI tests in both engines and every
 language. The acceptance checks now include `gofmt -l` and a Linux and
 Windows `go vet`, since a cross-OS build skips `_test.go`.
+
+2026-10-09 had 109 commits and 10-10 had 74 up to 13:51 (v0.1.1127 to
+v0.1.1154). Every tag waited for a green run, every release has its 16
+assets, and every commit over 400 lines has a body that says what was run.
+What went wrong was earlier in the work. A privacy exemption was keyed on a
+field's name, which let tool arguments go out unmasked. Two sessions
+committing from one checkout shipped each other's files under the wrong
+subjects. A known DNS-rebinding hole sat documented in a subsystem page
+until the review reproduced it (fixed in c431225a). Three lessons were seen
+a second day.
 
 ## Reading the report
 
@@ -79,7 +89,10 @@ content before you rest an account.**
   their requests work.
 - When a report shows a wrong label, also ask why the request failed. Fix
   that, or point the user to the fix in the message itself.
-- Seen 1× (2026-10-06).
+- 10-10: 1134c7a8 reworded the "restart codex" advice. luci hit the same
+  stale app-server daemon on the next release, and e611fc65 then restarted
+  it from magpie.
+- Seen 2× (2026-10-06, 2026-10-10).
 
 ## Fix the class, not the sample
 
@@ -102,6 +115,29 @@ content before you rest an account.**
   checked that requests behind Tailscale Serve still count as remote.
 - Seen 1× (2026-10-05).
 
+**Scope a privacy or security exemption by where the value sits in the
+protocol, never by a key's name.**
+- 7137feb4 kept any object holding a "signature" or "encrypted_content" key,
+  and any `*_id` key, unmasked. A tool call's input is written by the model,
+  so `{"signature": …, "body": "DB_PASSWORD=… 13800138000"}` or a `user_id`
+  in tool_use input went to the vendor unmasked. 1965e1f0 limited the
+  exemption to thinking/reasoning blocks and Gemini's thoughtSignature, and
+  never keeps anything under a tool call's arguments.
+- Test the exemption with the protected key placed where the user's data
+  goes: tool arguments, message text, a nested object.
+- Seen 1× (2026-10-09).
+
+**A security gap a doc names is an open bug, not a description.**
+- docs/subsystems/gateway-routing.md said "There is no `Host` check, so a
+  page whose own name resolves to 127.0.0.1 (DNS rebinding) counts as
+  same-origin". On 10-10 the review reproduced it on main. A rebound page
+  got 200 on /v1/models, /v1/chat/completions and /v1/magpie/quotas without
+  a key. Fixed in c431225a.
+- A same-origin exemption needs the Host checked too. A rebound page's GET
+  carries no Origin at all.
+- When writing such a sentence, file an issue in the same commit.
+- Seen 1× (2026-10-10).
+
 ## The user's own files and settings
 
 **Never let magpie's default override a value the user set themselves.**
@@ -111,7 +147,13 @@ content before you rest an account.**
   dropped the stash for 12 days (fe2603ff).
 - Before writing a key, list everywhere the agent reads that setting from.
   Test with user-owned values present.
-- Seen 1× (2026-10-05).
+- 10-09/10-10: four fixes for magpie writing over a user's own choice.
+  - 603dc0c4: dsh's picked model was lost on Disconnect.
+  - 5aca7d09: Codex's effort left at Default was written over with medium.
+  - c65d9fb4: magpie-models.json dropped keys added by hand.
+  - d9bf7c1c: ZCode's API format was put back on every start.
+  - Each was written first without a test that holds a user-set value.
+- Seen 2× (2026-10-05, 2026-10-10).
 
 **A failed read, parse or hash means "unknown". It never means "empty" or
 "equal".**
@@ -222,7 +264,14 @@ handoff that lets another goroutine look at it.**
   one that failed.
 - Reproduce a timing flake by injecting the delay, not by rerunning until
   it fails (0f8e4ebc).
-- Seen 1× (2026-10-08).
+- 10-09: 69c21cdd's loop-guard tests had a 20s bound and "the vendor let go
+  within 2000 lines". 319b72c7 fixed only the gemini case that went red.
+  TestLoopEndsWorkBuddysReply, with the same 2000-line bound, went red 9h
+  later (#1443). 229ce19a fixed it right: it injected a 300us delay (140/180
+  red), and bounded the test by what reached the agent.
+- 10-10: TestKimiHeldBurstTellsNoSpeed went red on macOS -race (#1469), a
+  threshold fixture under load.
+- Seen 2× (2026-10-08, 2026-10-09).
 
 **A test named for a guarantee fails when the guarantee breaks.**
 - #1318's TestHistoryWriteHoldsNoWaiter still passes with the waiter held:
@@ -311,6 +360,18 @@ it doesn't.**
   e22d5eef and d2241a57 had no body either, so a later review can't tell
   what was verified.
 - Seen 1× (2026-10-08).
+- Done right on 10-09/10-10: none of the 22 commits over 400 lines lacks a
+  body.
+
+**Two sessions never commit from the same checkout.**
+- 10-09 12:10: 2018882e carries the davsync subject but holds the GTK
+  font-DPI fix (#1371, 7 files). b86001d4, "#1371 GTK", is empty. be203728
+  is the real davsync change under the same subject. One session committed
+  the other's staged files, because they shared the main checkout's index.
+- Work in a worktree of your own (`git worktree add --detach`). After
+  committing, `git show --stat HEAD` must list your files and only yours. An
+  empty commit means another session took your index.
+- Seen 1× (2026-10-09).
 
 ## Moved to the code standards
 
@@ -342,3 +403,22 @@ each one.
   choke point, tried on the Windows box), 74a809dc with 84f37ac9
   (re-derived account keys), #1271/#1275 (built-in and plugin together),
   3aeb7d1b (a refusal scoped to the model) and #1288.
+- **10-09/10-10, criteria still missed.**
+  - Sibling: 12c0550a said "Only aBlock had this" while #1445 (open for an
+    hour) listed the class. 64179e73, 13356b9d and d7186e51 followed.
+  - The suite: 2da8fbe4 ran six packages, not `go test ./...`. Its testenv
+    exec broke internal/proc's TestNoCommandBypassesProc, red ~50 min until
+    b934d64a.
+  - Real use: a3a8e257 shipped GitHub plugin icons without loading the real
+    list, and the owner found none showing (52f6b3a3). aa82288f's Volcengine
+    plan windows went out "not tried against the real API". It was said
+    honestly, and #1427 stays open.
+- **Done right on 10-09/10-10.**
+  - 229ce19a, 570b8fdb and ab72c8eb reproduced CI flakes by injecting a
+    delay and fixed their cause.
+  - 7f62dbf3 named the siblings the reporter's patch missed (Cursor, Muse,
+    GUI, CLI) and covered them.
+  - 9b51428e found the same hold-out in Factory's list.
+  - #1454 stayed open until the reporter confirmed.
+  - #1213 and #1282 merged at the reviewed head with the record seconds
+    before.

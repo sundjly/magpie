@@ -156,7 +156,7 @@ func TestMaxTokensWithinContextWindow(t *testing.T) {
 			t.Fatal(err)
 		}
 		atomcodeCfg, _ := os.ReadFile(atomcode)
-		snowOut, err := snowProfileFor(nil, gatewayV1(), "k", "relay/glm-4.6")
+		snowOut, _, err := snowProfileFor(nil, false, gatewayV1(), "k", "relay/glm-4.6", nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -253,7 +253,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 	// The user's own headers, after the defaults so a private auth scheme
 	// wins. Written directly so the name keeps the exact case the user typed.
 	for k, v := range headers {
-		req.Header[k] = []string{v}
+		PutUserHeader(req.Header, k, v)
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -296,9 +296,12 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 		if !drawer && !films && !decision && headers["X-Magpie-Drawers"] == "" && !textModel(mdModel{ID: id}) {
 			continue
 		}
-		name := r.DisplayName
+		name, plain := r.DisplayName, ""
 		if r.Label != "" {
 			name = r.Label
+			if r.DisplayName != "" && r.DisplayName != r.Label {
+				plain = r.DisplayName
+			}
 		}
 		if name == "" {
 			name = id
@@ -311,7 +314,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 		if len(apis) == 0 {
 			apis = targetAPIs(r.TypeTarget)
 		}
-		m := Model{ID: id, Name: name, ImageInput: input, APIs: apis, Draws: drawer, Films: films, Decides: decision}
+		m := Model{ID: id, Name: name, Plain: plain, ImageInput: input, APIs: apis, Draws: drawer, Films: films, Decides: decision}
 		if n, ok := r.ContextLength.(float64); ok && n > 0 {
 			m.Context = int(n)
 		}
@@ -325,6 +328,7 @@ func fetchOne(ctx context.Context, url, key string, anthropic bool, headers map[
 		if input != nil {
 			m.Images = *input
 		}
+		m.Tiers = tiersOf(r.Tiers)
 		var pr *Price
 		if len(r.Price) > 0 && json.Unmarshal(r.Price, &pr) == nil && pr != nil && pr.sane() {
 			m.Price = pr
@@ -390,6 +394,11 @@ type liveModel struct {
 	// how another magpie searches the web for the model: "native" or
 	// "magpie" (Model.WebSearch)
 	WebSearch string `json:"web_search"`
+	// the service tiers another magpie offers its Codex on the model
+	// (Fast's "priority"), as Codex's catalog writes them ({"id":…}) or
+	// as plain ids: kept as Model.Tiers (#1234). any, as an odd value
+	// mustn't lose the whole list
+	Tiers any `json:"service_tiers"`
 	// what another magpie counts a call to the model at, asked for with
 	// its X-Magpie-Prices header: the price its user set, else its list
 	// price. Raw, as an odd value mustn't lose the whole list
@@ -397,6 +406,23 @@ type liveModel struct {
 	// the protocol family PipeLLM routes the model by: openai, anthropic
 	// or gemini
 	TypeTarget string `json:"type_target"`
+}
+
+// tiersOf are the ids of a list's service_tiers, as Codex's catalog
+// writes them ([{"id":"priority","name":"Fast"}]) or as plain ids.
+func tiersOf(v any) []string {
+	xs, _ := v.([]any)
+	var out []string
+	for _, x := range xs {
+		id, _ := x.(string)
+		if o, ok := x.(map[string]any); ok {
+			id, _ = o["id"].(string)
+		}
+		if id != "" && !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // levelsOf are the efforts of a list's supported_reasoning_levels, as

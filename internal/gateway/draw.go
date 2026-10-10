@@ -720,7 +720,7 @@ func (s *Server) sendWith(ctx context.Context, p provider.Provider, method, url,
 		// Google's API keys go in their own header
 		req.Header.Set("x-goog-api-key", p.Key)
 		for k, v := range p.Headers {
-			req.Header[k] = []string{v}
+			catalog.PutUserHeader(req.Header, k, v)
 		}
 	}
 	for k, v := range extra {

@@ -44,13 +44,25 @@ type ServerHealth struct {
 	Detail string `json:"detail,omitempty"` // the last line it wrote to stderr, or the error's text
 	// OAuth is a refusal that named a sign-in (WWW-Authenticate), which
 	// magpie can do itself for a streamable HTTP server
-	OAuth bool  `json:"oauth,omitempty"`
-	At    int64 `json:"at"` // when it was checked, unix ms
+	OAuth bool `json:"oauth,omitempty"`
+	// Step is what a server that timed out was asked and didn't answer
+	// (initialize, notifications/initialized, tools/list, or connect: an
+	// SSE server's stream), and Waited how long it was waited for, in ms
+	Step   string `json:"step,omitempty"`
+	Waited int64  `json:"waited,omitempty"`
+	At     int64  `json:"at"` // when it was checked, unix ms
 }
 
-// checkTimeout is how long a server has to start and list its tools: npx
-// fetching a package the first time can take a while.
-var checkTimeout = 15 * time.Second
+// Each step of a check (initialize, notifications/initialized, tools/list)
+// has a budget of its own, not one for the whole check: a remote server
+// that is slow but healthy took 0.6-12s to initialize and 38-53s to list
+// its tools (#1467, xiaozhu1337), which a 15s budget for all of it always
+// called "no answer". A command gets less: it runs on this machine, though
+// npx fetching a package the first time can take a while.
+var (
+	stdioStep  = 30 * time.Second
+	remoteStep = 60 * time.Second
+)
 
 // checkAtOnce is how many servers are checked together, each a process or
 // a few requests.
@@ -128,9 +140,17 @@ func CheckServers(ctx context.Context, names []string, fresh bool) (map[string]S
 			slots <- struct{}{}
 			defer func() { <-slots }()
 			h := CheckServer(ctx, s)
-			if ctx.Err() == nil { // a check cut short by the page going away isn't one
+			// a check cut short by the page going away isn't one, and a
+			// server that didn't answer in time is asked again next time:
+			// a slow server may answer then (#1467)
+			if ctx.Err() == nil {
 				checked.Lock()
-				checked.m[s.Name] = checkedServer{key, h}
+				if h.Why == "timeout" {
+					// nor is an answer from before kept in its place
+					delete(checked.m, s.Name)
+				} else {
+					checked.m[s.Name] = checkedServer{key, h}
+				}
 				checked.Unlock()
 			}
 			outMu.Lock()
@@ -144,8 +164,15 @@ func CheckServers(ctx context.Context, names []string, fresh bool) (map[string]S
 
 // CheckServer connects to one server and asks it for its tools.
 func CheckServer(ctx context.Context, s *Server) ServerHealth {
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	each := remoteStep
+	if s.Transport == "stdio" {
+		each = stdioStep
+	}
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	st := &checkSteps{step: "initialize", each: each, timer: time.AfterFunc(each, cancel)}
+	defer st.timer.Stop()
+	ctx = context.WithValue(ctx, stepsKey{}, st)
 	var h ServerHealth
 	switch s.Transport {
 	case "stdio":
@@ -163,9 +190,40 @@ func failed(why, detail string) ServerHealth {
 	return ServerHealth{State: "error", Why: why, Detail: detail}
 }
 
-// timedOut is a server that didn't answer in checkTimeout; the page says
-// how long that is.
-func timedOut() ServerHealth { return failed("timeout", "") }
+// checkSteps is the step a check is at, and the timer that ends the check
+// when the step takes longer than each.
+type checkSteps struct {
+	mu    sync.Mutex
+	step  string
+	each  time.Duration
+	timer *time.Timer
+}
+
+type stepsKey struct{}
+
+// stepTo starts the check's next step, with a budget of its own.
+func stepTo(ctx context.Context, step string) {
+	st, _ := ctx.Value(stepsKey{}).(*checkSteps)
+	if st == nil || ctx.Err() != nil {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.step = step
+	st.timer.Reset(st.each)
+}
+
+// timedOut is a server that didn't answer a step in time; the page says
+// which step, and how long it waited.
+func timedOut(ctx context.Context) ServerHealth {
+	h := failed("timeout", "")
+	if st, _ := ctx.Value(stepsKey{}).(*checkSteps); st != nil {
+		st.mu.Lock()
+		h.Step, h.Waited = st.step, st.each.Milliseconds()
+		st.mu.Unlock()
+	}
+	return h
+}
 
 // rpcMsg is a JSON-RPC message from the server: a reply has an id.
 type rpcMsg struct {
@@ -347,7 +405,7 @@ func checkStdio(ctx context.Context, s *Server) ServerHealth {
 					return nil, &h
 				}
 			case <-ctx.Done():
-				h := timedOut()
+				h := timedOut(ctx)
 				h.Detail = errs.last()
 				return nil, &h
 			}
@@ -367,6 +425,7 @@ func checkStdio(ctx context.Context, s *Server) ServerHealth {
 		return *h
 	}
 	_ = send(initializedNote)
+	stepTo(ctx, "tools/list")
 	_ = send(request(2, "tools/list", nil))
 	m, h = await(2)
 	if h != nil {
@@ -411,7 +470,7 @@ func remoteHeaders(ctx context.Context, s *Server) (http.Header, *ServerHealth) 
 // netHealth puts a failed request in the page's words.
 func netHealth(ctx context.Context, err error) ServerHealth {
 	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
-		return timedOut()
+		return timedOut(ctx)
 	}
 	if errors.Is(err, connectionRefused) {
 		return failed("refused", err.Error())
@@ -484,7 +543,7 @@ func checkHTTP(ctx context.Context, s *Server) ServerHealth {
 		m, err := replyOf(res, id)
 		if err != nil {
 			if ctx.Err() != nil {
-				h := timedOut()
+				h := timedOut(ctx)
 				return nil, &h
 			}
 			h := failed("protocol", err.Error())
@@ -508,10 +567,14 @@ func checkHTTP(ctx context.Context, s *Server) ServerHealth {
 	if session != "" {
 		defer endSession(s.URL, hdr, session)
 	}
+	stepTo(ctx, "notifications/initialized")
 	if res, err := post(initializedNote); err == nil {
 		io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
 		res.Body.Close()
+	} else if ctx.Err() != nil {
+		return timedOut(ctx)
 	}
+	stepTo(ctx, "tools/list")
 	m, h = call(2, request(2, "tools/list", nil))
 	if h != nil {
 		return *h
@@ -616,6 +679,7 @@ func checkSSE(ctx context.Context, s *Server) ServerHealth {
 	if bad != nil {
 		return *bad
 	}
+	stepTo(ctx, "connect")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL, nil)
 	if err != nil {
 		return failed("unreachable", err.Error())
@@ -640,7 +704,7 @@ func checkSSE(ctx context.Context, s *Server) ServerHealth {
 		select {
 		case e, ok := <-events:
 			if !ok {
-				h := timedOut()
+				h := timedOut(ctx)
 				if ctx.Err() == nil {
 					h = failed("protocol", "the event stream ended")
 				}
@@ -648,7 +712,7 @@ func checkSSE(ctx context.Context, s *Server) ServerHealth {
 			}
 			return e, nil
 		case <-ctx.Done():
-			h := timedOut()
+			h := timedOut(ctx)
 			return sseEvent{}, &h
 		}
 	}
@@ -705,6 +769,7 @@ func checkSSE(ctx context.Context, s *Server) ServerHealth {
 			}
 		}
 	}
+	stepTo(ctx, "initialize")
 	if h := post(initializeReq()); h != nil {
 		return *h
 	}
@@ -715,7 +780,11 @@ func checkSSE(ctx context.Context, s *Server) ServerHealth {
 	if h := initError(m); h != nil {
 		return *h
 	}
-	_ = post(initializedNote)
+	stepTo(ctx, "notifications/initialized")
+	if h := post(initializedNote); h != nil && h.Why == "timeout" {
+		return *h
+	}
+	stepTo(ctx, "tools/list")
 	if h := post(request(2, "tools/list", nil)); h != nil {
 		return *h
 	}

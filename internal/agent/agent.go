@@ -101,8 +101,11 @@ type Agent struct {
 	Bin     string // executable name, used for detection
 	Dir     string // config directory, used for detection
 	Path    string // config file magpie edits
-	Fields  []Field
-	Native  *NativeConnection
+	// Plugin is the spec of the plugin that adds this agent (plugged.go),
+	// "" for magpie's own
+	Plugin string
+	Fields []Field
+	Native *NativeConnection
 	// Notice, if set, is advice worth showing after a change: agents that
 	// read their config once at start-up need a restart to see it.
 	Notice func() string

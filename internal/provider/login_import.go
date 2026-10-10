@@ -8,8 +8,10 @@ package provider
 // ({claudeAiOauth: {…}}), and Sub2API as {accounts: [{platform, type:
 // "oauth", credentials: {…}}]}. Cockpit Tools (jlcodes99/cockpit-tools)
 // exports its Codex accounts in these shapes: its own (CLIProxyAPI's),
-// Codex's auth.json, CPA and Sub2API. A bare refresh token a line is taken
-// too. They all sign in with the agents' own OAuth clients, the ones
+// Codex's auth.json, CPA and Sub2API. codexbar (lizhelang/codexbar), a
+// menu-bar switcher, keeps its ChatGPT accounts in ~/.codexbar/config.json
+// (see codexbarEntries); its own export is Sub2API's. A bare refresh token
+// a line is taken too. They all sign in with the agents' own OAuth clients, the ones
 // magpie uses.
 //
 // A ChatGPT one is checked the way a sign-in is finished: its refresh token
@@ -65,6 +67,10 @@ func parseLoginImport(agent, data string) ([]loginImport, error) {
 				// in credentials
 				if c, ok := x["credentials"].(map[string]any); ok && jsonStr(x, "platform") != "" {
 					out = append(out, sub2apiEntry(agent, x, c))
+					return
+				}
+				if es, ok := codexbarEntries(agent, x); ok {
+					out = append(out, es...)
 					return
 				}
 				if as, ok := x["accounts"].([]any); ok && jsonStr(x, "refresh_token", "refreshToken") == "" {
@@ -137,6 +143,59 @@ func loginEntry(agent string, x map[string]any) loginImport {
 		e.err = accessOnly
 	}
 	return e
+}
+
+// codexbarEntries reads codexbar's config.json, as its CodexBarConfigStore
+// writes it: {version, active, openAI: {remoteConnectionAccounts: […]},
+// providers: [{id, kind, accounts: […]}]}. The ChatGPT sign-ins are the
+// accounts of the provider of kind "openai_oauth" and the remote
+// connection's, each {id, kind: "oauth_tokens" or "api_key", email,
+// openAIAccountId, accessToken, refreshToken, idToken, …}: the account's
+// workspace is openAIAccountId, its id is codexbar's own. The other
+// providers are other vendors' API endpoints, not accounts, and are left
+// alone. A sign-in in both places is read once.
+func codexbarEntries(agent string, x map[string]any) ([]loginImport, bool) {
+	ps, ok := x["providers"].([]any)
+	if !ok {
+		return nil, false
+	}
+	var accts []any
+	for _, p := range ps {
+		if p, ok := p.(map[string]any); ok && jsonStr(p, "kind") == "openai_oauth" {
+			as, _ := p["accounts"].([]any)
+			accts = append(accts, as...)
+		}
+	}
+	if o, ok := x["openAI"].(map[string]any); ok {
+		as, _ := o["remoteConnectionAccounts"].([]any)
+		accts = append(accts, as...)
+	}
+	var out []loginImport
+	seen := map[string]bool{}
+	for _, a := range accts {
+		a, ok := a.(map[string]any)
+		if !ok {
+			continue
+		}
+		e := loginImport{email: jsonStr(a, "email"), idToken: jsonStr(a, "idToken"), accessToken: jsonStr(a, "accessToken"),
+			refreshToken: jsonStr(a, "refreshToken"), accountID: jsonStr(a, "openAIAccountId")}
+		if e.refreshToken != "" {
+			if seen[e.refreshToken] {
+				continue
+			}
+			seen[e.refreshToken] = true
+		}
+		switch {
+		case agent != "codex":
+			e.err = "a ChatGPT account, not Claude's"
+		case jsonStr(a, "kind") == "api_key":
+			e.err = "an API key, not a sign-in; add it as a key instead"
+		case e.refreshToken == "" && e.accessToken != "":
+			e.err = accessOnly
+		}
+		out = append(out, e)
+	}
+	return out, true
 }
 
 // accessOnly: an account with an access token and no refresh token (a

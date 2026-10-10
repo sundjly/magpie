@@ -134,6 +134,12 @@ docker logs magpie</pre>
       <pre id="ex-signin">docker exec -it magpie magpie accounts add codex</pre>
     </div>
     <p>打开它打印的链接并登录，再把浏览器最后停在的地址粘贴回去。Web 界面也能从文件导入登录。</p>
+    <p>Claude 订阅的登录和请求都经过 Claude Code，而镜像里没有它。先让 magpie 下载 Anthropic 官方的构建：它会说明版本、下载来源和保存位置，问过你再下载，并用 Anthropic 清单里的 SHA-256 校验。它保存在 <code>/config/cache</code> 里；再运行一次可以更新到新版本。缺少 Claude Code 时，<code>magpie accounts add claude</code> 也会提出下载。</p>
+    <div class="code">
+      <span class="lang">Shell</span>
+      <button class="copy" data-copy="ex-claude-code">复制</button>
+      <pre id="ex-claude-code">docker exec -it magpie magpie claude-code install</pre>
+    </div>
 
     <h2 id="volume"><a class="anchor" href="#volume">保存了什么</a></h2>
     <p>magpie 写的所有东西都在 <code>/config</code> 下，所以重启、或者在同一个数据卷上新建容器，供应商、密钥、登录和插件都还在。</p>
@@ -141,7 +147,7 @@ docker logs magpie</pre>
       <tr><th>路径</th><th>内容</th></tr>
       <tr><td><code>/config/magpie</code></td><td>magpie 自己的文件：<code>settings.json</code>、供应商、网关密钥、路由组</td></tr>
       <tr><td><code>/config/home</code></td><td>容器的 <code>HOME</code>：登录保存在对应 Agent 保存的位置（<code>~/.codex</code>、<code>~/.claude</code>……）</td></tr>
-      <tr><td><code>/config/cache</code></td><td>模型目录，以及插件运行用的 Bun（第一次用插件时下载）</td></tr>
+      <tr><td><code>/config/cache</code></td><td>模型目录、插件运行用的 Bun（第一次用插件时下载），以及 <code>magpie claude-code install</code> 下载的 Claude Code</td></tr>
       <tr><td><code>/config/data</code>、<code>/config/state</code></td><td>magpie 保存的其他内容</td></tr>
     </table></div>
     <p>旧镜像创建的数据卷照样能用：magpie 启动时会补上缺的目录。只有用旧镜像做的登录（当时存在数据卷之外）需要重新登录。</p>

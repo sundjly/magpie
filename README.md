@@ -22,17 +22,6 @@ and when a quota runs out, it quietly moves on to the next account.
   <img src="site/public/img/agents-light.png" width="900" alt="magpie's Agents page: Claude Code on Kimi K3, Codex on DeepSeek V4 Pro, Gemini CLI on GLM-5.3, each picked from one list">
 </picture>
 
-<br>
-
-<table>
-<tr>
-<td align="center" width="25%"><h3>45+</h3>agents, one list</td>
-<td align="center" width="25%"><h3>4</h3>wire APIs, one gateway</td>
-<td align="center" width="25%"><h3>5</h3>routing modes</td>
-<td align="center" width="25%"><h3>0</h3>config files edited by hand</td>
-</tr>
-</table>
-
 </div>
 
 <br>
@@ -190,6 +179,23 @@ A conversation **stays with the account that answered it** while the vendor's pr
   <img width="760" src="site/public/img/routing-light.png" alt="The Routing view: four agents through magpie to seven providers, live">
 </picture>
 
+<table>
+<tr>
+<td width="50%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/public/img/intent-trace-dark.png">
+  <img src="site/public/img/intent-trace-light.png" alt="An intent-routed turn, explained step by step">
+</picture>
+</td>
+<td width="50%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/public/img/nested-routing-dark.png">
+  <img src="site/public/img/nested-routing-light.png" alt="A routing group inside a routing group">
+</picture>
+</td>
+</tr>
+</table>
+
 ### Plugins
 
 ```sh
@@ -277,7 +283,7 @@ Find them under Plugins › Discover › Gateway middleware. See [Gateway middle
 
 ## Privacy
 
-Your prompts, replies, keys and accounts go only to the providers you use. Once a day a released magpie tells us it is in use: a random id, its version and system, and which agents, providers and models it is used with, by magpie's own ids (a provider you added yourself is only `custom`), and for each partner listed first in the add sheet, how many times a day it was shown, opened and added (counts only). No names, URLs, accounts, keys, prompts or usage. Turn part or all of it off in **Settings → Privacy**, or with `DO_NOT_TRACK=1`. [What is sent, exactly](docs/reference.md#counting-users).
+Your prompts, replies, keys and accounts go only to the providers you use. Once a day a released magpie tells us it is in use: a random id, its version and system, and which agents, providers and models it is used with, by magpie's own ids (a provider you added yourself is only `custom`), and for each partner listed first in the add sheet, how many times a day it was shown, opened and added (counts only). No names, URLs, accounts, keys, prompts or usage. Turn part or all of it off in **Settings → Privacy**, or with `DO_NOT_TRACK=1`. A partner's website and key links go through `usemagpie.ai/go/…`, which counts the click, and usemagpie.ai counts fetches of the partner list; the server sees these whatever the settings, and keeps no id or address. [What is sent, exactly](docs/reference.md#counting-users).
 
 ## Community
 

@@ -1183,10 +1183,13 @@ func (p Provider) Chosen(id string) bool {
 
 // Entry is one model as the agents see it.
 type Entry struct {
-	ID         string   `json:"id"`                // what the agent sends magpie
-	Model      string   `json:"model"`             // what magpie sends the vendor
-	Name       string   `json:"name"`              // the user's name for it, when they gave one (SetModelName)
-	Default    string   `json:"default,omitempty"` // the model's own name, when the user gave it another
+	ID      string `json:"id"`                // what the agent sends magpie
+	Model   string `json:"model"`             // what magpie sends the vendor
+	Name    string `json:"name"`              // the user's name for it, when they gave one (SetModelName)
+	Default string `json:"default,omitempty"` // the model's own name, when the user gave it another
+	// Plain is a remote magpie's model's name there alone, when Name is
+	// its label there with that magpie's provider after it (catalog.Model's)
+	Plain      string   `json:"-"`
 	Efforts    []string `json:"efforts,omitempty"`
 	Provider   Provider `json:"-"`                // a group's: its first member's
 	Group      string   `json:"group,omitempty"`  // set on a routing group (group.go)
@@ -1220,6 +1223,9 @@ type Entry struct {
 	// multi-agent V2 for it, so Ultra hands work to its agents, whose
 	// tasks a magpie-served lead writes as text.
 	AgentsV2 bool `json:"-"`
+	// Tiers are the service tiers its list offers Codex on the model:
+	// another magpie's, those it offers its own Codex (#1234)
+	Tiers []string `json:"-"`
 }
 
 // Catalog lists the routing groups, then every exposed model of every ready
@@ -1295,9 +1301,11 @@ func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
 	// an agent's list showed the whole magpie/<provider>/<model> (#955)
 	name := cmp.Or(m.Name, m.ID)
 	e := Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Family: p.Family, Name: name, Efforts: effortsOf(m), Provider: p,
-		Images: images, ImageInput: imageInput, Context: ctx, Output: output, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas}
+		Images: images, ImageInput: imageInput, Context: ctx, Output: output, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas, Tiers: m.Tiers}
 	if n, ok := modelNameIn(s.ModelNames, p.ID, m.ID); ok {
 		e.Name, e.Default = n, name
+	} else {
+		e.Plain = m.Plain
 	}
 	// a model that thinks still does with the levels the user kept or
 	// none at all; one its source says nothing of thinks as most of the

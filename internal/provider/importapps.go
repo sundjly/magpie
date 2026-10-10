@@ -129,6 +129,14 @@ func ImportFromApps(picks []AppPick) ([]string, error) {
 			continue
 		case pk.Mode == "replace":
 		default:
+			// an account a provider holds already is not added twice: the
+			// same relay is often both a CC Switch entry and what Claude
+			// Code's settings.json points at, and both are picked at once.
+			// Two of it were added, and once one was removed the other made
+			// the entry "Already added" (#1486)
+			if holds(p) {
+				continue
+			}
 			// the id may have been taken since, by an earlier pick
 			if h, err := Find(p.ID); err == nil {
 				if sameProvider(*h, p) {
@@ -146,6 +154,17 @@ func ImportFromApps(picks []AppPick) ([]string, error) {
 		added = append(added, p.Name)
 	}
 	return added, nil
+}
+
+// holds says a provider of magpie's has p's account: its key at its
+// address, as the import list's "same" says (settle).
+func holds(p Provider) bool {
+	for _, h := range load().Providers {
+		if !h.Hidden && sameProvider(h, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // freeID is id, or id-2, id-3… whichever no provider has.

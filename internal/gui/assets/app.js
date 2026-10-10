@@ -4,7 +4,10 @@ const $$ = (s) => document.querySelectorAll(s);
 const params = new URLSearchParams(location.search);
 const mode = params.get("mode") || "window";
 // The panel loads Wails for ExecJS readiness, but stays attached to the tray.
-if (mode === "panel") $("header.top").style.setProperty("--wails-draggable", "no-drag");
+// On Linux it is dragged by its header like the window: a Wayland window
+// can't be put by the icon, so KWin places it, and since it has no KWin
+// title bar (#1283) the header is the only handle it has (#1430).
+if (mode === "panel" && !document.body.classList.contains("linux")) $("header.top").style.setProperty("--wails-draggable", "no-drag");
 // `magpie web`: the page in a browser tab, with no window of the app's
 // around it — it opens links itself, and what is the desktop's is left out
 const web = !!window.bootPrefs?.web;
@@ -295,8 +298,10 @@ function renderAgents() {
     // an effort or ultracode the model has none of (Claude Code on Haiku
     // 4.5, ultracode short of xhigh) isn't drawn at all, nor are subagents
     // with no model to go on, or a sign-in with no other to take (Claude
-    // Code's, until it runs through magpie where magpie takes any key)
-    const none = (f) => (f.key === "effort" || f.key === "ultracode" || f.label === "subagents" || f.label === SUB_EFFORT || f.label === SUB_MODEL || f.label === MEMORIES || f.label === "sign-in") && !f.options.length && !f.value;
+    // Code's, until it runs through magpie where magpie takes any key), or
+    // a small model with none to pick (Snow CLI's, on a profile of the
+    // user's own)
+    const none = (f) => (f.key === "effort" || f.key === "ultracode" || f.label === "subagents" || f.label === SUB_EFFORT || f.label === SUB_MODEL || f.label === MEMORIES || f.label === "sign-in" || f.key === "small") && !f.options.length && !f.value;
     const shownFields = a.fields.filter((f) => !TIERS.includes(f.label) && !TIER_EFFORTS.includes(f.label) && !none(f));
     const tiers = tierMenu(a);
     if (tiers) shownFields.push(tiers);
@@ -9005,6 +9010,8 @@ function importAppRow(ia, s, it, recount, boxes) {
     who.append(sg);
   }
   let tag = null;
+  // which provider holds it, so the user can find it (#1486)
+  if (it.status === "same" && it.existing) who.append(el("div", "sub", t("magpie has {name} already", { name: it.existing })));
   if (it.status === "same") tag = el("span", "apptag", t("Already added"));
   else if (it.skip) tag = el("span", "apptag", t("Can't import"));
   else if (it.status === "taken") tag = el("span", "apptag", t("Name in use"));
@@ -9451,6 +9458,16 @@ function renderModels(p) {
       if (again) return;
       const acts = [noTest ? { name: "Test this model", icon: "M5.5 3.75v8.5L12.25 8z", off: true, why: noTest, run() {} }
         : { name: "Test this model", icon: "M5.5 3.75v8.5L12.25 8z", run: () => testOne(id) }];
+      // asked as Codex or Claude Code asks, for a relay that serves only
+      // them (耍赖天都爱 on Discord); Claude Code's once it has come
+      // through magpie, its headers being the ones it came with
+      if (!noTest && !decidesModel(p, id)) {
+        for (const [as, agent, name] of [["codex", "Codex", "Test as Codex"], ["claude-code", "Claude Code", "Test as Claude Code"]]) {
+          if (!(as in (p.testsAs || {}))) continue;
+          const why = p.testsAs[as] ? t(p.testsAs[as]) : "";
+          acts.push({ name, icon: "M5.5 3.75v8.5L12.25 8z", off: !!why, why, tip: t("Asked as {agent} asks, for a relay that serves only {agent}", { agent }), run: () => testOne(id, as) });
+        }
+      }
       // its id as agents and the gateway name it, to paste where a model is
       // typed (ARNO, Discord: 右击菜单除了测试模型外，还能添加拷贝模型id的功能)
       acts.push({ name: "Copy model ID", icon: COPY_ICON, tip: id, run: () => copy(id, id, null, t("Model ID {model} copied", { model: id })) });
@@ -9620,7 +9637,12 @@ function renderModels(p) {
     const first = p.models.find((x) => x.id === ids[0]) || { id: ids[0], name: ids[0] };
     const sayLabel = (mode) => {
       const name = prefs[first.id]?.name ?? (first.default ? first.name : "");
-      sfxSaid.textContent = t("Agents’ lists show “{label}”", { label: suffixed(name || first.default || first.name || first.id, p.name || p.id, !!name, mode) });
+      const base = name || first.default || first.name || first.id;
+      let label = suffixed(base, p.name || p.id, !!name, mode);
+      // a remote magpie's model, named there with its provider after it,
+      // is that name alone when none is put after it here (ARNO on Discord)
+      if (!name && first.plain && label === base) label = first.plain;
+      sfxSaid.textContent = t("Agents’ lists show “{label}”", { label });
     };
     sayLabel();
     sfx.append(el("span", "", t("Provider in model names")), suffixSegs(sayLabel), sfxSaid);
@@ -9982,12 +10004,12 @@ function renderModels(p) {
   };
   // one model, its dot and title as Test models leaves them, the others'
   // results kept
-  const testOne = async (id) => {
+  const testOne = async (id, as) => {
     const got = modelTests[p.id] = modelTests[p.id] || {};
     got[id] = null;
     draw();
     try {
-      const r = await api("provider/test", { ...asTyped(), id: p.id, test: [id] });
+      const r = await api("provider/test", { ...asTyped(), id: p.id, test: [id], ...(as ? { as } : {}) });
       const x = got[id] = r.results[0];
       const via = x.protocol ? apiLabel(x.protocol) : "";
       const error = (x.status ? x.status + " · " : "") + x.error;
@@ -10338,12 +10360,13 @@ function importSay(agent) {
     };
   }
   if (agent === "codex") {
-    // Cockpit Tools exports in its own shape (CLIProxyAPI's), Codex's
-    // auth.json, CPA and Sub2API: all read (login_import.go)
+    // codexbar's config.json; Cockpit Tools exports in its own shape
+    // (CLIProxyAPI's), Codex's auth.json, CPA and Sub2API: all read
+    // (login_import.go)
     return {
-      from: t("Bring in accounts from Codex's auth.json, or exports from Cockpit Tools, CLIProxyAPI or Sub2API"),
-      intro: t("Choose or paste one or more files: Codex's auth.json, or an export from Cockpit Tools, CLIProxyAPI or Sub2API. Each account's sign-in is refreshed with ChatGPT before it is added."),
-      spent: t("This takes the sign-in over: the tool the file came from (Codex on another computer, Cockpit Tools, CLIProxyAPI) is signed out of that account and has to sign in again. The file itself is only read."),
+      from: t("Bring in accounts from Codex's auth.json, codexbar's config.json, or exports from Cockpit Tools, CLIProxyAPI or Sub2API"),
+      intro: t("Choose or paste one or more files: Codex's auth.json, codexbar's config.json (in ~/.codexbar), or an export from Cockpit Tools, CLIProxyAPI or Sub2API. Each account's sign-in is refreshed with ChatGPT before it is added."),
+      spent: t("This takes the sign-in over: the tool the file came from (Codex on another computer, codexbar, Cockpit Tools, CLIProxyAPI) is signed out of that account and has to sign in again. The file itself is only read."),
       checking: t("Checking the accounts with {vendor}…", { vendor: "ChatGPT" }),
       checks: t("Each account's sign-in is refreshed and its account looked up, as signing in does."),
     };
@@ -11219,6 +11242,7 @@ function renderAccounts(a, p) {
     list.append(box);
   }
   if (a.agent === "codex" && providers?.codexDaemon) list.append(renderCodexDaemon(providers.codexDaemon));
+  if (a.agent === "codex" && providers?.codexApp) list.append(renderCodexApp(providers.codexApp));
   if (signing?.agent === a.agent) list.append(renderSigning(sub));
   else {
     const add = el("button", "acc add");
@@ -11258,6 +11282,23 @@ function renderCodexDaemon(user) {
   go.title = "codex app-server daemon restart";
   go.onclick = () => { go.classList.add("busy"); accountAction("codex/daemon/restart", {}, t("Codex's background service restarted")); };
   box.append(later, go);
+  return box;
+}
+
+// renderCodexApp: the Codex desktop app reads the sign-in only when it
+// opens, so after a switch it stays on the account before (user): it shows
+// that account's limits and, once they are spent, sends in no thread. Only
+// quitting and opening it again moves it; magpie doesn't quit it unasked.
+function renderCodexApp(user) {
+  const box = el("div", "signing daemon");
+  box.append(el("span", "mark", "!"));
+  const tt = el("span", "tt");
+  tt.append(el("span", "n", t("The Codex app is still signed in as {user}", { user })),
+    el("span", "s", t("It shows that account's usage limits until it is quit and opened again. Quit it and open it again to use the new account.")));
+  box.append(tt);
+  const ok = el("button", "text", t("Got it"));
+  ok.onclick = () => accountAction("codex/daemon/dismiss-app", {});
+  box.append(ok);
   return box;
 }
 
@@ -19787,7 +19828,7 @@ function renderSearch(s, keep) {
     const v = vendor();
     pick.replaceChildren(el("span", "", v.name || ""), svg(CHEV, 11, 1.6));
     url.hidden = !v.needURL;
-    key.placeholder = v.needURL ? t("API key, if it needs one") : t("API key");
+    key.placeholder = v.needURL ? t("API key, if it needs one") : t("API key, or several split by commas");
     get.hidden = !v.keysURL;
   };
   pick.onclick = (e) => {
@@ -19809,7 +19850,8 @@ function renderSearch(s, keep) {
   }
   draw();
   const apiFirst = s.searchFirst === "api" && (s.searchAPIs || []).length > 0;
-  const by = !s.searchProvider ? t("No provider can search, so these are asked")
+  const by = s.searcher === "off" ? t("Provider search is off; only these APIs are used")
+    : !s.searchProvider ? t("No provider can search, so these are asked")
     : apiFirst ? t("Asked before {who}, which searches when these fail", { who: s.searchProvider })
     : t("Now done by {who}; these come after it", { who: s.searchProvider });
   const head = row(t("Search APIs"), d.err || t("When a model can't search the web, magpie searches for it with these, in this order, and gives it what they found") + " · " + by,
@@ -19865,6 +19907,7 @@ function renderSearch(s, keep) {
 function renderSearcher(s, keep, box) {
   const choices = s.searchChoices || [];
   const v = s.searcher || "";
+  const off = v === "off";
   const named = (id) => {
     const [pid, ...rest] = id.split("/");
     const c = choices.find((x) => x.id === pid);
@@ -19877,21 +19920,21 @@ function renderSearcher(s, keep, box) {
   const icOf = (id) => choices.find((x) => x.id === id.split("/")[0])?.icon;
   const r = el("div", "row pref searcher-row");
   const who = el("div", "who");
-  const sub = el("div", "sub", t("When a model can't search the web directly, the selected provider searches for it and returns the results. Searches may use the service's quota or incur charges; if a search fails, magpie tries other available sources."));
-  if (v && s.searchUnused) {
+  const sub = el("div", "sub", off ? t("When provider search is off, only configured Search APIs are used. Without a Search API, magpie does not add a search tool. Providers' native web search is unchanged.") : t("When a model can't search the web directly, the selected provider searches for it and returns the results. Searches may use the service's quota or incur charges; if a search fails, magpie tries other available sources."));
+  if (!off && v && s.searchUnused) {
     const why = { gone: t("it is no longer in magpie"), off: t("it is turned off"), cant: t("it can't search the web by itself"), nomodel: t("it lists no model") }[s.searchUnused] || s.searchUnused;
     sub.append(" · ", el("span", "warn searcher-unused", t("{who} isn't used: {why}, so magpie picks one", { who: named(v), why })));
   }
   const plans = choices.filter((c) => c.service).map((c) => c.name);
-  if (plans.length) sub.append(" · ", el("span", "searcher-own",
+  if (!off && plans.length) sub.append(" · ", el("span", "searcher-own",
     t("A Kimi Code plan ({names}) searches for its own models first, with its web search; for other models only when named here", { names: plans.join(", ") })));
   const googles = choices.filter((c) => c.own).map((c) => c.name);
-  if (googles.length) sub.append(" · ", el("span", "searcher-own",
+  if (!off && googles.length) sub.append(" · ", el("span", "searcher-own",
     t("{names} search for their own models first, with Gemini's Google Search", { names: googles.join(", ") })));
-  if (s.searchRelays?.length) sub.append(" · ", el("span", "searcher-relays",
+  if (!off && s.searchRelays?.length) sub.append(" · ", el("span", "searcher-relays",
     t("These relays must be selected manually and are not used for automatic selection or fallback: {names}.", { names: s.searchRelays.join(", ") })));
   // Being left out can also mean no usable model, not just no search support.
-  if (s.searchLeftOut?.length) sub.append(" · ", el("span", "searcher-left-out",
+  if (!off && s.searchLeftOut?.length) sub.append(" · ", el("span", "searcher-left-out",
     t("These providers can't be selected to search for other models with the current configuration: {names}. Their models can still get search results through other available search providers or configured search APIs.", { names: s.searchLeftOut.length > 6
       ? t("{names} and {n} more", { names: s.searchLeftOut.slice(0, 5).join(", "), n: s.searchLeftOut.length - 5 })
       : s.searchLeftOut.join(", ") })));
@@ -19899,12 +19942,14 @@ function renderSearcher(s, keep, box) {
   const b = el("button", "rt-cond on searcher-pick");
   b.type = "button";
   b.setAttribute("aria-label", t("Searches for other models"));
-  if (v && !s.searchUnused) b.append(icon(icOf(v) || "generic"), el("span", "", named(v)));
+  if (off) b.append(el("span", "", t("Off")));
+  else if (v && !s.searchUnused) b.append(icon(icOf(v) || "generic"), el("span", "", named(v)));
   else {
     if (s.searchAuto) b.append(icon(choices[0]?.icon || "generic"));
     b.append(el("span", "", t("Automatic") + " · " + (s.searchAuto || t("no provider that searches"))));
   }
-  const options = [{ value: "", label: t("Automatic"), note: s.searchAuto || t("no provider that searches"), reset: true }];
+  const options = [{ value: "", label: t("Automatic"), note: s.searchAuto || t("no provider that searches"), reset: true },
+    { value: "off", label: t("Off"), note: t("Search APIs"), reset: true }];
   for (const c of choices) {
     if (c.service) {
       options.push({ value: c.id, label: t("its web search"), note: c.name, icon: c.icon, group: c.name });

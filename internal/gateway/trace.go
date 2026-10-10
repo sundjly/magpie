@@ -122,6 +122,9 @@ type GroupRef struct {
 	Via []string `json:"via,omitempty"`
 	// Fast: those of Members sent in their vendor's fast mode
 	Fast []string `json:"fast,omitempty"`
+	// Paused: the models a pause rule left out of the request, so not in
+	// Members (provider.PausedOut)
+	Paused []provider.Paused `json:"paused,omitempty"`
 }
 
 // SubGroup is a routing group in the group a request asked for.
@@ -269,6 +272,12 @@ type Try struct {
 	Error    string `json:"error,omitempty"`
 	Rest     *Rest  `json:"rest,omitempty"`  // how long it now sits out; none when it was the last to try
 	Again    int64  `json:"again,omitempty"` // ms waited before it was tried again, the last one left
+	// Replan: every member had failed in a way that passes, so after
+	// Again the Replan of them that may answer by then were asked again,
+	// in turn, within the group's Patience (seconds) for the request
+	// (#1418)
+	Replan   int `json:"replan,omitempty"`
+	Patience int `json:"patience,omitempty"`
 	// Queued: ms it waited for one of its key's or account's slots, the
 	// provider's MaxConcurrency out already (concurrency.go)
 	Queued int64 `json:"queued,omitempty"`

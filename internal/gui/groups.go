@@ -326,6 +326,9 @@ func groupRoutes(mux *http.ServeMux) {
 			}
 		case "show":
 			err = provider.ShowGroup(in.ID)
+		case "copy":
+			// a group as it is, under name (provider.CopyGroup)
+			_, err = provider.CopyGroup(in.ID, in.Name)
 		case "switch":
 			// a group of the user's on or off, kept as it is (PAMI on Discord)
 			err = provider.SwitchGroup(in.ID, body.On)

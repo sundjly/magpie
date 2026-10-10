@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
@@ -92,6 +93,13 @@ type pluginEntryJSON struct {
 	// whether that is all it has, no provider to sign in to
 	IsMiddleware   bool `json:"isMiddleware,omitempty"`
 	MiddlewareOnly bool `json:"middlewareOnly,omitempty"`
+	// Agent is the agent it adds (internal/agentplug), or why it isn't
+	// listed; IsAgent is whether its package has one, said of one switched
+	// off too; InMagpieOnly is whether all it has runs in magpie itself,
+	// middleware and an agent, no provider to sign in to
+	Agent        *pluginAgentJSON `json:"agent,omitempty"`
+	IsAgent      bool             `json:"isAgent,omitempty"`
+	InMagpieOnly bool             `json:"inMagpieOnly,omitempty"`
 	// Clashes are the providers it signs in to that another plugin signs
 	// in to as well (a plugin of the user's own beside a third party's):
 	// the host runs one plugin for each, and the row says which, with a
@@ -150,6 +158,13 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	// npm's newest, as it said last: asking it again is /api/plugins/npm's
 	known := plugin.InfoCached(npmNames(l.Plugins))
 	mws := middleware.States()
+	var agentErrs map[string]string
+	for _, e := range l.Plugins {
+		if f, _ := plugin.Agent(plugin.Target(e.Spec)); f != "" && !e.Off {
+			agentErrs = agent.PluginErrors()
+			break
+		}
+	}
 	for _, e := range l.Plugins {
 		j := pluginEntryJSON{Entry: e, Error: errs[e.Spec], Providers: names[e.Spec], Version: plugin.Installed(e.Spec)}
 		if npmPlugin(e.Spec) {
@@ -170,6 +185,13 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 		if file, only := plugin.Middleware(plugin.Target(e.Spec)); file != "" {
 			j.IsMiddleware, j.MiddlewareOnly = true, only
 			j.OptionsExample = plugin.OptionsExample(plugin.Target(e.Spec))
+		}
+		if file, _ := plugin.Agent(plugin.Target(e.Spec)); file != "" {
+			j.IsAgent = true
+			j.InMagpieOnly = plugin.InMagpieOnly(plugin.Target(e.Spec))
+			if !e.Off {
+				j.Agent = pluginAgentOf(e.Spec, agentErrs)
+			}
 		}
 		for _, c := range clashes[e.Spec] {
 			n := idName[c.ID]
@@ -511,6 +533,26 @@ func setChinaMirror(on bool) error {
 	}
 	if on {
 		plugin.RefreshMarket()
+	}
+	return nil
+}
+
+// pluginAgentJSON is the agent a plugin adds, as its row says it.
+type pluginAgentJSON struct {
+	ID    string `json:"id,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Icon  string `json:"icon,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+func pluginAgentOf(spec string, errs map[string]string) *pluginAgentJSON {
+	if err := errs[spec]; err != "" {
+		return &pluginAgentJSON{Error: err}
+	}
+	for _, a := range agent.All() {
+		if a.Plugin == spec {
+			return &pluginAgentJSON{ID: a.ID, Name: a.Name, Icon: a.Icon}
+		}
 	}
 	return nil
 }

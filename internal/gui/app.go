@@ -463,6 +463,9 @@ func Run(version string, showMain bool, link string) error {
 		if cmdClick() {
 			return // Command-drag moves the icon; the system handles it
 		}
+		if runtime.GOOS == "linux" && menuOpening() {
+			return // a right-click opening the menu, not a click (#1430)
+		}
 		if runtime.GOOS == "darwin" {
 			go h.flap()
 		}

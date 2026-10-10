@@ -166,6 +166,9 @@ func accountsCmd(args []string) error {
 				fmt.Println(" ", "Codex's background service is still signed in as", was+"; restart it to use", args[3]+":", provider.CodexDaemonRestart)
 				fmt.Println(" ", muted.Render("running Codex sessions will be interrupted"))
 			}
+			if was := provider.CodexAppStale(); was != "" {
+				fmt.Println(" ", "The Codex app is still signed in as", was+", and shows its limits; quit it and open it again to use", args[3])
+			}
 		}
 		return nil
 	}
@@ -370,6 +373,15 @@ func addAccount(agentID string) error {
 	if _, plug := provider.PluginOf(agentID); plug || provider.Moved(agentID) {
 		return pluginLogin(context.Background(), agentID, "")
 	}
+	if p, _ := claudeCode.downloaded(); agentID == "claude" && runtime.GOOS != "windows" && claudeCode.own() == "" && p == "" {
+		// a server or container: the sign-in runs Claude Code, which it
+		// has none of; downloading it is offered, and asked (Jorben).
+		// Not on Windows, where one in WSL may be the one signed in with.
+		fmt.Println(amber.Render("!"), "Claude Code isn't installed here: magpie signs in to Claude, and answers its requests, through it")
+		if err := installClaudeCode(false); err != nil {
+			return err
+		}
+	}
 	st, err := provider.StartSignIn(agentID)
 	if err != nil {
 		return err
@@ -440,8 +452,9 @@ const importUsage = "usage: magpie accounts import <codex|claude|antigravity|fac
 
 // importAccounts: `magpie accounts import <agent> <file>... [--yes]` brings
 // in accounts from other tools' files, as the window's "Import accounts from
-// a file…" does (#1453): Codex's auth.json, Cockpit Tools', CLIProxyAPI's
-// and Sub2API's exports for ChatGPT; Claude Code's .credentials.json and
+// a file…" does (#1453): Codex's auth.json, codexbar's config.json, and
+// Cockpit Tools', CLIProxyAPI's and Sub2API's exports for ChatGPT; Claude
+// Code's .credentials.json and
 // CLIProxyAPI's for Claude; Antigravity Cockpit's, Antigravity Manager's
 // and CLIProxyAPI's for Antigravity; Factory API keys. The files are only
 // read. What importing does to the tool the file came from is said first,
@@ -498,7 +511,7 @@ func importAccounts(args []string) error {
 	switch id {
 	case "codex":
 		say = []string{"Each account's sign-in is refreshed with ChatGPT before it is added, as signing in does.",
-			"That spends the file's sign-in: the tool it came from (Codex CLI on another computer, Cockpit Tools, CLIProxyAPI) is signed out of that account and has to sign in again. From then on the account is magpie's.",
+			"That spends the file's sign-in: the tool it came from (Codex CLI on another computer, codexbar, Cockpit Tools, CLIProxyAPI) is signed out of that account and has to sign in again. From then on the account is magpie's.",
 			"The files are only read, never changed. An account magpie holds already is left as it is."}
 	case "claude":
 		say = []string{provider.ClaudeRisk,

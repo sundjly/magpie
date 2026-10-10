@@ -7,6 +7,23 @@ saved session, that had its last turn, and what a run leaves on disk. Tool
 calls within a turn (`match`, `continueWith`) are only touched on where they
 meet it.
 
+## Which Claude Code runs
+
+`claudeBinary` (and the sign-in's `claudeExecutable`) take
+`claudecode.Find`: the machine's own `claude` (`proc.FindTool`), else the
+one `magpie claude-code install` downloaded into
+`<cache>/claude-code/<version>/` (`internal/claudecode`), else, on Windows,
+one in WSL. The download is Anthropic's native build from
+`downloads.claude.ai/claude-code-releases`, the "latest" channel, as
+`claude.ai/install.sh` takes it: the release's `manifest.json` gives the
+platform's SHA-256 and size, and a build that doesn't match both is not
+kept. It is only made when the user asks (`magpie claude-code install`, or
+yes to `magpie accounts add claude`'s offer on a machine without one), for
+a server or a container (Jorben on Discord). It is not on PATH and stands
+in for no agent. It doesn't update itself (the bridge sets
+`DISABLE_AUTOUPDATER`); installing again takes the newest and removes the
+older one.
+
 ## Why turns go on in one run
 
 A run started anew is told the whole conversation in one user message
@@ -207,7 +224,8 @@ carries none.
 ## Verification
 
 ```sh
-go test -tags nogui ./internal/gateway/ -run 'ClaudeRewritten|LostMedia|ImagesTakenOut|RunLetGoWhenTheClientRewrote|ClaudeSessionTempFiles|ClaudeLetGo|ClaudeSessionFiles|ClaudeOldSessions|ClaudeSubscriptionReplySaysTheAllowance|ClaudeAllowanceHeaders|ClaudeForksAnsweringTheLeadsCalls|ClaudeTurnGivenUpOn|ClaudeToolResultsGivenUpOn|ClaudePromptMarksEarlierTurns|ClaudeUnloadableSession|ClaudeEndedRunSaysWhy' -count=1
+go test -tags nogui ./internal/claudecode/ -count=1
+go test -tags nogui ./internal/gateway/ -run 'ClaudeSubscriptionRunsTheDownloaded|ClaudeSubscriptionWithoutClaudeCode|ClaudeRewritten|LostMedia|ImagesTakenOut|RunLetGoWhenTheClientRewrote|ClaudeSessionTempFiles|ClaudeLetGo|ClaudeSessionFiles|ClaudeOldSessions|ClaudeSubscriptionReplySaysTheAllowance|ClaudeAllowanceHeaders|ClaudeForksAnsweringTheLeadsCalls|ClaudeTurnGivenUpOn|ClaudeToolResultsGivenUpOn|ClaudePromptMarksEarlierTurns|ClaudeUnloadableSession|ClaudeEndedRunSaysWhy' -count=1
 ```
 
 `claude_rewritten_test.go` has a case for each relaxation and one for each

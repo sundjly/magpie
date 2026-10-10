@@ -163,12 +163,34 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 // answered the lead, "" when magpie didn't (the lead was one of Codex's
 // own models) or has no record of it in the last sealerKeep. A task
 // already sealed opens only where it was sealed, so the way on with it
-// is said too (#1367).
-func sealedTaskError(model, lead string) string {
+// is said too (#1367). earlier is a provider that answered the lead's
+// earlier turns but can't have sealed the task (canSeal): the lead moved
+// on to Codex's own model, whose turns magpie keeps no record of, and the
+// task was sealed there (plugins#70).
+func sealedTaskError(model, lead, earlier string) string {
+	if earlier != "" {
+		return fmt.Sprintf("This subagent's task was sealed by the ChatGPT backend that answered its lead, and only that backend can open it: a ChatGPT account, or the Responses API provider that answered the lead. %s can't. %s answered the lead's earlier turns, but it neither seals a task nor opens one: the lead has since been on one of Codex's own models. Give the subagent the lead's model, or a lead model that isn't served by the ChatGPT backend, so its subagents get a task they can read. To go on with this task, use the lead's model, or have the lead spawn the subagent again.", model, earlier)
+	}
 	if lead != "" {
 		return fmt.Sprintf("This subagent's task was sealed by the server that answered its lead (%s), and only that server can open it; %s can't. Give the subagent the lead's model, or a lead model that isn't served by the ChatGPT backend, so its subagents get a task they can read. To go on with this task, use a model on %s for the lead and the subagent, or have the lead spawn the subagent again.", lead, model, lead)
 	}
 	return fmt.Sprintf("This subagent's task was sealed by the ChatGPT backend that answered its lead, and only that backend can open it: a ChatGPT account, or the Responses API provider that answered the lead. %s is neither: magpie has no record of it answering the lead in the last 30 days. Give the subagent the lead's model, or a lead model that isn't served by the ChatGPT backend, so its subagents get a task they can read. To go on with this task, use the lead's model, or have the lead spawn the subagent again.", model)
+}
+
+// canSeal says whether the provider id names could have sealed a
+// subagent's task, as sealedReader has who can open one: a ChatGPT
+// account, or a provider of no sign-in serving the Responses API (a relay
+// of the ChatGPT backend, #1109). One magpie can't find is taken as one
+// that could.
+func canSeal(id string) bool {
+	p, err := provider.Find(id)
+	if err != nil || p == nil {
+		return true
+	}
+	if p.Account != nil {
+		return p.Account.Agent == "codex"
+	}
+	return slices.Contains(p.Speaks(), provider.Responses)
 }
 
 // sealedReader is who can read a subagent's task its lead sealed: a
@@ -883,7 +905,7 @@ func codexHeader(k string) bool {
 		return false
 	}
 	switch k {
-	case "session_id", "conversation_id", "x-client-request-id", "version":
+	case "session-id", "thread-id", "session_id", "conversation_id", "x-client-request-id", "version":
 		return true
 	}
 	return strings.HasPrefix(k, "x-openai-") || strings.HasPrefix(k, "x-codex-")
@@ -1021,10 +1043,20 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 	// The backend lists every model the ChatGPT account can reach. When the
 	// user picked among them on the codex provider, keep the list to those:
 	// their pick governs Codex's own models, not just magpie's added ones.
+	// A hidden one stays: it is never in a picker, magpie's included
+	// (parseCodexModels), and Codex uses it for jobs of its own. One of them
+	// is codex-auto-review. Without it in the list, Codex's auto-review runs
+	// on the conversation's own model at low effort
+	// (codex-rs/ext/guardian-reviewer select_review_model), and so it is
+	// charged where that model is (#1460).
 	if keep, narrowed := provider.CodexNativePicked(); narrowed {
 		kept := own[:0]
 		for _, m := range own {
 			o, _ := m.(map[string]any)
+			if v, _ := o["visibility"].(string); v == "hide" {
+				kept = append(kept, m)
+				continue
+			}
 			if slug, _ := o["slug"].(string); slug != "" && !keep[slug] {
 				continue
 			}
@@ -1768,7 +1800,11 @@ type compactResult struct {
 	ID     string          `json:"id"`
 	Output []compactOutput `json:"output"`
 	Usage  json.RawMessage `json:"usage"`
-	Error  *struct {
+	// Status is how the response ended ("completed", "incomplete"), and
+	// IncompleteDetails why when it was cut short: max_output_tokens (#1466)
+	Status            string          `json:"status"`
+	IncompleteDetails json.RawMessage `json:"incomplete_details"`
+	Error             *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 }
@@ -1807,6 +1843,10 @@ func compactReply(b []byte) (compactResult, error) {
 		case "response.completed", "response.incomplete":
 			if ev.Response != nil {
 				res.Output, res.Usage = ev.Response.Output, ev.Response.Usage
+				res.Status, res.IncompleteDetails = ev.Response.Status, ev.Response.IncompleteDetails
+			}
+			if res.Status == "" {
+				res.Status = strings.TrimPrefix(ev.Type, "response.")
 			}
 		case "response.failed", "error":
 			failed = ev.Message

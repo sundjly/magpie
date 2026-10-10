@@ -403,6 +403,42 @@ func TestCodexModelListNarrowedByPicks(t *testing.T) {
 	}
 }
 
+// The picks narrow only the models a picker shows. A hidden entry of the
+// backend's, such as codex-auto-review, isn't one: no picker lists it, and
+// Codex's auto-review runs on it when the list has it. Taken out, the review
+// fell back to the conversation's model at low effort, which a relay model
+// charged to the relay (#1460).
+func TestCodexModelListPicksKeepHidden(t *testing.T) {
+	codexSignedIn(t)
+	if err := provider.Save(provider.Provider{ID: "codex", Models: []string{"gpt-6-sol"}}); err != nil {
+		t.Fatal(err)
+	}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"models":[{"slug":"gpt-6-sol","priority":1,"visibility":"list"},{"slug":"gpt-5.5","priority":2,"visibility":"list"},{"slug":"codex-auto-review","priority":3,"visibility":"hide"}]}`)
+	}))
+	defer up.Close()
+	was := provider.CodexBase
+	provider.CodexBase = up.URL + "/backend-api/codex"
+	defer func() { provider.CodexBase = was }()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", CodexPath+"/models", nil)
+	req.Header.Set("Authorization", "Bearer chatgpt-token")
+	New().Handler().ServeHTTP(rec, req)
+	var list struct {
+		Models []map[string]any `json:"models"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	got := map[string]bool{}
+	for _, m := range list.Models {
+		slug, _ := m["slug"].(string)
+		got[slug] = true
+	}
+	if rec.Code != 200 || !got["gpt-6-sol"] || got["gpt-5.5"] || !got["codex-auto-review"] {
+		t.Errorf("after picks: %v (want gpt-6-sol and codex-auto-review, not gpt-5.5); code %d", got, rec.Code)
+	}
+}
+
 // A native model taken out of Codex's list on the Agents page is dropped
 // from the backend's list too, and the ETag changes so Codex asks again.
 func TestCodexModelListHidesOnAgentsPage(t *testing.T) {

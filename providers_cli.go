@@ -56,7 +56,9 @@ const providerUsage = `usage:
                                           one more waits for room, up to 2 minutes, then is turned away with a 429
   magpie provider listed <id> yes|no      no: its models serve only through routing groups, not in the list
   magpie provider off|on <id>             switch it off (kept, but no agent or request uses it), or on again
-  magpie provider test <id> [model…]      send a tiny request through each endpoint, or to each model
+  magpie provider test <id> [--as codex|claude-code] [model…]
+                                          send a tiny request through each endpoint, or to each model;
+                                          --as asks it as that agent does, for a relay that serves only it
   magpie provider rm <id>                 remove a provider
 
   e.g. magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-…
@@ -456,8 +458,19 @@ func providerCmd(args []string) error {
 		return nil
 	case "test":
 		// with models named, a request to each of them; else one per endpoint
+		// --as codex|claude-code, anywhere after test: asked as that agent asks
+		as := ""
+		for i := 0; i < len(rest); i++ {
+			if v, ok := strings.CutPrefix(rest[i], "--as="); ok {
+				as, rest = v, slices.Delete(slices.Clone(rest), i, i+1)
+				i--
+			} else if rest[i] == "--as" && i+1 < len(rest) {
+				as, rest = rest[i+1], slices.Delete(slices.Clone(rest), i, i+2)
+				i--
+			}
+		}
 		if len(rest) < 1 {
-			return fmt.Errorf("magpie provider test <id> [model…]")
+			return fmt.Errorf("magpie provider test <id> [--as codex|claude-code] [model…]")
 		}
 		p, err := provider.Find(rest[0])
 		if err != nil {
@@ -467,7 +480,7 @@ func providerCmd(args []string) error {
 		if models := rest[1:]; len(models) > 0 {
 			res, wait = func(ctx context.Context) []provider.Result { return p.TestModels(ctx, models) }, 90*time.Second
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), wait)
+		ctx, cancel := context.WithTimeout(provider.TestAs(context.Background(), as), wait)
 		defer cancel()
 		ok := true
 		for _, r := range res(ctx) {

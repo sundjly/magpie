@@ -216,12 +216,29 @@ type Known struct {
 // agent's own description, so they are listed in one place only.
 var Agents func() []Known
 
-var knownAgents = sync.OnceValue(func() []Known {
+// PluginAgents lists the agents plugins add, which come and go as
+// plugins do; package agent sets it.
+var PluginAgents func() []Known
+
+var builtinAgents = sync.OnceValue(func() []Known {
 	if Agents == nil {
 		return nil
 	}
 	return Agents()
 })
+
+// knownAgents are magpie's own agents, then those plugins add.
+func knownAgents() []Known {
+	own := builtinAgents()
+	if PluginAgents == nil {
+		return own
+	}
+	more := PluginAgents()
+	if len(more) == 0 {
+		return own
+	}
+	return append(slices.Clip(own), more...)
+}
 
 // AgentOf names the agent behind a client User-Agent. Known agents map to
 // their magpie id; anything else keeps its product name.

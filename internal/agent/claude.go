@@ -225,9 +225,10 @@ func claudeCaps(levels []string) string {
 // claudeCapabilities is claudeCapsEnv's value for magpie's models as Claude
 // Code is shown them, and with desktop, as Claude Desktop hands them to it
 // (mythos-magpie-<number>); first are the models it is set to, which go in
-// before the rest. A model of Claude's it knows is said to have no more
-// than it gives it, one with no levels isn't named.
-func claudeCapabilities(first []string, desktop bool) string {
+// before the rest. own leaves out the models Claude Code itself is shown,
+// for when only Desktop runs on magpie. A model of Claude's it knows is
+// said to have no more than it gives it, one with no levels isn't named.
+func claudeCapabilities(first []string, own, desktop bool) string {
 	type seg struct{ id, caps string }
 	var segs []seg
 	add := func(id string, levels []string) {
@@ -240,9 +241,11 @@ func claudeCapabilities(first []string, desktop bool) string {
 			segs = append(segs, seg{id, c})
 		}
 	}
-	shown, _ := provider.CatalogFor("claude")
-	for _, e := range shown {
-		add(e.ID, e.Efforts)
+	if own {
+		shown, _ := provider.CatalogFor("claude")
+		for _, e := range shown {
+			add(e.ID, e.Efforts)
+		}
 	}
 	if desktop {
 		shown, _ := provider.CatalogFor("claude-desktop")
@@ -653,14 +656,16 @@ func claudeIn(at place) *Agent {
 	// Claude Desktop's ids too while it runs on magpie, its Code tab being
 	// Claude Code on this settings.json
 	desktopOn := func() bool {
-		return at.id == "" && at.sys == nil && desktopWired(desktopPathsOf(desktopDirs(desktopdir.OS, at.home, os.Getenv)))
+		return at.id == "" && at.sys == nil && desktopWiredAny(desktopSets(desktopdir.OS, at.home, os.Getenv))
 	}
-	writeCaps := func(models ...string) error {
+	// putCaps is writeCaps with own saying whether Claude Code's own
+	// models are among them, as they are while it runs on magpie
+	putCaps := func(own bool, models ...string) error {
 		if env(claudeCapsEnv) != "" && !capsOurs() {
 			forget(capsKey)
 			return nil
 		}
-		v := claudeCapabilities(models, desktopOn())
+		v := claudeCapabilities(models, own, desktopOn())
 		if v == "" {
 			return dropCaps()
 		}
@@ -670,6 +675,7 @@ func claudeIn(at place) *Agent {
 		stash(map[string]string{capsKey: v})
 		return edit.SetJSON(path, edit.KV{Path: "env." + claudeCapsEnv, Value: v})
 	}
+	writeCaps := func(models ...string) error { return putCaps(true, models...) }
 	// writeWindow tells Claude Code the window of the models it runs on
 	// (claudeWindow), and while Claude Desktop runs on magpie, of those its
 	// Code tab runs it on too (claudeDesktopWindow): the least of them, as
@@ -694,6 +700,24 @@ func claudeIn(at place) *Agent {
 			return nil
 		}
 		return edit.SetJSON(path, edit.KV{Path: "env." + claudeContextEnv, Value: v})
+	}
+	// desktopOnly is what is written while Claude Code itself isn't on
+	// magpie: Claude Desktop's Code tab still runs Claude Code on this
+	// settings.json while Desktop is, so the window and capabilities of
+	// Desktop's models alone; none at all when Desktop isn't either. Only
+	// Claude Code's being wired in wrote them before, so a user who wired
+	// in Desktop alone had 200K for every Desktop model (#1458).
+	desktopOnly := func() error {
+		if !desktopOn() {
+			if err := dropWindow(); err != nil {
+				return err
+			}
+			return dropCaps()
+		}
+		if err := writeWindow("", nil); err != nil {
+			return err
+		}
+		return putCaps(false)
 	}
 	// what was last written that an open Claude Code session doesn't see:
 	// it reads settings.json at start-up, only its env as it goes
@@ -737,16 +761,15 @@ func claudeIn(at place) *Agent {
 	// was wired in; it answers the model Claude Code was on then, for
 	// Unwire to go back to
 	unroute := func() (string, error) {
-		if err := dropWindow(); err != nil {
-			return "", err
-		}
 		if err := dropOutput(); err != nil {
 			return "", err
 		}
 		if err := dropCompact(); err != nil {
 			return "", err
 		}
-		if err := dropCaps(); err != nil {
+		// the window and capabilities stay as Claude Desktop's Code tab
+		// needs them while Desktop is on magpie (#1458)
+		if err := desktopOnly(); err != nil {
 			return "", err
 		}
 		if err := dropPicker(); err != nil {
@@ -1324,7 +1347,7 @@ func claudeIn(at place) *Agent {
 		// them, while magpie's are the ones it has
 		Sync: func() error {
 			if !routed() {
-				return nil
+				return desktopOnly()
 			}
 			// routed by an older magpie: what was said about the models
 			// before it is taken out as it is now when magpie is wired in

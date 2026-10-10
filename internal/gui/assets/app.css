@@ -576,6 +576,9 @@ body.window .field.solo { grid-column: auto; }
 
 /* ---- usage ---------------------------------------------------------------- */
 .usage-head { display: flex; align-items: center; gap: 10px; height: 34px; margin: 4px 0 6px; flex: none; }
+/* the tabs sit on the head's middle line with the refresh beside them, not
+   at its top as .segs elsewhere do */
+.usage-head > .segs { align-self: center; }
 .subscription-usage { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 7px; margin-bottom: 8px; flex: none; }
 .subscription-card { padding: 10px 12px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); min-width: 0; }
 .subscription-head { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; }
@@ -741,6 +744,9 @@ body.window .field.solo { grid-column: auto; }
 #view-usage.loading .opt { cursor: default; }
 .usage-cost { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
 .usage-cost b { font-size: 15px; font-weight: 600; color: var(--fg); }
+/* a tab with no sum leaves the refresh at the content's right edge */
+.usage-cost:empty { display: none; }
+.usage-head:has(> .usage-cost:empty) .usage-refresh { margin-right: 0; }
 /* a narrow window, three tabs and the periods beside it: the words after the
    sum give way, never the page sideways */
 .usage-cost span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

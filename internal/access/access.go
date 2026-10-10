@@ -442,9 +442,22 @@ func migrateLegacyLANKey() error {
 	return settings.Save(s)
 }
 
+// LANChanged is called after sharing is turned on or off, or its key made
+// anew: what was given the key goes on with the one there is now (the
+// library's MCP servers relayed to an agent in a WSL distro under NAT).
+var LANChanged = func() {}
+
 // ConfigureLAN starts sharing with a named key. Rotation preserves the key's
 // identity, name and enabled state.
 func ConfigureLAN(on, rotate bool) error {
+	if err := configureLAN(on, rotate); err != nil {
+		return err
+	}
+	LANChanged()
+	return nil
+}
+
+func configureLAN(on, rotate bool) error {
 	mu.Lock()
 	defer mu.Unlock()
 	if err := migrateLegacyLANKey(); err != nil {

@@ -265,7 +265,8 @@ func parseGemini(body []byte) (*Request, error) {
 					id = "call_" + newID()
 				}
 				names[fc.Name] = id
-				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: id, Name: fc.Name, Args: parseArgs(string(fc.Args))})
+				// its thought signature goes back to Gemini as it came (#1445)
+				msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: id, Name: fc.Name, Args: parseArgs(string(fc.Args)), Signature: p.Signature})
 			case p.FunctionResponse != nil:
 				fr := p.FunctionResponse
 				id := fr.ID
@@ -292,8 +293,8 @@ func parseGemini(body []byte) (*Request, error) {
 				}
 			case p.Thought:
 				msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: p.Text, Signature: p.Signature})
-			case p.Text != "":
-				msg.Parts = append(msg.Parts, Part{Kind: Text, Text: p.Text})
+			case p.Text != "" || p.Signature != "":
+				msg.Parts = append(msg.Parts, Part{Kind: Text, Text: p.Text, Signature: p.Signature})
 			}
 		}
 		if len(msg.Parts) > 0 {
@@ -543,8 +544,12 @@ func geminiParts(parts []Part) []map[string]any {
 	for _, p := range parts {
 		switch p.Kind {
 		case Text:
-			if p.Text != "" {
-				out = append(out, map[string]any{"text": p.Text})
+			if p.Text != "" || p.Signature != "" {
+				part := map[string]any{"text": p.Text}
+				if p.Signature != "" {
+					part["thoughtSignature"] = p.Signature
+				}
+				out = append(out, part)
 			}
 		case Thinking:
 			if p.Text != "" {
@@ -555,11 +560,16 @@ func geminiParts(parts []Part) []map[string]any {
 				out = append(out, map[string]any{"inlineData": map[string]any{"mimeType": p.MediaType, "data": p.Data}})
 			}
 		case ToolCall:
-			id := p.ID
+			// a signature that rode in the id goes where Gemini has it
+			id, sig := unsignedID(p.ID)
 			if id == "" {
 				id = "call_" + newID()
 			}
-			out = append(out, map[string]any{"functionCall": map[string]any{"id": id, "name": p.Name, "args": argsOf(p)}})
+			part := map[string]any{"functionCall": map[string]any{"id": id, "name": p.Name, "args": argsOf(p)}}
+			if sig != "" {
+				part["thoughtSignature"] = sig
+			}
+			out = append(out, part)
 		}
 	}
 	return out
@@ -638,6 +648,10 @@ func (e *geminiEncoder) event(ev Event) {
 	case KThink:
 		e.flushTool()
 		e.chunk(geminiParts([]Part{{Kind: Thinking, Text: ev.Text}}), "", nil)
+	case KTextSig:
+		// Gemini's signature on its text, as Gemini streams it (#1445)
+		e.flushTool()
+		e.chunk([]map[string]any{{"text": "", "thoughtSignature": ev.Text}}, "", nil)
 	case KImage:
 		e.flushTool()
 		e.chunk(geminiParts([]Part{{Kind: Image, MediaType: ev.Name, Data: ev.Text}}), "", nil)

@@ -580,6 +580,11 @@ func codexListed(shown []Entry, members func(id string) []Member, own bool) []ca
 		// a provider the user added by its address is sent the tier Codex
 		// asks for as it is (hsiangron on X)
 		m.OwnTier = e.Group == "" && e.Provider.Preset == "" && e.Provider.Account == nil && e.Provider.ID != ""
+		// another magpie offers the tiers its own Codex is offered on the
+		// model, and is sent the one Codex asks for as it is (#1234)
+		if e.Group == "" && e.Provider.IsRemoteMagpie() {
+			m.Tiers = e.Tiers
+		}
 		if e.Group != "" {
 			for _, mb := range members(e.ID) {
 				if a := mb.Provider.Account; a != nil && a.Agent == "codex" && strings.HasPrefix(mb.Model, "gpt-") {

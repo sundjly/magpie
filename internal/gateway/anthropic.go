@@ -42,6 +42,9 @@ type aBlock struct {
 	Signature string `json:"signature,omitempty"`
 	// a prompt-cache breakpoint: the prompt up to here is cached
 	CacheControl map[string]string `json:"cache_control,omitempty"`
+	// sealed: a redacted_thinking block as Anthropic wrote it, which goes
+	// back as it came (Part.Sealed, #1445)
+	sealed json.RawMessage
 }
 
 // MarshalJSON writes a thinking block's text even when it is empty.
@@ -51,6 +54,9 @@ type aBlock struct {
 // other block keeps its omitempty fields.
 func (b aBlock) MarshalJSON() ([]byte, error) {
 	type plain aBlock
+	if len(b.sealed) > 0 {
+		return b.sealed, nil
+	}
 	if b.Type != "thinking" {
 		return json.Marshal(plain(b))
 	}
@@ -131,7 +137,8 @@ func parseAnthropic(body []byte) (*Request, error) {
 			if err := json.Unmarshal(m.Content, &blocks); err != nil {
 				return nil, fmt.Errorf("invalid message content: %v", err)
 			}
-			for _, b := range blocks {
+			var raws []json.RawMessage // each block as the client sent it
+			for i, b := range blocks {
 				switch b.Type {
 				case "text":
 					msg.Parts = append(msg.Parts, Part{Kind: Text, Text: b.Text})
@@ -146,6 +153,16 @@ func parseAnthropic(body []byte) (*Request, error) {
 					msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: anthropicInID(b.ToolUseID), Text: out, Images: images, IsError: b.IsError})
 				case "thinking":
 					msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: b.Thinking, Signature: b.Signature})
+				case "redacted_thinking":
+					// Claude's reasoning its safety systems sealed: it
+					// goes back to Messages whole, and is nothing to
+					// another API (#1445)
+					if raws == nil {
+						_ = json.Unmarshal(m.Content, &raws)
+					}
+					if i < len(raws) {
+						msg.Parts = append(msg.Parts, Part{Kind: Thinking, Sealed: raws[i], SealedBy: sealAnthropic})
+					}
 				}
 			}
 		}
@@ -258,24 +275,41 @@ func withoutThinkingOff(body []byte) ([]byte, bool) {
 
 // claudeVersion finds the family's version in a Claude model id however a
 // relay spells it: claude-opus-4-6, claude-opus-5, anthropic.claude-sonnet-4.6-v1,
-// a relay's opus-5.5, or the old order, claude-3-7-sonnet.
-var claudeVersion = regexp.MustCompile(`(?:^|[^a-z0-9])(?:claude-)?(?:opus|sonnet|haiku)-(\d{1,2})(?:[-.](\d{1,2}))?(?:[^0-9]|$)|claude-(\d+)(?:[-.](\d))?-(?:opus|sonnet|haiku)`)
+// a relay's opus-5.5, claude-fable-5-1, or the old order, claude-3-7-sonnet.
+var claudeVersion = regexp.MustCompile(`(?:^|[^a-z0-9])(?:claude-)?(?:opus|sonnet|haiku|fable|mythos)-(\d{1,2})(?:[-.](\d{1,2}))?(?:[^0-9]|$)|claude-(\d+)(?:[-.](\d))?-(?:opus|sonnet|haiku)`)
 
 // adaptiveOnly is a Claude model from 4.6 on, which thinks adaptively:
 // claude-opus-5-5 refuses thinking.type=enabled with a budget ("requires
-// adaptive thinking"), so how hard it thinks goes in output_config.effort.
+// adaptive thinking"), as do Fable and Mythos 5 and 5.1, whose adaptive
+// thinking is always on, so how hard it thinks goes in output_config.effort.
 func adaptiveOnly(model string) bool {
+	major, minor, ok := claudeVersionOf(model)
+	return ok && (major > 4 || major == 4 && minor >= 6)
+}
+
+// noXhigh is a Claude that thinks only adaptively but has no xhigh effort,
+// Opus and Sonnet 4.6, so it is asked max in its place. Every later one
+// takes xhigh (platform.claude.com/docs/en/build-with-claude/effort), and
+// max there spends without limit.
+func noXhigh(model string) bool {
+	major, minor, ok := claudeVersionOf(model)
+	return ok && major == 4 && minor == 6
+}
+
+// claudeVersionOf is a Claude model's version as claudeVersion reads it;
+// ok is false for a model it doesn't read as a Claude.
+func claudeVersionOf(model string) (major, minor int, ok bool) {
 	m := claudeVersion.FindStringSubmatch(strings.ToLower(model))
 	if m == nil {
-		return false
+		return 0, 0, false
 	}
 	v := m[1:3]
 	if m[3] != "" {
 		v = m[3:5]
 	}
-	major, _ := strconv.Atoi(v[0])
-	minor, _ := strconv.Atoi(v[1])
-	return major > 4 || major == 4 && minor >= 6
+	major, _ = strconv.Atoi(v[0])
+	minor, _ = strconv.Atoi(v[1])
+	return major, minor, true
 }
 
 // adaptiveThinking is an Anthropic request as a model that thinks only
@@ -286,13 +320,17 @@ func adaptiveOnly(model string) bool {
 // effort it is nearest in output_config.effort unless one is there (Keenc
 // on Discord: claude-opus-5-5 answered 400). Read off the model the body
 // is sent with, the vendor's own name; any other request, older Claudes'
-// included, goes as it came, and "disabled" stays.
+// included, goes as it came, and "disabled" stays. The thinking enabled
+// shows (display "summarized" by default) is still shown: Opus 4.7 and
+// later leave it out of adaptive thinking unless asked (#1485), so it is
+// asked for unless the request names its own display. A provider that
+// refuses display has it taken out after (withoutRefusedShapes).
 func adaptiveThinking(body []byte) []byte {
 	th := gjson.GetBytes(body, "thinking")
 	if th.Get("type").String() != "enabled" || !adaptiveOnly(gjson.GetBytes(body, "model").String()) {
 		return body
 	}
-	thinking := map[string]any{"type": "adaptive"}
+	thinking := map[string]any{"type": "adaptive", "display": "summarized"}
 	if d := th.Get("display"); d.Exists() {
 		thinking["display"] = d.Value()
 	}
@@ -300,7 +338,7 @@ func adaptiveThinking(body []byte) []byte {
 	if gjson.GetBytes(body, "output_config.effort").String() == "" {
 		if e := effortOfBudget(int(th.Get("budget_tokens").Int())); e != "" {
 			if e == "xhigh" {
-				e = "max" // as buildAnthropic asks it: 4.6 has no xhigh
+				e = "max" // a budget can't tell xhigh from max (budgetOf), and 4.6 has no xhigh
 			}
 			oc, _ := gjson.GetBytes(body, "output_config").Value().(map[string]any)
 			if oc == nil {
@@ -652,7 +690,9 @@ func buildAnthropic(r *Request, model string) []byte {
 				}
 				results = append(results, aBlock{Type: "tool_result", ToolUseID: p.CallID, Content: c, IsError: p.IsError})
 			case Thinking:
-				if p.Signature != "" {
+				if p.sealedBy(sealAnthropic) {
+					rest = append(rest, aBlock{Type: "redacted_thinking", sealed: p.Sealed})
+				} else if p.Signature != "" {
 					rest = append(rest, aBlock{Type: "thinking", Thinking: p.Text, Signature: p.Signature})
 				}
 			}
@@ -672,7 +712,7 @@ func buildAnthropic(r *Request, model string) []byte {
 	if n := len(msgs); n > 0 {
 		c := msgs[n-1].Content
 		for i := len(c) - 1; i >= 0; i-- {
-			if c[i].Type != "thinking" {
+			if c[i].Type != "thinking" && c[i].Type != "redacted_thinking" {
 				c[i].CacheControl = ephemeral
 				break
 			}
@@ -690,9 +730,13 @@ func buildAnthropic(r *Request, model string) []byte {
 		maxTokens = 16384
 	}
 	if (r.Thinking || r.Effort != "") && adaptiveOnly(model) {
-		out["thinking"] = map[string]any{"type": "adaptive"}
+		// Opus 4.7 and later leave the thinking text out unless asked
+		// (display "omitted" by default), and a Chat or Responses client
+		// that asked to reason would see none of it; OpenAI is asked for
+		// its summary and the Claude subscription for summarized alike
+		out["thinking"] = map[string]any{"type": "adaptive", "display": "summarized"}
 		if e := r.Effort; e != "" {
-			if e == "xhigh" {
+			if e == "xhigh" && noXhigh(model) {
 				e = "max"
 			}
 			out["output_config"] = map[string]any{"effort": e}
@@ -847,6 +891,9 @@ func decodeAnthropic(data string, emit func(Event)) error {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 			Text string `json:"text"`
+			// thinking
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
 		} `json:"content_block"`
 		Delta struct {
 			Type        string `json:"type"`
@@ -877,6 +924,24 @@ func decodeAnthropic(data string, emit func(Event)) error {
 		case "text":
 			if ev.ContentBlock.Text != "" {
 				emit(Event{Kind: KText, Text: ev.ContentBlock.Text})
+			}
+		case "thinking":
+			// a block of its own, even signed with no text in it, or
+			// right after another (#1445)
+			emit(Event{Kind: KThinkStart})
+			if ev.ContentBlock.Thinking != "" {
+				emit(Event{Kind: KThink, Text: ev.ContentBlock.Thinking})
+			}
+			if ev.ContentBlock.Signature != "" {
+				emit(Event{Kind: KSig, Text: ev.ContentBlock.Signature})
+			}
+		case "redacted_thinking":
+			// sealed whole: it goes on as it came, to Messages only
+			var whole struct {
+				Block json.RawMessage `json:"content_block"`
+			}
+			if json.Unmarshal([]byte(data), &whole) == nil && len(whole.Block) > 0 {
+				emit(Event{Kind: KSealed, Name: sealAnthropic, Text: string(whole.Block)})
 			}
 		}
 	case "content_block_delta":
@@ -973,12 +1038,15 @@ func stopToAnthropic(s string) string {
 
 // anthropicEncoder writes events as an Anthropic event stream.
 type anthropicEncoder struct {
-	id      string
-	w       *sseWriter
-	model   string
-	index   int
-	open    Kind // kind of the open content block, "" when none
-	args    bool // the open tool block got arguments
+	id    string
+	w     *sseWriter
+	model string
+	index int
+	open  Kind // kind of the open content block, "" when none
+	args  bool // the open tool block got arguments
+	// fresh: a thinking block began upstream (KThinkStart), to be opened
+	// apart from the one open with what it says first
+	fresh   bool
 	started bool
 	col     collector
 }
@@ -1077,10 +1145,20 @@ func (e *anthropicEncoder) openBlock(k Kind, block map[string]any) {
 		return
 	}
 	e.close()
-	e.args = false
+	e.args, e.fresh = false, false
 	block["type"] = map[Kind]string{Text: "text", Thinking: "thinking", ToolCall: "tool_use"}[k]
 	e.w.event("content_block_start", map[string]any{"type": "content_block_start", "index": e.index, "content_block": block})
 	e.open = k
+}
+
+// thinking makes the open block a thinking block: the one open, unless a
+// new one has begun since (KThinkStart).
+func (e *anthropicEncoder) thinking() {
+	if e.fresh {
+		e.close()
+		e.fresh = false
+	}
+	e.openBlock(Thinking, map[string]any{"thinking": ""})
 }
 
 func (e *anthropicEncoder) delta(d map[string]any) {
@@ -1100,15 +1178,31 @@ func (e *anthropicEncoder) event(ev Event) {
 		}
 		e.openBlock(Text, map[string]any{"text": ""})
 		e.delta(map[string]any{"type": "text_delta", "text": ev.Text})
+	case KThinkStart:
+		// opened with what it says first: one that says nothing isn't
+		e.fresh = true
+		e.col.add(ev)
+		return
 	case KThink:
 		if ev.Text == "" {
 			return
 		}
-		e.openBlock(Thinking, map[string]any{"thinking": ""})
+		e.thinking()
 		e.delta(map[string]any{"type": "thinking_delta", "thinking": ev.Text})
 	case KSig:
-		if e.open == Thinking {
+		// a block signed with no text goes as it came, signed (#1445)
+		if e.open == Thinking || e.fresh {
+			e.thinking()
 			e.delta(map[string]any{"type": "signature_delta", "signature": ev.Text})
+		}
+	case KSealed:
+		if ev.Name == sealAnthropic {
+			// a redacted_thinking block, whole as Anthropic wrote it
+			e.close()
+			e.fresh = false
+			e.w.event("content_block_start", map[string]any{"type": "content_block_start", "index": e.index, "content_block": json.RawMessage(ev.Text)})
+			e.w.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": e.index})
+			e.index++
 		}
 	case KToolStart:
 		id := ev.ID
@@ -1171,13 +1265,23 @@ func (e *anthropicEncoder) finish() {
 
 // renderAnthropic is the non-streaming reply.
 func renderAnthropic(res Result, model string) []byte {
-	content := []map[string]any{}
+	content := []any{}
 	for _, p := range res.Parts {
 		switch p.Kind {
 		case Text:
+			if p.Text == "" && p.Signature != "" {
+				continue // only Gemini's signature, which is Gemini's
+			}
 			content = append(content, map[string]any{"type": "text", "text": p.Text})
 		case Thinking:
-			content = append(content, map[string]any{"type": "thinking", "thinking": p.Text, "signature": p.Signature})
+			switch {
+			case p.sealedBy(sealAnthropic):
+				content = append(content, p.Sealed)
+			case p.Text == "" && p.Signature == "":
+				// another API's sealed reasoning, nothing to Messages
+			default:
+				content = append(content, map[string]any{"type": "thinking", "thinking": p.Text, "signature": p.Signature})
+			}
 		case ToolCall:
 			id := p.ID
 			if id == "" {

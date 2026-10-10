@@ -402,3 +402,56 @@ func TestSqlitePath(t *testing.T) {
 		}
 	}
 }
+
+// The same relay is often both a CC Switch entry and what Claude Code's
+// settings.json points at. Picked together, it is added once; removed, it
+// can be imported again rather than being "Already added" as the copy left
+// behind (#1486, kk349958194).
+func TestImportSameAccountFromTwoAppsOnce(t *testing.T) {
+	isolate(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)                                  // Windows
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming")) // Windows: never the real Alma
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	sqliteFixture(t, filepath.Join(home, ".cc-switch", "cc-switch.db"),
+		`CREATE TABLE providers (id TEXT, app_type TEXT, name TEXT, settings_config TEXT, website_url TEXT, category TEXT, created_at INTEGER, sort_index INTEGER, PRIMARY KEY (id, app_type))`,
+		`INSERT INTO providers VALUES ('relay','claude','Some Relay','{"env":{"ANTHROPIC_BASE_URL":"https://relay.example.com","ANTHROPIC_AUTH_TOKEN":"sk-relay","ANTHROPIC_MODEL":"claude-sonnet-5"}}','https://relay.example.com','custom',2,1)`,
+	)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"env":{"ANTHROPIC_BASE_URL":"https://relay.example.com","ANTHROPIC_AUTH_TOKEN":"sk-relay"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// what the picker turns on by default: every new entry of every app
+	var picks []AppPick
+	for _, s := range ImportSources() {
+		for _, it := range s.Items {
+			if it.Skip == "" && it.Status == "new" {
+				picks = append(picks, AppPick{Source: s.ID, Ref: it.Ref})
+			}
+		}
+	}
+	if len(picks) != 2 {
+		t.Fatalf("picks: %+v", picks)
+	}
+	if _, err := ImportFromApps(picks); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, p := range load().Providers {
+		ids = append(ids, p.ID)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("the relay added %d times: %v", len(ids), ids)
+	}
+	if err := Delete(ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if it := itemsOf(t, "cc-switch")["claude/relay"]; it.Status != "new" {
+		t.Fatalf("after removing it: %+v", it)
+	}
+}

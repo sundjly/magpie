@@ -41,6 +41,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie web [--addr host:port] [--lan] [--no-open] [--gateway]
                                   the app's window in a browser, with the gateway (no desktop needed: WSL, a server over SSH)
                                   a new key each run; MAGPIE_WEB_KEY (16+ letters, digits, - . _ ~) keeps one, signed in for 400 days
+                                  behind a reverse proxy, MAGPIE_WEB_URL=https://<the page there> prints the link through it
                                   --gateway: gateway mode, no Agents, Sessions or Library (on by itself with no agents here; Settings › General turns it off)
   magpie ls                       list detected agents and their settings
   magpie <agent>                  show one agent
@@ -86,6 +87,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie accounts refresh         renew the saved ChatGPT sign-ins now (the gateway does it daily)
   magpie accounts checkin         WorkBuddy's daily check-in (签到) for each WorkBuddy account, now (Settings can do it daily)
   magpie accounts project <gemini|antigravity> <email> <project>   the Google Cloud project a Google account's requests go to
+  magpie claude-code [install [--yes]|remove]   the Claude Code a Claude subscription runs; install downloads Anthropic's own build, checked against its manifest, for a server or container without one
   magpie plugin [add <package>|rm|update|on|off|login <provider>|logout <provider>]
                                   OpenCode provider plugins and pi packages: subscriptions signed in to, and served, through a plugin
   magpie plugin move|migrate <subscription>   run a built-in subscription's accounts on its community plugin
@@ -340,6 +342,8 @@ func run(args []string) error {
 		return s3Cmd(args[1:])
 	case "mcp":
 		return imagemcp.Run(args[1:])
+	case "claude-code":
+		return claudeCodeCmd(args[1:])
 	case "claude-mcp-helper": // internal: stdio MCP subprocess spawned by Claude Code
 		return claudebridge.RunMCP(args[1:])
 	}

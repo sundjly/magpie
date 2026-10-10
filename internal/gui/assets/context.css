@@ -136,6 +136,8 @@ i.dot.free { background: var(--k-free); box-shadow: inset 0 0 0 1px color-mix(in
 /* the padding is the open card's, so the title stays where it is when it
    opens and the page doesn't follow it (it moved 4px with a 10px one) */
 .ctx-card.shut > :not(.ctx-head) { display: none; }
+/* its head alone, the space under it is the space over it */
+.ctx-card.shut { padding-bottom: 14px; }
 :where(.ctx-card.shut.max420) .ctx-model { display: none; }
 /* folded, the head is one line of a fixed height whatever a live request
    puts in it, so nothing under it moves; a thin bar of what fills the
@@ -148,7 +150,7 @@ i.dot.free { background: var(--k-free); box-shadow: inset 0 0 0 1px color-mix(in
 
 /* the Usage page's Context tab */
 .ctx-agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 12px; margin: 4px 0 18px; }
-.ctx-agent { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 12px; min-width: 0; font-variant-numeric: tabular-nums; }
+.ctx-agent, .ctx-tune { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 12px; min-width: 0; font-variant-numeric: tabular-nums; }
 .ctx-agent-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .ctx-who-box { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .ctx-who { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -244,3 +246,54 @@ i.dot.free { background: var(--k-free); box-shadow: inset 0 0 0 1px color-mix(in
   .ctx-spark .area { fill: var(--k-chat); fill-opacity: .14; }
   .ctx-spark .hit:hover { fill: var(--line); }
 }
+
+/* tuned for you */
+.ctx-tune { gap: 10px; }
+.ctx-tune-total { font-size: 12px; font-weight: 600; color: var(--green); background: var(--green-soft); border-radius: 11px; padding: 3px 10px; white-space: nowrap; }
+.ctx-tune-row { display: flex; flex-direction: column; gap: 10px; padding: 14px 0 4px; border-top: 1px solid var(--line); min-width: 0; }
+.ctx-tune-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.ctx-tune-title b { font-size: 13px; font-weight: 600; flex: none; }
+.ctx-tunes { align-items: start; }
+.ctx-tunes > :only-child { grid-column: 1 / -1; }
+.ctx-tune-title code { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ctx-tune-vals { display: flex; align-items: flex-end; gap: 12px; min-width: 0; }
+.ctx-tune-val { display: flex; flex-direction: column; gap: 2px; flex: none; }
+.ctx-tune-val .ctx-k { font-size: 9.5px; }
+.ctx-tune-val b { font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
+.ctx-tune-val.now b { color: var(--fg-2); }
+.ctx-tune-row:not(.done) .ctx-tune-val.now b { text-decoration: line-through; text-decoration-color: var(--muted); text-decoration-thickness: 1px; color: var(--muted); }
+.ctx-tune-val.best b { color: var(--green); }
+.ctx-tune-arrow { color: var(--muted); font-size: 14px; padding-bottom: 3px; }
+.ctx-tune-chart { position: relative; height: 112px; margin: 2px 6px 0; cursor: default; }
+.ctx-tc-plot { position: absolute; inset: 0 0 18px; }
+.ctx-tc-plot svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.ctx-tune-chart .hot { stop-color: var(--red); stop-opacity: .32; }
+.ctx-tune-chart .cool { stop-color: var(--red); stop-opacity: .02; }
+.ctx-tune-chart .level { stroke: var(--green); stroke-width: 1; stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; opacity: .7; }
+.ctx-tune-chart .line { fill: none; stroke: var(--red); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.ctx-tc-plot svg { animation: ctx-draw 1s var(--ease, ease) both; }
+@keyframes ctx-draw { from { clip-path: inset(-20px 100% -20px 0); } to { clip-path: inset(-20px 0 -20px 0); } }
+@keyframes ctx-pop { from { opacity: 0; transform: scale(.4); } }
+.ctx-tc-dot { animation: ctx-pop .35s .8s var(--ease, ease) both; }
+.ctx-tc-dot { position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; border: 2px solid var(--card); box-sizing: border-box; }
+.ctx-tc-dot.now { background: var(--red); box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 22%, transparent); width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; }
+.ctx-tc-dot.worst { background: color-mix(in srgb, var(--red) 55%, var(--card)); }
+.ctx-tc-dot.best { background: var(--green); box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 22%, transparent), 0 0 14px color-mix(in srgb, var(--green) 60%, transparent); width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; }
+.ctx-tc-tag { position: absolute; bottom: calc(100% + 5px); left: 50%; transform: translateX(-50%); font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--red); letter-spacing: -.01em; }
+.ctx-tc-dot.best .ctx-tc-tag { color: var(--green); }
+.ctx-tc-dot.worst .ctx-tc-tag { font-weight: 600; opacity: .8; }
+.ctx-tc-tag.start { left: -4px; transform: none; }
+.ctx-tc-tag.end { left: auto; right: -4px; transform: none; }
+.ctx-tc-x { position: absolute; left: 0; right: 0; bottom: 0; height: 14px; font-size: 10px; color: var(--muted); }
+.ctx-tc-x span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.ctx-tc-x span.start { transform: none; margin-left: -6px; }
+.ctx-tc-x span.end { transform: translateX(-100%); margin-left: 6px; }
+.ctx-tc-x span.best { color: var(--green); font-weight: 600; }
+.ctx-tc-x span.now { color: var(--red); font-weight: 600; }
+.ctx-pane.still .ctx-tune-chart :is(svg, .ctx-tc-dot) { animation: none; }
+@media (prefers-reduced-motion: reduce) { .ctx-tune-chart :is(svg, .ctx-tc-dot) { animation: none; } }
+.ctx-tune-note { padding: 0 4px 12px; }
+.ctx-tune-why { margin: 0; font-size: 12px; line-height: 1.5; color: var(--fg-2); }
+.ctx-tune-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.ctx-tune-src { font-size: 11px; color: var(--muted); margin-top: -7px; overflow-wrap: anywhere; }
+.ctx-tune-foot .grow { flex: 1; }

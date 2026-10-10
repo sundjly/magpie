@@ -226,6 +226,11 @@ process.stdout.write = (chunk, enc, cb) => process.stderr.write(chunk, enc, cb)
 // MAGPIE_*_PROXY (see below), so `grok login`, which the Grok plugin runs,
 // went out with none and, where x.ai is reached only through one, printed
 // no link to open (𝕏 on Discord). One the plugin set itself is kept.
+// Node's fetch goes past *_PROXY unless NODE_USE_ENV_PROXY=1 says to take
+// them, so a plugin downloading in a Node program it starts went out with
+// none and failed where the vendor is reached only through one (larchsis
+// on 𝕏, Windows 11, a proxy set in magpie only). It is told to, unless
+// the plugin said otherwise.
 const own = (v, fd) => v === "inherit" || v === fd || v === (fd ? process.stdout : process.stdin)
 const PROXY_VARS = ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"]
 function proxied(env) {
@@ -234,11 +239,12 @@ function proxied(env) {
   const mine = via.getStore()
   if (mine === "direct") return env
   const set = mine ? { HTTPS_PROXY: mine, HTTP_PROXY: mine } : { HTTPS_PROXY: globalProxy.https, HTTP_PROXY: globalProxy.http, NO_PROXY: proxyVar("NO_PROXY") }
+  if (set.HTTPS_PROXY || set.HTTP_PROXY) set.NODE_USE_ENV_PROXY = "1"
   for (const [k, v] of Object.entries(set)) {
     if (!v || Object.keys(env).some((e) => e.toUpperCase() === k)) continue
     env[k] = v
     // Windows' names are one whatever their case
-    if (process.platform !== "win32") env[k.toLowerCase()] = v
+    if (process.platform !== "win32" && k.endsWith("_PROXY") && k !== "NODE_USE_ENV_PROXY") env[k.toLowerCase()] = v
   }
   return env
 }

@@ -338,8 +338,10 @@ func targetOf(a *agent.Agent) *Target {
 		// where that folder is the servers go into both: each mode finds
 		// them, a switch between the two leaves nothing behind in either
 		t.MCP = &mcpFile{Path: filepath.Join(filepath.Dir(a.Path), "claude_desktop_config.json"), Format: fmtDesktop}
-		if p := agent.DesktopConfig3p(h); p != t.MCP.Path && isDir(filepath.Dir(p)) {
-			t.MCP.Also = []string{p}
+		for _, p := range agent.DesktopConfigs3p(h) {
+			if p != t.MCP.Path && isDir(filepath.Dir(p)) {
+				t.MCP.Also = append(t.MCP.Also, p)
+			}
 		}
 		// Cowork's skills, in every account's skills-plugin (#638)
 		if t.Desktop = desktopSkillRoots(a.Dir); len(t.Desktop) > 0 {

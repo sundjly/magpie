@@ -85,10 +85,11 @@ func fakeStdio(t *testing.T, mode string, env map[string]string) *Server {
 	return &Server{Name: "fake", Transport: "stdio", Command: self, Args: []string{"-test.run=^TestFakeMCPServer$"}, Env: e}
 }
 
+// short gives each step of a check d, a command's and a URL's alike.
 func short(t *testing.T, d time.Duration) {
-	was := checkTimeout
-	checkTimeout = d
-	t.Cleanup(func() { checkTimeout = was })
+	ws, wr := stdioStep, remoteStep
+	stdioStep, remoteStep = d, d
+	t.Cleanup(func() { stdioStep, remoteStep = ws, wr })
 }
 
 func TestCheckStdio(t *testing.T) {

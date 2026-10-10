@@ -240,6 +240,11 @@ func SwitchWhenSpent(ctx context.Context, agent string) (string, error) {
 		share, _ := loginSwitching(agent)
 		log.Printf("%s: %s has used %g%% or more of its allowance; signed it in to %s", agent, from, share, to)
 	}
+	if agent == "codex" {
+		if was := CodexAppStale(); was != "" {
+			log.Printf("codex: the Codex app is still signed in to %s, and shows its limits, until it is quit and opened again", was)
+		}
+	}
 	// the models the agent is offered are the new account's plan's
 	catalog.Touched()
 	return to, nil
