@@ -121,7 +121,8 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			s.serveAgent(w, r, provider.Responses, body)
 			return
 		}
-		body = boundCallIDs(callItemIDs(body))
+		// the ChatGPT backend checks every item id as OpenAI does
+		body = plainItemIDs(boundCallIDs(callItemIDs(body)))
 		if rest == "/responses/compact" {
 			// a key held to some accounts (#905) may not spend the sign-in
 			// compaction still relays on: refused as its turns are (#967),
@@ -1400,6 +1401,81 @@ func callItemIDs(body []byte) []byte {
 		return body
 	}
 	q["input"], _ = marshalPlain(items)
+	nb, err := marshalPlain(q)
+	if err != nil {
+		return body
+	}
+	return nb
+}
+
+// itemIDRefusal is OpenAI's refusal of an input item whose id has a
+// character other than [A-Za-z0-9_-], which Copilot passes on as it is
+// (echo_ts, Codex moved from Muse Spark on OpenCode to GPT on Copilot):
+// "Invalid 'input[1].id': 'rs_6aca2fc7533c979d5f0e4f7a:rs_01a125caa544754e9a3c70080100b009'.
+// Expected an ID that contains letters, numbers, underscores, or dashes,
+// but this value contained additional characters."
+var itemIDRefusal = regexp.MustCompile(`(?s)Invalid 'input\[\d+\]\.id'.{0,1000}?Expected an ID that contains letters, numbers, underscores, or dashes`)
+
+// itemIDsRefused is how unfit remembers a provider turning away, for
+// model, an input item id with another character in it (plainItemIDs).
+func itemIDsRefused(model string) string { return "item ids\x00" + model }
+
+// validatesItemIDs reports whether p checks a Responses input item's id
+// as OpenAI does, without having to be told by a refusal: OpenAI's API,
+// Azure OpenAI's, the ChatGPT backend behind a Codex sign-in, and Copilot's
+// /responses in front of them.
+func validatesItemIDs(p provider.Provider) bool {
+	return strings.HasSuffix(p.Host(), "openai.com") || p.IsAzure() ||
+		p.Account != nil && (p.Account.Agent == "codex" || p.Account.Agent == "copilot")
+}
+
+// plainItemIDs is a Responses request whose input items' ids are of
+// [A-Za-z0-9_-] only, as OpenAI takes them, and the rest of the request
+// byte for byte. Another vendor's reply can hand the agent an item whose
+// id has more in it — Muse Spark on OpenCode's reasoning id is two joined
+// with a colon ("rs_6aca…:rs_01a1…") — and the agent sends it back on
+// every later turn, after a switch too, where OpenAI and Copilot turn the
+// whole request away over it (echo_ts). Such reasoning goes: an upstream
+// that checks ids never made it, so its encrypted_content is another
+// vendor's, which it couldn't read either. Any other item (a message, a
+// call) keeps what it says, its id with each other character as "_"; a
+// call's call_id, which its output names it by, stays as it was.
+func plainItemIDs(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"id"`)) {
+		return body
+	}
+	var q map[string]json.RawMessage
+	if json.Unmarshal(body, &q) != nil {
+		return body
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(q["input"], &items) != nil {
+		return body
+	}
+	changed := false
+	kept := items[:0:0]
+	for _, raw := range items {
+		var it map[string]json.RawMessage
+		var typ, id string
+		if json.Unmarshal(raw, &it) != nil || json.Unmarshal(it["id"], &id) != nil || id == "" || safeIDChars.MatchString(id) {
+			kept = append(kept, raw)
+			continue
+		}
+		changed = true
+		if json.Unmarshal(it["type"], &typ) == nil && typ == "reasoning" {
+			continue
+		}
+		it["id"], _ = json.Marshal(unsafeToolID.ReplaceAllString(id, "_"))
+		b, err := marshalPlain(it)
+		if err != nil {
+			return body
+		}
+		kept = append(kept, b)
+	}
+	if !changed {
+		return body
+	}
+	q["input"], _ = marshalPlain(kept)
 	nb, err := marshalPlain(q)
 	if err != nil {
 		return body

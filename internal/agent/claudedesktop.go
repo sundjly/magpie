@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/edit"
@@ -127,7 +128,7 @@ func claudeDesktop(home string) *Agent {
 			if !desktopWiredAny(ps) {
 				return ""
 			}
-			for _, p := range ps {
+			for _, p := range desktopRead(ps) {
 				if msg := desktopCheck(p); msg != "" {
 					if len(ps) > 1 {
 						msg += " (" + p.dir3p + ")"
@@ -167,6 +168,28 @@ func claudeDesktop(home string) *Agent {
 			},
 		}}, desktopTierFields(ps)...),
 	}
+}
+
+// desktopRead are the sets of Desktop's folders whose wiring counts: the
+// one whose Claude-3p Desktop ran in last, which is where it reads
+// deploymentMode and the gateway from, or every set when it has run in
+// none. Magpie writes both of a packaged Desktop's sets, not knowing the
+// build: 2.31226's MSIX keeps Claude-3p out of the package
+// (ExcludedDirectory), so the package's copy is one Desktop no longer
+// reads, and one gone from there (emptied by an update) isn't Desktop off
+// magpie (dumplings on Discord: "配置已变更" while Desktop ran on magpie).
+func desktopRead(ps []desktopPaths) []desktopPaths {
+	var newest time.Time
+	var at []desktopPaths
+	for _, p := range ps {
+		if t := desktopdir.LastRun(p.dir3p); t.After(newest) {
+			newest, at = t, []desktopPaths{p}
+		}
+	}
+	if at == nil {
+		return ps
+	}
+	return at
 }
 
 // desktopCheck is what keeps one set of Desktop's folders off magpie's

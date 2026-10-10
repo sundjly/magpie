@@ -302,7 +302,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 /* the page in outline while the library loads: it comes in only after a
    moment, so a quick load goes straight to the page; one sweep of light
    runs across every bar at once */
-.lib-skel { animation: lib-skel-in .3s var(--ease) .18s both; }
+.lib-skel { animation: lib-skel-in .3s var(--ease) .18s backwards; }
 @keyframes lib-skel-in { from { opacity: 0; } }
 .lib-skel .skeleton { background-color: var(--skel, var(--pill)); background-attachment: fixed; background-size: 200vw 100%; background-repeat: no-repeat; background-position: 20vw 0; animation-name: lib-skel-shift; animation-duration: 1.8s; }
 @keyframes lib-skel-shift { from { background-position: 20vw 0; } to { background-position: -100vw 0; } }
@@ -381,7 +381,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
   position: relative; display: flex; flex-direction: column; gap: 9px; min-width: 0; padding: 12px 12px 10px; border-radius: 12px;
   background: var(--card); border: 1px solid var(--line); box-shadow: 0 1px 1px rgba(0, 0, 0, .03);
   transition: border-color .16s var(--ease), box-shadow .16s var(--ease), transform .16s var(--ease);
-  animation: content-in .24s var(--ease) both;
+  animation: content-in .24s var(--ease) backwards;
 }
 .mk-card.click:hover { border-color: color-mix(in srgb, var(--fg) 22%, transparent); box-shadow: 0 6px 18px -8px rgba(0, 0, 0, .18); transform: translateY(-1px); }
 .mk-top { display: flex; align-items: center; gap: 10px; min-width: 0; }

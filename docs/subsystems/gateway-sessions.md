@@ -136,3 +136,34 @@ and `TestGatewayConversationClientRequestPrefixedSession` for the two rules abov
 `TestGatewayRestoreRefusesForeignItems`; browser
 `gateway-conversations.test.cjs`, `sessions-talk.test.cjs`,
 `sessions-gateway-delete.test.cjs`, and locale checks.
+
+## Usage over the gateway, and subagents
+
+`GET /v1/magpie/usage` and `GET /v1/magpie/usage/requests`
+([`internal/gateway/usage_api.go`](../../internal/gateway/usage_api.go)) serve
+the Usage page's summary and request ledger from the same builders as the
+window's `/api/usage` and `/api/usage/requests`
+([`internal/usageapi`](../../internal/usageapi/usageapi.go)), read-only and
+without conversation text. They follow `/v1/magpie/quotas`' guard: this
+machine, or another with an enabled gateway key, behind the same Host check.
+A key that is held (`heldKey`: a budget, models or accounts) is refused the
+summary and gets the ledger filtered to its own `CallerKey`, with its filter
+lists cut to its own rows (`usageapi.OwnPage`): the ledger's facets are drawn
+from every call in the period, so without the cut they would name other keys.
+`TestUsageOverGateway` covers both, and a red when either cut is removed.
+
+A usage record's `Session` stays the conversation. A Claude Code subagent's
+record adds `Subagent` and `ParentAgent`. Through the gateway they come from
+the `x-claude-code-agent-id` and `x-claude-code-parent-agent-id` headers
+Claude Code sends for a subagent's requests (`subagentOf`, read in
+`appendUsage`); the main thread sends neither. A row read from the agent's own
+files gets `Subagent` from the file's name, `<session>/subagents/agent-<id>.jsonl`
+or `<session>/subagents/workflows/<run>/agent-<id>.jsonl`
+(`sessions.SubagentOf`), so no cache version changes, and `ParentAgent` from
+the `parentAgentId` of the `agent-<id>.meta.json` beside it, which Claude Code
+writes for a subagent a subagent started (`sessions.SubagentParent`, read once
+a file; a meta file not read is unknown and read again). A gateway row matched
+to a file row keeps the gateway's own. Both were checked against Claude Code
+2.1.296 spawning a subagent from a subagent.
+Codex sub-agents are told apart by `Kind` (`x-openai-subagent`) only: no
+spawned Codex thread was found on disk to take a parent's shape from.

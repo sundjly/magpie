@@ -47,6 +47,19 @@ filter only when that request is excluded. Usage's purpose picker remains a
 single choice sent to the ledger API. See `purpose-filter.test.cjs` and
 `routing-purpose-state.test.cjs`.
 
+### Routing mode chip
+
+The stage's chip and the Accounts and keys heading in
+[`routing.js`](../../internal/gui/assets/routing.js) name how a route
+routes only where that can be changed: a group, or a provider in
+`/api/groups`' `pools` (two or more accounts or keys on). There they are
+`.rt-go` controls (`goTo`, `goRouting`) that bring the group's card or the
+provider's row under Several accounts or keys into view through
+`scrollOnPurpose`, mark it (`rt-found`) and focus its routing. A provider
+with one on names no routing, and the mode paragraph says how to get one
+(`LONE`). The header is drawn again when the groups come in (`headOf`).
+See `routing-mode-goes.test.cjs`.
+
 ### Routing key and account folds
 
 Three or more API keys, or three or more accounts, of one provider standing

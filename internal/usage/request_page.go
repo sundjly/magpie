@@ -59,7 +59,7 @@ type RequestPage struct {
 
 type packedRow struct {
 	Time                           time.Time
-	Text                           [28]uint32
+	Text                           [30]uint32
 	Tokens                         [6]int64
 	Millis, TTFT, FirstText, Order int64
 	Sent, Flow                     int64
@@ -84,10 +84,10 @@ type rowChunk struct {
 }
 
 // rowMsg is the Text of a row's Claude message id, after rowText's
-const rowMsg = 27
+const rowMsg = 29
 
-func rowText(r *Row) [27]*string {
-	return [27]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream}
+func rowText(r *Row) [29]*string {
+	return [29]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent}
 }
 func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	if c.dict == nil {
@@ -140,8 +140,8 @@ func (c *rowChunk) row(i int) Row {
 	for i, s := range rowText(&r) {
 		*s = c.Strings[p.Text[i]]
 	}
-	if r.Swapped && (SameSpelled(r.Model, r.Served) || ServingName(r.Model, r.Served)) {
-		r.Swapped = false // kept before a name spelled otherwise, or a vendor's serving name, was the same
+	if r.Swapped && (SameSpelled(r.Model, r.Served) || ServingName(r.Model, r.Served) || RelayRenamed(r.Model, r.Served)) {
+		r.Swapped = false // kept before a name spelled otherwise, a vendor's serving name or a relay's rename was the same
 	}
 	r.Computer = c.Computer
 	return r
@@ -743,14 +743,14 @@ func buildRequestPage(p Period, f Filter, offset, limit int, gateway *rowChunk, 
 // days are read from it.
 func buildRequestBlocks(p Period, f Filter, offset, limit int, now time.Time, gateways, chunks, others []*rowChunk, names map[string]string) RequestPage {
 	skip := visibleLocal(chunks)
-	since := p.Since(now)
+	since, until := p.Since(now), p.Until(now)
 	matched := matchedBlocks(gateways, chunks, skip, since, true)
 	all := append(append(slices.Clone(gateways), chunks...), others...)
 	visit := func(fn func(rowRef, Row)) {
 		for _, c := range all {
 			for i, pr := range c.Rows {
 				ref := rowRef{c, i}
-				if pr.Time.Before(since) || skip[ref] || matched[ref] {
+				if pr.Time.Before(since) || after(until, pr.Time) || skip[ref] || matched[ref] {
 					continue
 				}
 				fn(ref, c.row(i))

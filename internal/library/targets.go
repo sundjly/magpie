@@ -285,8 +285,9 @@ func targetOf(a *agent.Agent) *Target {
 		// Command Code reads ~/.commandcode/mcp.json (getUserMcpConfigPath)
 		t.MCP = &mcpFile{Path: filepath.Join(a.Dir, "mcp.json"), Format: fmtCommandCode}
 		t.Skills = filepath.Join(a.Dir, "skills")
-	case "workbuddy":
-		// WorkBuddy's own servers are mcp.json in its folder
+	case "workbuddy", "workbuddy-ai":
+		// WorkBuddy's own servers are mcp.json in its folder (WorkBuddy
+		// AI's, ~/.workbuddy-ai, for the international build)
 		// ($WORKBUDDY_CONFIG_DIR, else ~/.workbuddy: ConnectorService's
 		// customMcpConfigPath in 5.5.6's app.asar), mcpServers as Claude
 		// Code's, which its CodeBuddy engine runs (type stdio, http or sse).

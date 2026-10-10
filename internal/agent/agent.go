@@ -291,12 +291,19 @@ func agentDir(p string) bool {
 		return true
 	}
 	for _, e := range es {
-		if n := e.Name(); n != "skills" && n != ".DS_Store" {
+		if n := e.Name(); n != "skills" && n != ".DS_Store" && !(e.IsDir() && leftover[strings.ToLower(n)]) {
 			return true
 		}
 	}
 	return false
 }
+
+// leftover are the folders an agent writes as it runs, not as it is set
+// up, and that stay behind when it is uninstalled: ~/.codebuddy holding
+// only logs/ and diagnostics/, ~/.qwen's debug/ (#1495, v5tech). A folder
+// holding only these (and skills) is no sign the agent is here. A file of
+// the same name, or anything else beside them, still is.
+var leftover = map[string]bool{"logs": true, "log": true, "debug": true, "diagnostics": true, "cache": true}
 
 // Taken reports whether something that isn't a folder is where the folder
 // p, or one it is in, would be: nothing can be written under it.

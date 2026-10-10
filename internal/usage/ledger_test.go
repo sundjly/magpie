@@ -688,3 +688,69 @@ func TestLedgerAntigravityReplyNamingTheFamilyIsNoSwap(t *testing.T) {
 		t.Error("another model or level is still a swap")
 	}
 }
+
+// A relay that sells a model under a name of its own (moonshot-kimi-k3)
+// answers with the model's own name (kimi-k3), which the record keeps as
+// served: a call no price is known for by the name asked is priced as the
+// one that answered, at the same provider (#1498, liuweifeng). A model
+// with a price of its own keeps it, a zero the user set included, however
+// its reply names itself.
+func TestLedgerPricesARenamedModelAsTheOneServed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755)
+	os.WriteFile(catalog.CachePath(), []byte(`{"moonshotai":{"id":"moonshotai","models":{"kimi-k3":{"id":"kimi-k3",`+
+		`"cost":{"input":3,"output":15,"cache_read":0.3,"cache_write":3}}}},`+
+		`"openai":{"id":"openai","models":{"sol":{"id":"sol","cost":{"input":2,"output":8}}}}}`), 0o644)
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
+	if err := provider.Save(provider.Provider{ID: "relay-a", Name: "Relay A", Key: "k", Chat: "https://relay.example/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	free := new(float64(0))
+	if err := settings.Save(settings.Settings{ModelPrices: map[string]settings.ModelPrice{
+		"relay-a/house-free": {Input: free, Output: free, CacheRead: free, CacheWrite: free},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Dir(Path()), 0o755)
+	now := time.Now()
+	// the reporter's record, as the gateway wrote it
+	Append(Record{Time: now, Provider: "relay-a", Model: "moonshot-kimi-k3", Requested: "relay-a/moonshot-kimi-k3",
+		Served: "kimi-k3", Input: 74, Output: 227, CacheRead: 288256, CacheWrite: 512, Status: 200})
+	// priced by its own name, answered as kimi-k3 all the same
+	Append(Record{Time: now.Add(-time.Second), Provider: "relay-a", Model: "sol", Served: "kimi-k3", Input: 1000000, Status: 200})
+	// set free by the user
+	Append(Record{Time: now.Add(-2 * time.Second), Provider: "relay-a", Model: "house-free", Served: "kimi-k3", Input: 1000000, Status: 200})
+	// no price by either name
+	Append(Record{Time: now.Add(-3 * time.Second), Provider: "relay-a", Model: "mystery", Served: "mystery-2", Input: 1000000, Status: 200})
+
+	rows, _, _ := Ledger(Month, Filter{})
+	page := QueryPage(Month, Filter{}, 0, 20)
+	for _, got := range [][]Row{rows, page.Rows} {
+		if len(got) != 4 {
+			t.Fatalf("rows: %+v", got)
+		}
+		cost := map[string]float64{}
+		priced := map[string]bool{}
+		for _, r := range got {
+			cost[r.Model], priced[r.Model] = r.Cost, r.Priced
+		}
+		// (74*3 + 227*15 + 288256*0.3 + 512*3) / 1e6
+		if want := 0.0916398; !priced["moonshot-kimi-k3"] || math.Abs(cost["moonshot-kimi-k3"]-want) > 1e-9 {
+			t.Fatalf("renamed: priced=%v cost=%v, want %v", priced["moonshot-kimi-k3"], cost["moonshot-kimi-k3"], want)
+		}
+		if !priced["sol"] || cost["sol"] != 2 {
+			t.Fatalf("sol: priced=%v cost=%v, want its own 2", priced["sol"], cost["sol"])
+		}
+		if !priced["house-free"] || cost["house-free"] != 0 {
+			t.Fatalf("house-free: priced=%v cost=%v, want the user's 0", priced["house-free"], cost["house-free"])
+		}
+		if priced["mystery"] {
+			t.Fatalf("mystery priced at %v", cost["mystery"])
+		}
+	}
+}

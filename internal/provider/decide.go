@@ -37,11 +37,19 @@ const JevLatest = "jev-latest"
 const BailianDecision = "decision-model-preview"
 
 // bailianDecides reports whether base is Bailian's: a workspace's host or
-// the Token Plan's, <x>.<region>.maas.aliyuncs.com. Its /models lists
-// Qwen's chat models, never the decision model.
+// the Token Plan's, <x>.<region>.maas.aliyuncs.com, or the Qwen AI
+// platform's, maas.qianwenaiapi.com and its plan's under it (#1506). Its
+// /models lists Qwen's chat models, never the decision model.
 func bailianDecides(base string) bool {
 	h := HostOf(base)
-	return strings.HasSuffix(h, ".maas.aliyuncs.com") || strings.HasSuffix(h, ".maas.qianwenaiapi.com")
+	return strings.HasSuffix(h, ".maas.aliyuncs.com") || h == "maas.qianwenaiapi.com" || strings.HasSuffix(h, ".maas.qianwenaiapi.com")
+}
+
+// bailianApart reports whether p serves conversations and Bailian's
+// decision model both (Bailian's Token Plan, #1506): its chat models'
+// list never names the decision model, which is kept apart from it.
+func (p Provider) bailianApart() bool {
+	return !p.DecideOnly() && bailianDecides(p.Decide)
 }
 
 // ownDecideModels are a System One provider's models that its vendor's
@@ -78,6 +86,9 @@ func (p Provider) DecidesModel(model string) bool {
 	}
 	if p.DecideOnly() {
 		return true
+	}
+	if p.bailianApart() {
+		return model == BailianDecision
 	}
 	if p.IsRemoteMagpie() || p.listsDecisions() {
 		// OpenRouter's Jev Router (typesafe/jev-router) is a chat model
@@ -117,9 +128,10 @@ func (p Provider) listsDecisions() bool { return openRouterDecisions(p.Decide) !
 func decisionsID(id string) string { return id + ".decisions" }
 
 // DecisionModels are the decision models listed separately from a provider's
-// conversations: OpenRouter's own list, or a remote magpie's marked models.
+// conversations: OpenRouter's own list, a Bailian Token Plan's decision
+// model, or a remote magpie's marked models.
 func (p Provider) DecisionModels() []catalog.Model {
-	if !p.IsRemoteMagpie() && (p.DecideOnly() || !p.listsDecisions()) {
+	if !p.IsRemoteMagpie() && (p.DecideOnly() || !p.listsDecisions() && !p.bailianApart()) {
 		return nil
 	}
 	return p.decideModels()
@@ -315,6 +327,9 @@ func (p Provider) decideListed() []catalog.Model {
 		// Live returns a filtered copy, so it can be compacted in place.
 		return slices.DeleteFunc(live, func(m catalog.Model) bool { return !m.Decides })
 	}
+	if p.bailianApart() {
+		return p.ownDecideModels()
+	}
 	if p.listsDecisions() && !p.DecideOnly() {
 		if live, _, ok := catalog.Live(decisionsID(p.ID)); ok && len(live) > 0 {
 			return live
@@ -479,7 +494,7 @@ func Deciders() []Entry {
 			continue
 		}
 		ms := p.Exposed()
-		if !p.DecideOnly() && (len(p.Models) == 0 || p.listsDecisions() || p.IsRemoteMagpie()) {
+		if !p.DecideOnly() && (len(p.Models) == 0 || p.listsDecisions() || p.bailianApart() || p.IsRemoteMagpie()) {
 			ms = p.decideModels() // the conversation picker's limit does not hide Jev
 		}
 		for _, m := range ms {

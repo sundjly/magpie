@@ -448,6 +448,46 @@ func (c claudeCLI) command(ctx context.Context, args ...string) *exec.Cmd {
 	return proc.CommandContext(ctx, c.path, args...)
 }
 
+// claudeEuid is the user magpie runs as; a var for tests.
+var claudeEuid = os.Geteuid
+
+// root is whether this Claude Code runs as root: magpie itself as root
+// (a server's or a container's), or a WSL distro's default user root.
+func (c claudeCLI) root() bool {
+	if c.wsl != nil {
+		return c.wsl.Root
+	}
+	return runtime.GOOS != "windows" && claudeEuid() == 0
+}
+
+// asRoot is env for a bridge run (claudeCLIArgs) by a Claude Code run as
+// root, which refuses --dangerously-skip-permissions there ("cannot be
+// used with root/sudo privileges") unless IS_SANDBOX is "1" or
+// CLAUDE_CODE_BUBBLEWRAP is set: its setup checks exactly that (2.1.296).
+// The run has no tool of Claude Code's own that touches the machine, only
+// magpie's MCP ones, answered by the client, and Anthropic's web search,
+// so skipping the permission prompts as root does nothing more than as
+// anyone else. Run as anyone else, env is kept as it is.
+func (c claudeCLI) asRoot(env []string) []string {
+	if !c.root() {
+		return env
+	}
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		switch k, v, _ := strings.Cut(e, "="); {
+		case k == "CLAUDE_CODE_BUBBLEWRAP" && v != "":
+			return env
+		case k == "IS_SANDBOX":
+			if v == "1" {
+				return env
+			}
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, "IS_SANDBOX=1")
+}
+
 // claudeEnvVars are the variables magpie sets for a Claude Code run, which
 // one in WSL is handed (wslrun's Env).
 var claudeEnvVars = []string{"ENABLE_CLAUDEAI_MCP_SERVERS", "DISABLE_AUTO_COMPACT", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
@@ -463,6 +503,10 @@ func (c claudeCLI) env(env []string, configDir string) []string {
 	names := claudeEnvVars
 	if configDir != "" {
 		names = append(slices.Clone(names), "CLAUDE_CONFIG_DIR/p")
+	}
+	if c.wsl.Root {
+		// asRoot's, for a distro whose user is root
+		names = append(slices.Clone(names), "IS_SANDBOX")
 	}
 	return c.wsl.Env(env, names...)
 }
@@ -592,7 +636,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	if len(req.Safeguards) > 0 {
 		env = append(env, "ANTHROPIC_BETAS="+req.SafeguardBeta)
 	}
-	cmd.Env = binary.env(env, configDir)
+	cmd.Env = binary.env(binary.asRoot(env), configDir)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cleanup()

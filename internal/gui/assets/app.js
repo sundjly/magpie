@@ -302,7 +302,7 @@ function renderAgents() {
     // a small model with none to pick (Snow CLI's, on a profile of the
     // user's own)
     const none = (f) => (f.key === "effort" || f.key === "ultracode" || f.label === "subagents" || f.label === SUB_EFFORT || f.label === SUB_MODEL || f.label === MEMORIES || f.label === "sign-in" || f.key === "small") && !f.options.length && !f.value;
-    const shownFields = a.fields.filter((f) => !TIERS.includes(f.label) && !TIER_EFFORTS.includes(f.label) && !none(f));
+    const shownFields = a.fields.filter((f) => !grouped(a, f) && !none(f));
     const tiers = tierMenu(a);
     if (tiers) shownFields.push(tiers);
     const sorted = shownFields.sort((x, y) => wide(y) - wide(x) || extra(x) - extra(y));
@@ -500,7 +500,7 @@ function renderAgents() {
   // pickers keep lining up down the list
   list.classList.toggle("extras", state.agents.some((a) => a.fields.some(extra) || tierMenu(a) || a.launch));
   // as wide as the row with the most squares
-  list.style.setProperty("--extras", Math.max(1, ...state.agents.map((a) => a.fields.filter((f) => extra(f) && !TIERS.includes(f.label)).length + (tierMenu(a) ? 1 : 0) + (a.launch ? 1 : 0))));
+  list.style.setProperty("--extras", Math.max(1, ...state.agents.map((a) => a.fields.filter((f) => extra(f) && !grouped(a, f)).length + (tierMenu(a) ? 1 : 0) + (a.launch ? 1 : 0))));
   if (!folded.length) {
     for (const a of used) list.append(agentRow(a));
   } else {
@@ -2933,6 +2933,22 @@ const TIER_EFFORTS = TIERS.map((tier) => tier + " effort");
 // slow roles take the session's, as its subagents do ("smol", not "small":
 // other agents' small model is a picker of its own)
 const FOLLOWS_MODEL = [...TIERS, "subagents", "smol", "slow"];
+// omp's roles share one square as Claude Code's tiers do (#1397), each
+// with its thinking level under its model: the level omp reads off the end
+// of the role's model ("…:high"). plan, vision and advisor don't follow
+// the model: unset, omp picks for each itself, the advisor the slow
+// role's model first
+const OMP_ROLES = ["subagents", "smol", "slow", "plan", "vision", "advisor"];
+const OMP_OWN_PICK = ["plan", "vision", "advisor"];
+// omp, a named profile of it (omp#<name>) or either in a WSL distro
+const ompAgent = (a) => a.id.split("@wsl:")[0].split("#")[0] === "omp";
+// the roles an agent's square lists, and whether a field is one of them or
+// one of their levels
+const menuRoles = (a) => ompAgent(a) ? OMP_ROLES : TIERS;
+const roleLevel = (label) => TIER_EFFORTS.includes(label) || OMP_ROLES.some((r) => label === r + " thinking");
+const grouped = (a, f) => menuRoles(a).includes(f.label) || roleLevel(f.label);
+// fields that take a model, as the model picker opens for them
+const ROLE_MODELS = [...FOLLOWS_MODEL, ...OMP_OWN_PICK];
 // agents with no default model of their own, whose Default leaves the pick
 // to them (#709)
 const PICKS_ITSELF = ["pi", "omo"];
@@ -3036,32 +3052,40 @@ function launchSolo(a) {
 const LAUNCH_GLYPH = "M2.5 3.5h11v9h-11zM5 6.5l2 1.75L5 10M8.5 10h2.5";
 
 function tierMenu(a) {
-  const tiers = a.fields.filter((f) => TIERS.includes(f.label));
+  const omp = ompAgent(a);
+  const tiers = a.fields.filter((f) => menuRoles(a).includes(f.label));
   if (!tiers.length || !tiers.some((f) => f.options.length)) return null;
   // Claude Desktop has no model of its own here: a tier unset runs on a
   // Claude model of that tier magpie serves, else on the chat's model
   const main = a.fields.find((f) => f.key === "model");
   const mainName = main && (optionFor(main, main.value)?.label || main.value);
-  const unset = main ? t("same as model ({model})", { model: mainName }) : t("a Claude model of the tier, else the chat's model");
+  const unset = (f) => omp && f.label === "advisor" ? t("the slow role's model, else omp's own pick")
+    : omp && OMP_OWN_PICK.includes(f.label) ? t("omp's own pick")
+    : main ? t("same as model ({model})", { model: mainName }) : t("a Claude model of the tier, else the chat's model");
   // a tier's effort, offered while there are levels to pick (Claude Code
-  // through magpie); unset, the tier runs at the effort Claude Code asks
-  const effortOf = (f) => a.fields.find((e) => e.label === f.label + " effort" && (e.options.length || e.value));
+  // through magpie); unset, the tier runs at the effort Claude Code asks.
+  // An omp role's thinking level, while the role is on one model; unset,
+  // it runs at the session's level
+  const effortOf = (f) => a.fields.find((e) => (e.label === f.label + " effort" || e.label === f.label + " thinking") && (e.options.length || e.value));
   const level = (e) => e?.value ? effortName(optionFor(e, e.value) || { value: e.value }) : "";
   const custom = tiers.filter((f) => f.value || effortOf(f)?.value);
   const name = (f) => optionFor(f, f.value)?.label || f.value;
   return {
-    key: "tiers", label: "tiers", value: "", menu: true, custom: custom.length > 0,
-    summary: custom.length ? custom.map((f) => level(effortOf(f)) ? `${f.label} (${level(effortOf(f))})` : f.label).join(", ") : main ? t("same as model") : t("not set"),
+    key: "tiers", label: omp ? "roles" : "tiers", value: "", menu: true, custom: custom.length > 0,
+    summary: custom.length ? custom.map((f) => level(effortOf(f)) ? `${t(f.label)} (${level(effortOf(f))})` : t(f.label)).join(", ") : main ? t("same as model") : t("not set"),
     options: tiers.flatMap((f) => {
       const model = {
-        value: f.key, label: f.label, icon: optionFor(f, f.value)?.icon || (main && optionFor(main, main.value)?.icon),
-        note: f.value ? name(f) : unset,
+        value: f.key, label: t(f.label), icon: optionFor(f, f.value)?.icon || (main && optionFor(main, main.value)?.icon),
+        note: f.value ? name(f) : unset(f),
       };
       const e = effortOf(f);
-      return e ? [model, { value: e.key, label: t(e.label), effortOf: e, note: level(e) || t("the effort Claude Code asks for") }] : [model];
+      return e ? [model, { value: e.key, label: t(e.label), effortOf: e, note: level(e) || levelUnset(a) }] : [model];
     }),
   };
 }
+
+// levelUnset: what a role's level is when none is set
+const levelUnset = (a) => ompAgent(a) ? t("the session's thinking level") : t("the effort Claude Code asks for");
 
 // The tray panel has no scrollbars to speak of, so it grows to fit instead.
 // The agents' scroll unrolls and rolls up on these, in app.css as in the
@@ -3721,7 +3745,7 @@ function openPicker(agent, field, anchor, ev, only) {
   // routing groups come first, before the agent's own models and each
   // provider's; only the picker's own choices (Automatic, Off) above them
   options = [...options.filter((o) => o.reset), ...options.filter((o) => !o.reset && o.group === ROUTING_GROUPS), ...options.filter((o) => !o.reset && o.group !== ROUTING_GROUPS)];
-  const effortPicker = !only && (field.key === "effort" || field.label === "effort" || field.label === "thinking" || field.label === SUB_EFFORT || TIER_EFFORTS.includes(field.label));
+  const effortPicker = !only && (field.key === "effort" || field.label === "effort" || field.label === "thinking" || field.label === SUB_EFFORT || roleLevel(field.label));
   options = oneRowPerModel(options, cur);
   // Current model first, then the rest in catalog order. Effort levels keep
   // their natural low → high order because their position is meaningful.
@@ -3749,6 +3773,8 @@ function openPicker(agent, field, anchor, ev, only) {
       : PICKS_ITSELF.includes(agent.id) && field.key === "model" ? "clears the default model; {agent} picks one on its own"
       : field.label === MEMORIES ? MEMORIES_DEFAULT
       : field.label === SUB_MODEL ? "each subagent on the model {agent}'s lead asks for"
+      : ompAgent(agent) && field.label === "advisor" ? "the slow role's model, else omp's own pick"
+      : ompAgent(agent) && OMP_OWN_PICK.includes(field.label) ? "omp's own pick"
       : "what {agent} ships with";
     options.unshift({ value: "", label: t("Default"), note: t(note, { agent: agent.name, field: t(field.label) }), icon: agent.icon, reset: true });
   }
@@ -3758,7 +3784,7 @@ function openPicker(agent, field, anchor, ev, only) {
     const at = options.findIndex((o) => !o.reset);
     options.splice(at < 0 ? options.length : at, 0, { value: "\0disconnect", label: t("Disconnect from magpie"), note: t("put back what {agent} had before magpie", { agent: agent.name }), svg: UNPLUG, reset: true, run: () => askDisconnect(agent) });
   }
-  const modelPicker = ["model", "small", "large", MEMORIES, SUB_MODEL, "executor", "planner", ...FOLLOWS_MODEL].includes(field.label) && !only;
+  const modelPicker = ["model", "small", "large", MEMORIES, SUB_MODEL, "executor", "planner", ...ROLE_MODELS].includes(field.label) && !only;
   pick = { agent, field, options, groups, anchor, cursor: 0, free: !only && !field.menu, modelPicker, effortPicker, groupFilter: "all" };
   anchor.classList.add("open");
   const pop = $("#pop");
@@ -3974,10 +4000,10 @@ function renderEffortPicker() {
     }
     // a tier's effort, opened from the tiers' square: that square's title
     // and light follow the level
-    if (TIER_EFFORTS.includes(opened.field.label) && opened.anchor.classList.contains("ag-eff")) {
-      opened.anchor.title = t("{label}: {value}", { label: t(opened.field.label), value: option.value ? effortName(option) : t("the effort Claude Code asks for") });
+    if (roleLevel(opened.field.label) && opened.anchor.classList.contains("ag-eff")) {
+      opened.anchor.title = t("{label}: {value}", { label: t(opened.field.label), value: option.value ? effortName(option) : levelUnset(opened.agent) });
       opened.anchor.setAttribute("aria-label", opened.anchor.title);
-    } else if (TIER_EFFORTS.includes(opened.field.label)) {
+    } else if (roleLevel(opened.field.label)) {
       const menu = tierMenu(opened.agent);
       if (menu) {
         opened.anchor.classList.toggle("set", menu.custom);
@@ -4013,7 +4039,7 @@ function filter(keep) {
   if (q) scored.sort((a, b) => b.s - a.s || a.i - b.i);
   pick.items = scored.map((x) => x.o);
   const typed = $("#q").value.trim();
-  if (typed && pick.free && ["model", "small", "large", "executor", "planner", ...FOLLOWS_MODEL].includes(pick.field.label) && !pick.items.some((o) => o.value === typed)) {
+  if (typed && pick.free && ["model", "small", "large", "executor", "planner", ...ROLE_MODELS].includes(pick.field.label) && !pick.items.some((o) => o.value === typed)) {
     pick.items.push({ value: typed, note: t("use as typed"), custom: true });
   }
   pick.items = foldSame(pick.items);
@@ -4488,7 +4514,7 @@ async function setPick(agent, field, value, opt) {
   const picked = performance.now();
   // the green flash runs on through the row drawn again with the answer
   const flash = () => {
-    const b = document.querySelector(`.agent[data-id="${CSS.escape(agent.id)}"] .field[data-key="${TIERS.includes(field.label) ? "tiers" : field.key}"]`);
+    const b = document.querySelector(`.agent[data-id="${CSS.escape(agent.id)}"] .field[data-key="${grouped(agent, field) ? "tiers" : field.key}"]`);
     const gone = performance.now() - picked;
     if (!b || gone > 1200) return;
     b.style.animationDelay = `${-gone}ms`;
@@ -4889,6 +4915,14 @@ function renderProviders() {
       const plan = accountPlan(p.account), bare = plan.startsWith(p.name + " ") ? plan.slice(p.name.length + 1) : "";
       key = el("span", "key acct", bare && plan.length > 15 ? bare : plan);
       key.title = t("{agent} is signed in; its models are here for every other agent", { agent: p.account.agentName });
+    } else if (p.vertex) {
+      // Vertex AI signs with the user's Google credentials, never a key;
+      // the pill says which: the service account it acts as, else the
+      // credentials file, else Application Default Credentials (ADC)
+      const v = p.vertex;
+      key = el("span", "key " + (p.ready ? "acct" : "none"), !p.ready ? t("needs a project") : v.impersonate || (v.credentials ? baseName(v.credentials) : t("Google ADC")));
+      key.title = !p.ready ? t("Open the row and give your Google Cloud project's id")
+        : (v.impersonate ? t("Signed as the service account {account}, with your Google credentials", { account: v.impersonate }) : t("Signed with your Google credentials")) + " · " + (v.credentials || t("Application Default Credentials"));
     } else {
       key = el("span", "key " + (p.key.set ? (keyPill(p) === p.key.masked ? "on" : "on acct") : p.ready ? "free" : "none"), p.key.set ? keyPill(p) : p.ready ? t("no key") : t("needs a key"));
       key.title = p.key.set ? t("API key {masked}", { masked: p.key.masked }) : p.ready ? t("Local servers need no key") : t("Open the row and paste an API key");
@@ -7243,6 +7277,9 @@ function asTyped() {
   const body = { typed: true, key: keys.length > 1 ? keys[0] : (draft.key || "").trim(), chat: (draft.chat || "").trim(), responses: (draft.responses || "").trim(), anthropic: (draft.anthropic || "").trim(), gemini: (draft.gemini || "").trim(), modelsURL: (draft.modelsURL || "").trim() };
   // a System One base is asked at POST …/systemone, not on the three APIs
   if (draft.api === "decide") body.decide = (draft.decide || "").trim();
+  // a Vertex AI provider is asked at the project typed, with the
+  // credentials typed, as a pasted key is
+  if (draft.vertex) body.vertex = vertexOfDraft();
   if (draft.headers) body.headers = headersOf(draft.headers);
   const proxy = draft.proxyMode === undefined ? null : proxyOfDraft();
   if (proxy !== null) body.proxy = proxy;
@@ -7801,8 +7838,25 @@ function slide(box, key) {
 }
 
 const PROTOS = [["chat", "OpenAI", "Chat Completions — most agents"], ["responses", "Responses", "OpenAI Responses — what Codex speaks"], ["anthropic", "Anthropic", "Anthropic Messages — what Claude Code speaks"], ["gemini", "Gemini", "Gemini generateContent — what the Gemini CLI speaks"], ["decide", "System One", "A decision API on System One (TypeSafe's Jev, a gateway's, or Bailian's decision model) — what a routing group asks as a turn begins"]];
+// Gemini generateContent at a Vertex AI provider's project, as its
+// endpoint is shown and tested
+const VERTEX_EP_HINT = "Gemini generateContent — what Vertex AI serves at your Google Cloud project";
 // apiLabel: the name an API (a protocol) goes by in the editor
 const apiLabel = (proto) => (PROTOS.find(([k]) => k === proto) || [])[1] || proto;
+// vertexBase is where a Vertex AI provider's requests go, the address its
+// project and location make (provider.vertexBase): "" until the project
+// typed is one an address can be made of
+function vertexBase(v) {
+  const project = (v?.project || "").trim().toLowerCase(), loc = (v?.location || "").trim().toLowerCase() || "global";
+  if (!/^[a-z0-9][a-z0-9.:-]*[a-z0-9]$/.test(project) || !/^[a-z]+(-[a-z0-9]+)*$/.test(loc)) return "";
+  const host = loc === "global" ? "aiplatform.googleapis.com" : loc === "us" || loc === "eu" ? `aiplatform.${loc}.rep.googleapis.com` : `${loc}-aiplatform.googleapis.com`;
+  return `https://${host}/v1/projects/${project}/locations/${loc}`;
+}
+// vertexOfDraft is the editor's Vertex AI fields as a Save sends them
+function vertexOfDraft() {
+  const v = draft.vertex || {};
+  return { project: (v.project || "").trim(), location: (v.location || "").trim(), credentials: (v.credentials || "").trim(), impersonate: (v.impersonate || "").trim() };
+}
 const decideOnly = (p) => !!p?.decide && !(p.chat || p.responses || p.anthropic || p.gemini);
 // a provider that lists its decision models apart (OpenRouter) says which
 // they are: its Jev Router (typesafe/jev-router) is a chat model
@@ -7854,6 +7908,7 @@ function duplicateProvider(p) {
   const d = draftOf(p);
   draft = { ...d, id: slug(name), name, chosen: [], extra: d.chosen, copyOf: p.id };
   if (p.zhipuTeam) draft.zhipuTeam = { org: p.zhipuTeam.org || "", project: p.zhipuTeam.project || "" };
+  if (p.vertex) draft.vertex = { project: p.vertex.project || "", location: p.vertex.location || "", credentials: p.vertex.credentials || "", impersonate: p.vertex.impersonate || "" };
   renderProviders();
 }
 
@@ -8212,8 +8267,32 @@ function drawEditor(p, presetID) {
   }
   const keyWrap = el("div", "pair");
   keyWrap.append(key, side);
+  // Google Vertex AI takes no key: it is asked at the user's own Google
+  // Cloud project with a token their Google credentials mint, so its
+  // project, location, credentials file and a service account to go as
+  // are asked in its place, the project first
+  const vertex = p ? !!p.vertex : !!pr?.vertex;
+  let vertexProject = null;
+  if (vertex) draft.vertex = draft.vertex || { project: p?.vertex?.project || "", location: p?.vertex?.location || "", credentials: p?.vertex?.credentials || "", impersonate: p?.vertex?.impersonate || "" };
+  const vertexFields = () => {
+    const box = (k, placeholder, cls) => {
+      const i = input(draft.vertex[k], placeholder);
+      i.classList.add(cls);
+      i.oninput = () => { draft.vertex[k] = i.value; refreshEndpoints(); };
+      i.onkeydown = key.onkeydown; // Enter adds it, as from the key's box
+      return i;
+    };
+    vertexProject = box("project", "my-project-123", "vertex-project");
+    return [
+      ...field(t("Project ID"), vertexProject, t("Your Google Cloud project, with the Agent Platform API (aiplatform.googleapis.com) enabled: requests are made, and billed, there")),
+      ...field(t("Location"), box("location", "global", "vertex-location"), t("global, us, eu or a region such as us-central1. Each location serves its own models; global serves them all.")),
+      ...field(t("Credentials file"), box("credentials", "~/.config/gcloud/application_default_credentials.json", "vertex-credentials"), t("Optional. Left empty, gcloud's Application Default Credentials are used (gcloud auth application-default login), or the file GOOGLE_APPLICATION_CREDENTIALS names. A service account's key file works too.")),
+      ...field(t("Service account"), box("impersonate", t("optional · a service account's email"), "vertex-impersonate"), t("Requests are then made as this service account, impersonated with the credentials above: their account needs roles/iam.serviceAccountTokenCreator on it.")),
+    ];
+  };
   if (p?.keyList?.length) ed.append(...field(t("Accounts"), renderKeyAccounts(p), p.routing ? t("Tick every key to use; Routing says how requests spread over them.") : t("Tick every key to use. Requests go to the first; when it runs out of quota or hits a rate limit, the next ticked key takes over.")));
   if (p?.keyList?.filter((k) => k.on).length > 1) ed.append(...renderRouting(p));
+  else if (vertex) ed.append(...vertexFields());
   else ed.append(...field(t("API key"), keyWrap, isNew ? t("Kept in ~/.config/magpie/providers.json, readable by you alone. Nothing is read from your shell.") : ""));
 
   // A user-defined provider can have its own picture; presets keep theirs.
@@ -8426,13 +8505,21 @@ function drawEditor(p, presetID) {
 
   if (!custom && !(decides && !p)) {
     const ebox = el("div");
+    const row = field(t("Endpoints"), ebox, "");
     refreshEndpoints = () => {
       const base = p || pr || {};
       const src = { chat: draft.chat || base.chat || "", responses: draft.responses || base.responses || "", anthropic: draft.anthropic || base.anthropic || "", decide: base.decide || "" };
+      // Vertex AI's is the address its project and location make, shown
+      // with its Test once a project is typed, saved one or not: with none
+      // there is nowhere to ask
+      if (vertex) {
+        src.gemini = vertexBase(draft.vertex);
+        for (const x of row) x.hidden = !src.gemini;
+      }
       ebox.replaceChildren(renderEndpoints(p, src));
     };
     refreshEndpoints();
-    ed.append(...field(t("Endpoints"), ebox, ""));
+    ed.append(...row);
   }
 
   if (custom) {
@@ -8511,13 +8598,13 @@ function drawEditor(p, presetID) {
   if (p && pr) {
     // another key of the vendor, or the same key for another workspace
     const more = el("button", "text", t("Add another {name}", { name: pr.name }));
-    more.title = t("One more {name} provider, with its own key, headers and models", { name: pr.name });
+    more.title = vertex ? t("One more {name} provider, with its own project, credentials, headers and models", { name: pr.name }) : t("One more {name} provider, with its own key, headers and models", { name: pr.name });
     more.onclick = () => { editing = { preset: pr.id }; draft = null; renderProviders(); };
     bar.append(more);
   }
   if (p) {
     const dup = el("button", "text", t("Duplicate"));
-    dup.title = t("A new provider with {name}'s URLs, key, headers, models and balance settings, to change before adding", { name: p.name });
+    dup.title = vertex ? t("A new provider with {name}'s project, credentials, headers and models, to change before adding", { name: p.name }) : t("A new provider with {name}'s URLs, key, headers, models and balance settings, to change before adding", { name: p.name });
     dup.onclick = () => duplicateProvider(p);
     bar.append(dup);
   }
@@ -8591,9 +8678,11 @@ function drawEditor(p, presetID) {
       else if (draft.clearAccessKey) body.clearAccessKey = true;
       if (body.accessKeyID && !body.secretAccessKey && !(access.secretSet && !draft.clearAccessKey)) { ed.querySelector(".volc-sk")?.focus({ preventScroll: true }); return editorError(t("Give the access key's Secret too"), "warn"); }
     }
+    if (vertex) body.vertex = vertexOfDraft();
     if (isNew && custom && !body.name) { name.focus(); return editorError(t("Give it a name"), "warn"); }
     if (isNew && custom && !body.chat && !body.anthropic && !body.responses && !body.decide) { url.focus(); return editorError(t("A base URL is needed"), "warn"); }
     if (endpoint && !body.chat && !body.responses) { endpoint.focus(); return editorError(t(pr.endpointNeeded || "Your resource's endpoint is needed"), "warn"); }
+    if (vertex && !body.vertex.project) { vertexProject?.focus({ preventScroll: true }); return editorError(t("Google Vertex AI needs the id of your Google Cloud project"), "warn"); }
     editorError("");
     saving(saveBtn, t(isNew ? "Adding…" : "Saving…"));
     providerAction("save", body, t(isNew ? "{name} added" : "{name} saved", { name: draft.name || draft.id }));
@@ -8601,7 +8690,7 @@ function drawEditor(p, presetID) {
   saveBtn.onclick = save;
   bar.append(cancel, saveBtn);
   ed.append(bar);
-  setTimeout(() => (isNew ? (custom || another ? name : endpoint || key) : null)?.focus(), 0);
+  setTimeout(() => (isNew ? (custom || another ? name : endpoint || vertexProject || key) : null)?.focus(), 0);
   return ed;
 }
 
@@ -9104,7 +9193,7 @@ function renderEndpoints(p, src) {
     if (!urls[proto]) continue;
     const e = el("div", "ep");
     const pl = el("span", "pl", label);
-    pl.title = t(hint);
+    pl.title = t(proto === "gemini" && draft?.vertex ? VERTEX_EP_HINT : hint);
     e.append(pl, el("code", "", urls[proto]), slots[proto] = el("span", "res"));
     eps.append(e);
   }
@@ -9577,6 +9666,7 @@ function renderModels(p) {
     else if (f && !chips.children.length) chips.append(el("span", "hint", t("No model here matches “{q}”. Image, embedding and speech models aren't listed, as agents can't chat with them: pick an image model in Settings → Images.", { q: q.value.trim() })));
     drawNames();
     drawFold();
+    drawWorkOn();
     why.textContent = decideOnly(p) ? t("Agents never see them: a routing group picks one as its classifier.")
       : draft.unlisted ? t("Agents don't see them: only the routing groups they are in use them.")
       : t(draft.chosen.length ? "Agents see the models picked." : "None picked: agents see the vendor's list, up to {n} (dashed). Click a model to pick just it. To show them none, tick Only through routing groups, or switch the provider off.", { n: 24 });
@@ -9940,6 +10030,33 @@ function renderModels(p) {
     };
     bulk.append(freeOn);
   }
+  // the picks that answered Test models (H20 on Discord: 测试完很多不可用，
+  // 只能一个个取消): those whose last test failed are unpicked, the rest
+  // stay, an untested one too, as nothing says it doesn't work. Offered
+  // once a test has answered; with none picked, the served list it tested
+  // stands in for the picks
+  const workOn = el("button", "text action works-only", t("Working only"));
+  const failedPicks = () => {
+    const got = modelTests[p.id] || {};
+    const ids = draft.chosen.length ? draft.chosen : p.models.filter((m) => m.on).map((m) => m.id);
+    return [ids, ids.filter((id) => got[id] && !got[id].ok)];
+  };
+  workOn.onclick = () => {
+    const [ids, bad] = failedPicks();
+    if (!bad.length) return;
+    draft.chosen = ids.filter((id) => !bad.includes(id));
+    draw();
+    status(t(bad.length === 1 ? "Unpicked 1 model that didn't answer" : "Unpicked {n} models that didn't answer", { n: bad.length }), "ok");
+  };
+  const drawWorkOn = () => {
+    // in the row only once a test has answered, not there hidden till then
+    if (!Object.values(modelTests[p.id] || {}).some((x) => x)) { workOn.remove(); return; }
+    if (!workOn.isConnected) bulk.append(workOn);
+    const bad = failedPicks()[1].length;
+    workOn.disabled = !bad;
+    workOn.title = bad ? t("Unpick the models whose last test failed; those that answered, and those not tested, stay picked")
+      : t("Every picked model that was tested answered");
+  };
   if (q || p.models.length > 1) {
     if (q) { q.oninput = draw; bulk.prepend(q); }
     box.append(bulk);
@@ -11472,6 +11589,10 @@ function quotaError(err) {
   if (/^remote magpie isn't shared/.test(err)) return t("That computer's magpie isn't shared — turn on Settings → Share on local network there");
   if (/^remote magpie didn't take this key/.test(err)) return t("That computer's magpie didn't take this key — use one of its gateway keys in this provider");
   if (/^couldn't reach the remote magpie/.test(err)) return t("Couldn't reach that computer's magpie — check that it is running and its address");
+  // a ClinePass card with its balance but not its limits (#79): the
+  // built-in key card (clineLimitsUnread, cline_usage.go) and the Cline
+  // plugin both begin their error with these words
+  if (/^ClinePass limits couldn't be read/.test(err)) return t("ClinePass limits couldn't be read — hover for why");
   return balanceError(err) || t("Allowance unavailable");
 }
 
@@ -12244,6 +12365,16 @@ function renderKeyAccounts(p) {
     };
     row.append(dot, name);
     if (k.name) row.append(el("span", "plan mono", k.masked));
+    // each key copies its own (#1480): with several, the editor has no
+    // API key field to show one in
+    const cp = el("button", "copy");
+    cp.title = t("Copy");
+    cp.append(svg(COPY_ICON, 12, 1.5));
+    cp.onclick = async (e) => {
+      e.stopPropagation();
+      try { copy((await api("provider/key", { id: p.id, account: k.id })).key, k.name || k.masked, cp); } catch (err) { status(err.message, "err"); }
+    };
+    row.append(cp);
     // one the gateway passes over after a failure: why, and until when
     if (k.rest && new Date(k.rest.until) > Date.now()) {
       const r = el("span", "key-rest", t("Resting · {why} · back at {time}", { why: (k.rest.status ? k.rest.status + " " : "") + t(KEY_FAIL[k.rest.why] || "failed"), time: new Date(k.rest.until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }));
@@ -13044,7 +13175,7 @@ async function loadUsage(asked) {
   renderUsageLoading();
   if (!asked) loadQuotas();
   const p = period, read = ++usageRead;
-  const next = await api("usage?period=" + p);
+  const next = await api("usage?period=" + encodeURIComponent(p));
   if (read !== usageRead || view !== "usage" || usageTab !== "usage" || period !== p) return;
   usage = next;
   renderUsage();
@@ -13086,10 +13217,167 @@ function renderPeriod(loading) {
   for (const [id, name] of PERIODS) {
     const b = el("button", "opt" + (id === period ? " on" : ""), t(name));
     b.disabled = !!loading;
-    b.onclick = () => { for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b); slide(seg, "period"); period = id; ledDay = ""; ledOffset = 0; loadUsage().catch((e) => status(e.message, "err")); };
+    b.onclick = () => { for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b); slide(seg, "period"); pickPeriod(id); };
     seg.append(b);
   }
+  // days of the reader's own (#1492): the last opt names them once picked,
+  // and opens the range menu to pick them, or others
+  const range = periodDays(period);
+  const b = el("button", "opt range-opt" + (range ? " on" : ""));
+  b.type = "button";
+  b.disabled = !!loading;
+  b.setAttribute("aria-haspopup", "dialog");
+  b.setAttribute("aria-expanded", "false");
+  b.setAttribute("aria-label", range ? t("Days picked: {days}", { days: rangeName(range) }) : t("Pick days"));
+  b.append(svg("M3 4.5h10v8.5H3zM3 7h10M5.5 3v3M10.5 3v3", 12, 1.4), el("span", "", range ? rangeName(range) : t("Custom")));
+  if (range) b.title = t("Days picked: {days}", { days: rangeName(range) });
+  b.onclick = () => {
+    if (b.classList.contains("open")) return closeProtoMenu();
+    openRangeMenu(b, range, (from, to) => {
+      for (const x of seg.querySelectorAll(".opt")) x.classList.toggle("on", x === b);
+      b.lastChild.textContent = rangeName({ from, to });
+      b.title = t("Days picked: {days}", { days: rangeName({ from, to }) });
+      b.setAttribute("aria-label", b.title);
+      slide(seg, "period");
+      pickPeriod(from + ".." + to);
+    });
+  };
+  seg.append(b);
   slide(seg, "period");
+}
+
+function pickPeriod(id) {
+  period = id; ledDay = ""; ledOffset = 0;
+  loadUsage().catch((e) => status(e.message, "err"));
+}
+
+// A period of picked days is "2026-10-01..2026-10-07", both included, in
+// this computer's time zone, as the backend reads it (usage.RangeOf).
+// periodDays is its two days, or null for a preset.
+function periodDays(p) {
+  const m = /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/.exec(p || "");
+  return m ? { from: m[1], to: m[2] } : null;
+}
+const dayKeyOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const dayOfKey = (k) => new Date(k + "T12:00:00");
+// rangeName says picked days short: "Oct 1 – Oct 7", the year only when it
+// isn't this one, one day alone as itself
+function rangeName({ from, to }) {
+  const year = new Date().getFullYear();
+  const name = (k) => dayOfKey(k).toLocaleDateString(intlLang() || "en", { month: "short", day: "numeric", ...(dayOfKey(k).getFullYear() !== year ? { year: "numeric" } : {}) });
+  return from === to ? name(from) : name(from) + " – " + name(to);
+}
+// noCallsIn is what an empty page says of the period it is on
+function noCallsIn(p) {
+  if (periodDays(p)) return "No calls on the days picked.";
+  return { today: "No calls today.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[p] || "No calls yet.";
+}
+
+// openRangeMenu is the app's own menu for picking days (#1492): a few
+// spans a click away, and a month to pick the first day on, then the last.
+// Days after today can't be picked. choose gets the two days, in order.
+function openRangeMenu(anchor, current, choose) {
+  closeProtoMenu();
+  const today = dayKeyOf(new Date());
+  let start = null; // the first day clicked, waiting for the last
+  let shown = dayOfKey(current?.to || today);
+  shown = new Date(shown.getFullYear(), shown.getMonth(), 1, 12);
+  const box = el("div", "pop proto-menu range-menu");
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-label", t("Pick days"));
+  const head = el("div", "pm-head");
+  const quick = el("div", "rm-quick");
+  const span = (from, to) => ({ from: dayKeyOf(from), to: dayKeyOf(to) });
+  const now = new Date();
+  now.setHours(12, 0, 0, 0);
+  const back = (n) => { const d = new Date(now); d.setDate(d.getDate() - n); return d; };
+  const quicks = [
+    ["Yesterday", span(back(1), back(1))],
+    ["This month", span(new Date(now.getFullYear(), now.getMonth(), 1, 12), now)],
+    ["Last month", span(new Date(now.getFullYear(), now.getMonth() - 1, 1, 12), new Date(now.getFullYear(), now.getMonth(), 0, 12))],
+    ["90 days", span(back(89), now)],
+  ];
+  for (const [name, r] of quicks) {
+    const b = el("button", "rm-span" + (current && current.from === r.from && current.to === r.to ? " on" : ""), t(name));
+    b.type = "button";
+    b.title = rangeName(r);
+    b.onclick = (e) => { e.stopPropagation(); closeProtoMenu(); choose(r.from, r.to); };
+    quick.append(b);
+  }
+  const nav = el("div", "rm-nav");
+  const prev = el("button", "rm-step"), next = el("button", "rm-step"), month = el("span", "rm-month");
+  prev.type = next.type = "button";
+  prev.setAttribute("aria-label", t("Previous month"));
+  next.setAttribute("aria-label", t("Next month"));
+  prev.append(svg("M10 4 6 8l4 4", 12, 1.6));
+  next.append(svg("m6 4 4 4-4 4", 12, 1.6));
+  nav.append(prev, month, next);
+  const grid = el("div", "rm-grid");
+  grid.setAttribute("role", "grid");
+  box.append(head, quick, nav, grid);
+  const draw = (focusDay) => {
+    head.textContent = start ? t("Now the last day") : t("Pick the first day, then the last");
+    month.textContent = shown.toLocaleDateString(intlLang() || "en", { year: "numeric", month: "long" });
+    next.disabled = dayKeyOf(new Date(shown.getFullYear(), shown.getMonth() + 1, 1, 12)) > today;
+    const cells = [];
+    // the weekdays, Monday first, as the app's weeks are
+    for (let i = 0; i < 7; i++) cells.push(el("span", "rm-wd", new Date(2024, 0, 1 + i, 12).toLocaleDateString(intlLang() || "en", { weekday: "narrow" })));
+    const first = new Date(shown);
+    const lead = (first.getDay() + 6) % 7;
+    for (let i = 0; i < lead; i++) cells.push(el("span", "rm-pad"));
+    const lo = start || current?.from, hi = start ? null : current?.to;
+    for (let d = new Date(first); d.getMonth() === shown.getMonth(); d.setDate(d.getDate() + 1)) {
+      const k = dayKeyOf(d);
+      const b = el("button", "rm-day", String(d.getDate()));
+      b.type = "button";
+      b.dataset.day = k;
+      b.setAttribute("aria-label", d.toLocaleDateString(intlLang() || "en", { year: "numeric", month: "long", day: "numeric" }));
+      if (k === today) b.classList.add("today");
+      if (lo && (k === lo || k === hi)) b.classList.add("end");
+      if (lo && hi && k > lo && k < hi) b.classList.add("in");
+      b.disabled = k > today;
+      b.onclick = (e) => {
+        e.stopPropagation();
+        if (!start) { start = k; draw(k); return; }
+        const [from, to] = start <= k ? [start, k] : [k, start];
+        closeProtoMenu();
+        choose(from, to);
+      };
+      cells.push(b);
+    }
+    grid.replaceChildren(...cells);
+    (focusDay && grid.querySelector(`[data-day="${focusDay}"]`))?.focus({ preventScroll: true });
+  };
+  const turn = (by) => (e) => { e.stopPropagation(); shown = new Date(shown.getFullYear(), shown.getMonth() + by, 1, 12); draw(); };
+  prev.onclick = turn(-1);
+  next.onclick = turn(1);
+  draw();
+  document.body.append(box);
+  placeMenu(box, anchor);
+  anchor.classList.add("open");
+  anchor.setAttribute("aria-expanded", "true");
+  const outside = (e) => { if (!box.contains(e.target) && !anchor.contains(e.target)) closeProtoMenu(); };
+  const scroll = (e) => { if (!box.contains(e.target)) closeProtoMenu(); };
+  // Escape closes; arrows walk the days, a week up or down
+  const keys = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus({ preventScroll: true }); return; }
+    const at = document.activeElement?.dataset?.day;
+    const by = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[e.key];
+    if (!at || !by || !box.contains(document.activeElement)) return;
+    e.preventDefault(); e.stopPropagation();
+    const d = dayOfKey(at);
+    d.setDate(d.getDate() + by);
+    const k = dayKeyOf(d);
+    if (k > today) return;
+    if (d.getMonth() !== shown.getMonth() || d.getFullYear() !== shown.getFullYear()) shown = new Date(d.getFullYear(), d.getMonth(), 1, 12);
+    draw(k);
+  };
+  document.addEventListener("mousedown", outside, true);
+  document.addEventListener("keydown", keys, true);
+  document.addEventListener("scroll", scroll, true);
+  addEventListener("resize", closeProtoMenu);
+  protoMenu = { box, anchor, outside, keys, scroll, done: null };
+  (grid.querySelector(".rm-day.end") || grid.querySelector(".rm-day.today") || quick.firstChild).focus({ preventScroll: true });
 }
 
 function renderUsageLoading() {
@@ -13514,12 +13802,16 @@ function creditDays(sub) {
   const key = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const today = new Date();
   today.setHours(12, 0, 0, 0);
-  // the period's days, the first from when counting began for All
-  let n = { today: 1, "7d": 7, "30d": 30 }[period];
-  if (!n) n = Math.min(120, Math.max(1, Math.round((today - new Date(since + "T12:00:00")) / 864e5) + 1));
+  // the period's days, the first from when counting began for All, a
+  // picked range's own (#1492), its last 120 at most
+  const range = periodDays(period);
+  const last = range ? dayOfKey(range.to) : today;
+  let n = range ? Math.round((last - dayOfKey(range.from)) / 864e5) + 1 : { today: 1, "7d": 7, "30d": 30 }[period];
+  if (!n) n = Math.round((today - new Date(since + "T12:00:00")) / 864e5) + 1;
+  n = Math.min(120, Math.max(1, n));
   const list = [];
   for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(today);
+    const d = new Date(last);
     d.setDate(d.getDate() - i);
     list.push({ day: key(d), date: d, used: by.get(key(d)) || 0, known: key(d) >= since });
   }
@@ -13529,7 +13821,7 @@ function creditDays(sub) {
   const head = el("div", "cd-head");
   const name = el("span", "", t("Credits used per day"));
   name.title = t("Counted from magpie's readings of the vendor's meter, since {date}: what is used while magpie isn't reading it is counted on the day it next does", { date: dayName(new Date(since + "T12:00:00")) });
-  head.append(name, el("b", "", n === 1 ? t("{n} today", { n: num(sum) }) : t("{n} in {days} days", { n: num(sum), days: n })));
+  head.append(name, el("b", "", n > 1 ? t("{n} in {days} days", { n: num(sum), days: n }) : range && range.to !== key(today) ? t("{n} on {date}", { n: num(sum), date: dayName(last) }) : t("{n} today", { n: num(sum) })));
   box.append(head);
   if (n > 1) {
     const bars = el("div", "cd-bars");
@@ -14803,6 +15095,11 @@ function checkinRow(q, first, subs) {
         // the vendor wants a captcha, which magpie never solves
         text = t("Asks for a captcha; check in in its own app") + (r.msg ? " · " + r.msg : "");
         break;
+      case "own-app":
+        // the vendor pays only its own app (Trae CN's 9074, #808): not
+        // tried again today
+        text = t("{name} only gives check-in credits to its own app; check in in the {name} app", { name: checkinVendorName(r, q.name) });
+        break;
       default:
         kind = "bad";
         // why, in the row: a reason only in the tooltip read as no reason (#808)
@@ -14816,7 +15113,7 @@ function checkinRow(q, first, subs) {
   const say = el("span", "ci-say");
   say.append(el("i", "ci-dot" + (kind ? " " + kind : "")), el("span", "", text));
   say.title = [t(vendor.say),
-    r?.outcome === "failed" || r?.outcome === "ineligible" ? r.msg : ""].filter(Boolean).join("\n");
+    r?.outcome === "failed" || r?.outcome === "ineligible" || r?.outcome === "own-app" ? r.msg : ""].filter(Boolean).join("\n");
   row.append(say);
   if (!first) return row;
   const auto = el("button", "text ci-auto" + (on ? " on" : ""), t("Auto check-in"));
@@ -14861,6 +15158,12 @@ function checkinRow(q, first, subs) {
   return row;
 }
 
+// checkinVendorName is the vendor of check-in r by name: a plugin's as
+// it says, a built-in check-in's own, else fallback.
+function checkinVendorName(r, fallback) {
+  return r?.vendor || { trae: "Trae CN", minimax: "MiniMax Code", qoder: "Qoder", "": "WorkBuddy" }[r?.by || ""] || fallback || "";
+}
+
 // wbToday is today as WorkBuddy's check-in counts it, a Beijing day
 function wbToday() {
   return new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
@@ -14892,6 +15195,10 @@ function askReset(q) {
       const out = await api("usage/codex-reset", { user: q.user || "" });
       closeConfirmAsk();
       status(who + ": " + resetOutcome(out), out.code === "reset" ? "ok" : "err");
+      // the providers' editor reads the account's windows and resets
+      // on its own, kept a minute: read again, as Usage is (#1491)
+      delete loginUsage.codex;
+      if (editing && view === "providers") renderProviders();
       loadQuotas();
     } catch (err) {
       go.disabled = false;
@@ -15112,14 +15419,23 @@ function holdsLine(h) {
 
 // quotaWindows: one account's allowance as meters, or why there are none.
 function quotaWindows(sub) {
-  if (sub.balance && !sub.windows?.length) return balanceRow(sub, "What is left on the account: the vendor tells only this, so Used / Left leaves it as it is", "refresh");
-  if (sub.error) {
+  const failed = () => {
     const e = el("div", "subscription-error", quotaError(sub.error));
     e.title = sub.error;
     // read again from here too: a failed reading is the one most wanted
     e.prepend(quotaRefresh(sub));
     return e;
+  };
+  if (sub.balance && !sub.windows?.length) {
+    const b = balanceRow(sub, "What is left on the account: the vendor tells only this, so Used / Left leaves it as it is", "refresh");
+    if (!sub.error) return b;
+    // the balance read, and why the rest wasn't: a ClinePass card whose
+    // limits failed to read (#79) says so under its balance
+    const box = el("div", "quota-balance-error");
+    box.append(b, failed());
+    return box;
   }
+  if (sub.error) return failed();
   const windows = el("div", "quota-windows");
   for (const w of sub.windows) {
     const quota = el("div", "quota");
@@ -15214,7 +15530,7 @@ function renderUsage() {
   $("#usageAccountsHead").hidden = $("#usageAccounts").hidden = empty || !u.accounts?.length;
   if (empty) {
     stats.classList.add("empty");
-    const none = { today: "No calls today.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[period];
+    const none = noCallsIn(period);
     stats.append(el("div", "none", t(none) + " " + t("Point an agent at a catalog model and use it; every call through the gateway is counted here.")));
     $("#usageNote").textContent = "";
     return;
@@ -15432,9 +15748,11 @@ function ledServed(r) {
 // out on, and the one its agent spoke when that was another: the
 // endpoint reads "/v1/chat/completions → /v1/messages" for a request
 // translated, the agent's own path alone for one sent as it came (蓝猫 on
-// Discord). null for a request with no path kept, a session file's.
+// Discord). null for a request with no path kept, a session file's. Gemini's
+// is generateContent, or streamGenerateContent streamed (Gemini CLI's,
+// Vertex AI's).
 const ledProtoOf = (path) => /\/messages\b/.test(path) ? "Anthropic" : /\/responses\b/.test(path) ? "Responses"
-  : /\/chat\/completions\b/.test(path) ? "Chat" : /generateContent|\/generate\b/.test(path) ? "Gemini" : "";
+  : /\/chat\/completions\b/.test(path) ? "Chat" : /[gG]enerateContent|\/generate\b/.test(path) ? "Gemini" : "";
 function ledProtos(r) {
   if (!r.ep || r.source === "log") return null;
   const [a, b] = String(r.ep).split(" → ");
@@ -16468,7 +16786,7 @@ function renderLedger() {
   if (!l.total) {
     wrap.classList.add("none");
     const filtered = ledPurpose || ledDay || ledRoute || ledAgent || ledProvider || ledAccount || ledComputer || ledCallerKey || ledModel || ledVia || ledFailed || ledQuery.trim();
-    const none = { today: "No calls today.", "7d": "No calls in the last 7 days.", "30d": "No calls in the last 30 days.", all: "No calls yet." }[period];
+    const none = noCallsIn(period);
     wrap.replaceChildren(el("div", "led-none", filtered ? t("No requests match these filters.") : t(none)));
     ledFit();
     ledHScroll();
@@ -20593,6 +20911,8 @@ function wbCheckinLine(r) {
       return t("{user}: no check-in event now", { user: r.user });
     case "captcha":
       return t("{user} is asked for a captcha; check in in the app", { user: r.user });
+    case "own-app":
+      return t("{user}: {name} only gives check-in credits to its own app; check in in the {name} app", { user: r.user, name: checkinVendorName(r) });
     default:
       return t("{user} couldn't check in, tried again later", { user: r.user });
   }
@@ -21292,7 +21612,7 @@ function refreshUsage(now = false) {
         else if (usage && performance.now() - quotasAsked > 60e3) { quotasAsked = performance.now(); loadQuotas(); }
         if (usage) {
           const p = period, read = ++usageRead;
-          const u = await api("usage?period=" + p);
+          const u = await api("usage?period=" + encodeURIComponent(p));
           if (read === usageRead && view === "usage" && usageTab === "usage" && p === period) {
             if (JSON.stringify(u) !== JSON.stringify(usage)) { usage = u; renderUsage(); }
             // this read claimed the newest one: a pick it superseded had put the

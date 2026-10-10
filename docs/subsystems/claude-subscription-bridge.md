@@ -24,6 +24,17 @@ in for no agent. It doesn't update itself (the bridge sets
 `DISABLE_AUTOUPDATER`); installing again takes the newest and removes the
 older one.
 
+A run is started with `--dangerously-skip-permissions` (`claudeCLIArgs`):
+its only tools are magpie's MCP ones, answered by the client, and
+Anthropic's web search. Claude Code run as root refuses that flag ("cannot
+be used with root/sudo privileges") unless `IS_SANDBOX` is `1` or
+`CLAUDE_CODE_BUBBLEWRAP` is set, so a run as root, magpie's own euid 0 or
+a WSL distro whose default user is root (the probe's `uid`,
+`wslrun.Tool.Root`), is given `IS_SANDBOX=1` (`claudeCLI.asRoot`;
+FrierenF on Discord). A run as anyone else has its env as before. Only the
+bridge's run gets it; the warm-up and `/usage` runs don't skip
+permissions.
+
 ## Why turns go on in one run
 
 A run started anew is told the whole conversation in one user message

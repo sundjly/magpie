@@ -113,6 +113,14 @@ type Record struct {
 	Session string `json:"session,omitempty"`
 	// NativeSession retains the client header when X-Magpie-Session overrides it.
 	NativeSession string `json:"native_session,omitempty"`
+	// Subagent is the subagent that made the call, as its agent names it
+	// (Claude Code's x-claude-code-agent-id, the agentId of its
+	// subagents/agent-<id>.jsonl): Session stays the conversation it was
+	// spawned in, so its calls are counted there too. ParentAgent is the
+	// subagent that spawned it in turn (x-claude-code-parent-agent-id), ""
+	// when the conversation itself did or the agent doesn't say.
+	Subagent    string `json:"subagent,omitempty"`
+	ParentAgent string `json:"parent_agent,omitempty"`
 	// Rejected is a request refused locally before an upstream was contacted.
 	Rejected bool `json:"rejected,omitempty"`
 	// Kind is what the agent made the call for when it isn't a turn of
@@ -584,8 +592,14 @@ func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[
 		normalizedKeys[id] = true
 	}
 	historicalKeys = normalizedKeys
+	// a picked range's own days alone: its chart can start on the Monday
+	// before its first, and it ends before now (#1492)
+	from, until := p.Since(now), p.Until(now)
 	visit := func(fn func(Record)) {
 		read(func(r Record) {
+			if r.Time.Before(from) || after(until, r.Time) {
+				return
+			}
 			if next, ok := renamed[r.Provider]; ok {
 				r.Provider = next
 			}
@@ -594,9 +608,7 @@ func summarizeFrom(p Period, now time.Time, first time.Time, historicalKeys map[
 	}
 	s := Summary{Period: p, Bucket: "day", Agents: []Group{}, Models: []Group{}, ProviderKeys: []Group{}, Accounts: []Group{}, CallerKeys: []Group{}, Sessions: []Group{}, Series: []Point{}}
 	s.Since, s.Bucket, s.Series = timeline(p, now, first)
-	if p != Today && p != Week && p != Month {
-		s.Period = All
-	}
+	s.Period = p.shown()
 
 	priceOf := pricer()
 	// the places each provider id went in the period, and goes now

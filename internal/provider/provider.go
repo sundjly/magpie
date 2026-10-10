@@ -34,7 +34,7 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini's generateContent: served to clients; spoken upstream at a custom provider's Gemini URL and Factory's generate route
+	Gemini    Protocol = "gemini"    // Google Gemini's generateContent: served to clients; spoken upstream at a custom provider's Gemini URL, Vertex AI and Factory's generate route
 )
 
 // Protocols in the order magpie prefers them when it has to translate.
@@ -243,6 +243,10 @@ type Provider struct {
 	// team's windows are told to the key only with them (see
 	// zhipuKeyTeamWindows). nil for a key of the user's own plan.
 	ZhipuTeam *ZhipuTeam `json:"zhipuTeam,omitempty"`
+	// Vertex, for a Google Vertex AI provider, is the project and location
+	// its requests go to and the Google credentials that sign them, in
+	// place of a key (see vertex.go).
+	Vertex *Vertex `json:"vertex,omitempty"`
 
 	// ModelsURL, when set, is where the vendor lists its models, for one
 	// that lists them away from the base URL requests go to (Xiaomi MiMo's
@@ -252,6 +256,10 @@ type Provider struct {
 	// Models the user chose to expose. Empty means "the preset's picks, or
 	// everything the vendor lists when that list is short".
 	Models []string `json:"models,omitempty"`
+	// PickedFrom are the models the vendor listed when Models were saved: one
+	// listed since is served beside picks that held every one listed then
+	// (withNewlyListed), and one listed then and left unpicked stays out.
+	PickedFrom []string `json:"pickedFrom,omitempty"`
 	// Unlisted keeps the provider's own models out of the list agents see:
 	// it serves only through the routing groups it is in, and by its
 	// "provider/model" ids.
@@ -412,6 +420,7 @@ func (p Provider) clone() Provider {
 	p.Keys = slices.Clone(p.Keys)
 	p.Fallback = slices.Clone(p.Fallback)
 	p.Models = slices.Clone(p.Models)
+	p.PickedFrom = slices.Clone(p.PickedFrom)
 	p.Headers = maps.Clone(p.Headers)
 	p.AccountProxies = maps.Clone(p.AccountProxies)
 	p.AccountCaps = maps.Clone(p.AccountCaps)
@@ -439,6 +448,10 @@ func (p Provider) clone() Provider {
 		v := *p.ZhipuTeam
 		p.ZhipuTeam = &v
 	}
+	if p.Vertex != nil {
+		v := *p.Vertex
+		p.Vertex = &v
+	}
 	return p // Account, the sign-in's runtime, stays shared
 }
 
@@ -464,6 +477,7 @@ func allProviders() []Provider {
 			continue
 		}
 		pk := picks[a.ID]
+		a.PickedFrom = pk.PickedFrom
 		a.Models, a.Unlisted, a.Off, a.Fallback, a.Routing, a.Affinity, a.KeepLogin, a.KeepLoginAs, a.Contexts, a.Family = pk.Models, pk.Unlisted, pk.Off, pk.Fallback, pk.Routing, pk.Affinity, pk.KeepLogin, pk.KeepLoginAs, pk.Contexts, pk.Family
 		a.Sink = pk.Sink
 		a.Proxy, a.AccountProxies, a.AccountModels = pk.Proxy, pk.AccountProxies, pk.AccountModels
@@ -551,6 +565,11 @@ func Slug(name string) string {
 
 // Save adds or replaces a provider.
 func Save(p Provider) error {
+	// a key given a Vertex AI provider is refused here, before normalize
+	// drops it: it would never be sent
+	if p.IsVertex() && (strings.TrimSpace(p.Key) != "" || len(p.Keys) > 0) {
+		return errors.New("Google Vertex AI is asked with your Google credentials, not an API key")
+	}
 	p = normalize(p)
 	p.IconURL = "" // import-only: never stored
 	if p.ID == "" {
@@ -588,14 +607,18 @@ func Save(p Provider) error {
 		if p.ID == "kiro" {
 			key = p.Key
 		}
-		p = Provider{ID: p.ID, Key: key, Models: p.Models, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, MaxConcurrency: p.MaxConcurrency, AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM, PinUpstream: p.PinUpstream, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID), Tucked: tuckedAccount(p.ID)}
+		p = Provider{ID: p.ID, Key: key, Models: p.Models, PickedFrom: p.PickedFrom, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, MaxConcurrency: p.MaxConcurrency, AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM, PinUpstream: p.PinUpstream, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID), Tucked: tuckedAccount(p.ID)}
 	} else {
 		p.AccountProxies = keyProxies(p) // a provider of keys proxies each key apart
 		if subscriptionID(p.ID) && !stored(p.ID) {
 			// taken, it would hide that subscription once signed in
 			return fmt.Errorf("%q is the id of the %s subscription; pick another name", p.ID, p.ID)
 		}
-		if !hasEndpoint(p) {
+		if p.IsVertex() {
+			if err := p.Vertex.check(); err != nil {
+				return err
+			}
+		} else if !hasEndpoint(p) {
 			if p.Preset == AzurePreset {
 				return errors.New("Azure OpenAI needs your resource's endpoint, e.g. https://<resource>.openai.azure.com")
 			}
@@ -604,7 +627,7 @@ func Save(p Provider) error {
 		if strings.Contains(p.Decide, WorkspaceID) {
 			return errors.New("Bailian's decision model is asked at your workspace's host: give its workspace ID (workspace=… or the editor's Workspace ID), or pick the Token Plan")
 		}
-		if p.Key == "" && !keyOptional(p) {
+		if p.Key == "" && !keyOptional(p) && !p.IsVertex() {
 			return fmt.Errorf("%s needs an API key", p.Name)
 		}
 	}
@@ -612,17 +635,42 @@ func Save(p Provider) error {
 	if err != nil {
 		return err
 	}
-	for i := range f.Providers {
-		if f.Providers[i].ID == p.ID {
-			if p.Was == nil {
-				p.Was = f.Providers[i].Was
-			}
-			f.Providers[i] = p
-			return store(f)
+	i := slices.IndexFunc(f.Providers, func(q Provider) bool { return q.ID == p.ID })
+	var was *Provider
+	if i >= 0 {
+		was = &f.Providers[i]
+	}
+	p.PickedFrom = listedWith(p, was)
+	if was != nil {
+		if p.Was == nil {
+			p.Was = was.Was
 		}
+		f.Providers[i] = p
+		return store(f)
 	}
 	f.Providers = append(f.Providers, p)
 	return store(f)
+}
+
+// listedWith is what p.PickedFrom is saved as: none without picks; what was
+// kept with the picks when they are the same picks; and the models listed
+// now when the picks are new, as the user picked them from that list.
+func listedWith(p Provider, was *Provider) []string {
+	if len(p.Models) == 0 {
+		return nil
+	}
+	if was != nil && slices.Equal(normalModels(was.Models), normalModels(p.Models)) {
+		return was.PickedFrom
+	}
+	from := p
+	if q, err := Find(p.ID); err == nil {
+		from = *q // with its account, whose list it is
+	}
+	var ids []string
+	for _, m := range from.Available() {
+		ids = append(ids, m.ID)
+	}
+	return ids
 }
 
 // Add saves a provider the user just added, beside those already here: an
@@ -690,6 +738,10 @@ func AddCopy(p Provider, from string) (string, error) {
 	}
 	if p.ZhipuTeam == nil {
 		p.ZhipuTeam = src.ZhipuTeam
+	}
+	if p.Vertex == nil && src.Vertex != nil {
+		v := *src.Vertex
+		p.Vertex = &v
 	}
 	if p.Fallback == nil {
 		p.Fallback = slices.Clone(src.Fallback)
@@ -894,6 +946,18 @@ func normalize(p Provider) Provider {
 	p.AccountCaps = normalAccountCaps(p.AccountCaps)
 	p.AccountWindowCaps = normalWindowCaps(p.AccountWindowCaps)
 	p.ZhipuTeam = p.ZhipuTeam.normal()
+	p.Vertex = p.Vertex.Normal()
+	if !p.IsVertex() {
+		p.Vertex = nil
+	} else {
+		// asked only at the address its project and location make, with a
+		// Google token that no other address is to be sent, and never with
+		// a key: one put in providers.json by hand is dropped, so it stands
+		// in for neither that token nor a project, and the provider as
+		// found still saves
+		p.Chat, p.Responses, p.Anthropic, p.Gemini, p.Decide = "", "", "", "", ""
+		p.Key, p.KeyName, p.Keys, p.KeyProtocol, p.KeyWeight = "", "", nil, "", 0
+	}
 	p.remoteMagpieEndpoints()
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Gemini, &p.Decide, &p.Website, &p.KeysURL} {
 		*u = strings.TrimRight(strings.TrimSpace(*u), "/")
@@ -1072,9 +1136,12 @@ func (p Provider) Base(proto Protocol) string {
 		}
 	case Gemini:
 		// Factory's Gemini models are generateContent at /api/llm/g, not
-		// Code Assist
+		// Code Assist; Vertex AI's at the user's project (VertexPath)
 		if p.FactoryGemini() {
 			return factoryAPI + "/api/llm/g/v1"
+		}
+		if p.IsVertex() {
+			return p.vertexBase()
 		}
 		return p.Gemini
 	}
@@ -1100,7 +1167,12 @@ func (p Provider) Speaks() []Protocol {
 	// Factory's Gemini models, on generateContent. A model droid didn't
 	// list stays on the other three (factoryAPIs); this is not one of them.
 	// A custom provider's Gemini API comes after the others it has.
-	if p.FactoryGemini() || p.Gemini != "" {
+	// Vertex AI's, on generateContent alone, at its project.
+	if p.IsVertex() {
+		if p.vertexBase() != "" {
+			out = append(out, Gemini)
+		}
+	} else if p.FactoryGemini() || p.Gemini != "" {
 		out = append(out, Gemini)
 	}
 	return out
@@ -1285,8 +1357,15 @@ func Mask(s string) string {
 }
 
 // Ready reports whether the provider can be used: it has a key, needs
-// none, or is a signed-in agent.
-func (p Provider) Ready() bool { return p.Account != nil || p.Key != "" || keyOptional(p) }
+// none, is a signed-in agent, or is Vertex AI at a project (whose
+// credentials are read when a request is signed).
+func (p Provider) Ready() bool {
+	if p.IsVertex() {
+		// signed with a Google token, at the address its project makes
+		return p.vertexBase() != ""
+	}
+	return p.Account != nil || p.Key != "" || keyOptional(p)
+}
 
 // On is whether the provider takes requests: ready, and not switched off.
 func (p Provider) On() bool { return p.Ready() && !p.Off }

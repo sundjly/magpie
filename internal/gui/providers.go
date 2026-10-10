@@ -119,6 +119,10 @@ type providerJSON struct {
 	// read with (provider.TakesVolcAccessKey): whether the provider takes
 	// one, its ID, and whether a Secret is saved; never the Secret itself
 	AccessKey *accessKeyJSON `json:"accessKey,omitempty"`
+	// a Google Vertex AI provider's project, location and Google
+	// credentials, which it is asked with in place of a key: set for it
+	// alone, which the editor asks them of
+	Vertex *provider.Vertex `json:"vertex,omitempty"`
 	// ModelTest is why its models can't each be sent a test request, ""
 	// when they can (provider.ModelTest): the editor says so on a chip's
 	// right-click rather than offer no menu
@@ -312,6 +316,9 @@ type presetJSON struct {
 	// AccessKey: a Volcengine Ark plan, whose windows are read with the
 	// account's access key, which the editor offers to take
 	AccessKey bool `json:"accessKey,omitempty"`
+	// Vertex: it is Google Vertex AI, whose editor asks for a Google Cloud
+	// project and the Google credentials to sign with, not a key
+	Vertex bool `json:"vertex,omitempty"`
 	// a partner's tagline by language, and the languages it is listed in
 	Notes map[string]string `json:"notes,omitempty"`
 	Langs []string          `json:"langs,omitempty"`
@@ -451,7 +458,7 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), TestsAs: p.TestClients(), DecideTest: p.AsksDecideModels(),
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
 		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, Headers: p.Headers, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
-		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
+		Ready: p.Ready(), Chosen: p.Picks(), Models: []modelJSON{}, Agents: []providerAgent{},
 		Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Unlisted: p.Unlisted, Off: p.Off, Contexts: p.Contexts,
 		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(), PriceRate: p.PriceRate,
 		AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM,
@@ -476,6 +483,12 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	}
 	if provider.TakesVolcAccessKey(p) || p.AccessKeyID != "" || p.SecretAccessKey != "" {
 		out.AccessKey = &accessKeyJSON{ID: p.AccessKeyID, SecretSet: p.SecretAccessKey != ""}
+	}
+	if p.IsVertex() {
+		out.Vertex = &provider.Vertex{}
+		if p.Vertex != nil {
+			*out.Vertex = *p.Vertex
+		}
 	}
 	if site := provider.StepFunSite(p); site != "" {
 		out.StepPlan = &stepPlanJSON{site, provider.StepFunSignedIn(site), provider.StepFunSignInURL(site), provider.StepFunBookmarklet()}
@@ -699,7 +712,7 @@ func providersState() providersJSON {
 	for _, pr := range provider.Presets() {
 		bases := provider.Provider{Chat: pr.Chat, Responses: pr.Responses, Anthropic: pr.Anthropic}
 		team := provider.TakesZhipuTeam(bases)
-		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID], ZhipuTeam: team, AccessKey: provider.TakesVolcAccessKey(bases)})
+		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID], ZhipuTeam: team, AccessKey: provider.TakesVolcAccessKey(bases), Vertex: pr.ID == provider.VertexPreset})
 	}
 	cat := provider.Catalog()
 	s.Gateway = gatewayJSON{URL: gateway.URL(), OnNetwork: gateway.OnNetwork(), Models: len(cat), Calls: []gateway.Call{}, Groups: []gwGroupJSON{}}
@@ -1064,6 +1077,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				pr.Key, pr.Models, pr.Fallback, pr.Headers, pr.BalanceToken, pr.Contexts = in.Key, in.Models, in.Fallback, in.Headers, in.BalanceToken, in.Contexts
 				pr.ZhipuTeam = in.ZhipuTeam
 				pr.SecretAccessKey = in.SecretAccessKey
+				pr.Vertex = in.Vertex
 				pr.Searches = in.Searches
 				pr.PinUpstream = in.PinUpstream
 				pr.Unredacted = in.Unredacted
@@ -1210,6 +1224,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				if in.SecretAccessKey == "" && old != nil && !req.ClearAccessKey {
 					in.SecretAccessKey = old.SecretAccessKey
 				}
+				// and a Vertex AI provider's project and credentials
+				if in.Vertex == nil && old != nil {
+					in.Vertex = old.Vertex
+				}
 				if in.Key == "" && old != nil {
 					in.Key = old.Key
 				}
@@ -1310,7 +1328,18 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 		case "key":
 			// the saved key, for the editor's Show button; it never
-			// leaves this machine (the panel is served on loopback)
+			// leaves this machine (the panel is served on loopback).
+			// With Account, the key of that id: each of several keys'
+			// rows copies its own (#1480).
+			if req.Account != "" {
+				k, err := provider.KeyOf(in.ID, req.Account)
+				if err != nil {
+					fail(rw, err)
+					return
+				}
+				writeJSON(rw, map[string]string{"key": k})
+				return
+			}
 			p, err := provider.Find(in.ID)
 			if err != nil {
 				fail(rw, err)
@@ -1862,10 +1891,15 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 // Refresh and Test models before a Save: a key pasted to replace the saved
 // one is the one asked with, and the URLs, headers and proxy typed are
 // where and how. Nothing is saved. What the form left blank (the key above
-// all) is the saved one's; the provider's other keys are kept.
+// all) is the saved one's; the provider's other keys are kept. A Vertex AI
+// provider's project, location, credentials file and service account are
+// the ones typed, spelled as a Save keeps them, unless no project is.
 func typed(p, in provider.Provider, proxy *string) provider.Provider {
 	if k := strings.TrimSpace(in.Key); k != "" && k != p.Key {
 		p.Key, p.KeyName, p.KeyProtocol, p.KeyWeight = k, "", "", 0
+	}
+	if v := in.Vertex.Normal(); v != nil && p.IsVertex() && v.Project != "" {
+		p.Vertex = v
 	}
 	for _, f := range []struct {
 		to *string

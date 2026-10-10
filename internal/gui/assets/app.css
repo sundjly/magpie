@@ -2141,6 +2141,29 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .proto-menu .pm-words { display: grid; gap: 1px; min-width: 0; }
 .proto-menu .pm-name { font-size: 12.5px; font-weight: 500; line-height: 16px; }
 .proto-menu .pm-note { font-size: 11px; color: var(--muted); line-height: 15px; }
+/* Usage's days of the reader's own (#1492): the periods' last opt, and the
+   menu it opens, a few spans and a month of days */
+.range-opt { display: inline-flex; align-items: center; gap: 5px; }
+.range-opt svg { flex: none; }
+.pop.proto-menu.range-menu { width: 252px; max-height: none; display: block; padding: 4px 6px 8px; }
+.range-menu .rm-quick { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 2px 6px; border-bottom: 1px solid var(--line-2); }
+.range-menu .rm-span { height: 22px; padding: 0 8px; border-radius: 6px; background: var(--pill); color: var(--fg-2); font-size: 11.5px; }
+.range-menu .rm-span:hover, .range-menu .rm-span:focus-visible { color: var(--fg); }
+.range-menu .rm-span.on { color: var(--fg); background: color-mix(in srgb, var(--accent) 18%, var(--pill)); }
+.range-menu .rm-nav { display: flex; align-items: center; justify-content: space-between; padding: 6px 2px 4px; }
+.range-menu .rm-month { font-size: 12.5px; font-weight: 600; }
+.range-menu .rm-step { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--muted); }
+.range-menu .rm-step:hover:not(:disabled) { background: var(--pill); color: var(--fg); }
+.range-menu .rm-step:disabled { opacity: .35; }
+.range-menu .rm-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px 0; }
+.range-menu .rm-wd { height: 20px; display: grid; place-items: center; font-size: 10.5px; color: var(--faint); }
+.range-menu .rm-day { height: 28px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--fg); border-radius: 7px; outline: none; }
+.range-menu .rm-day:hover:not(:disabled), .range-menu .rm-day:focus-visible { background: var(--pill); }
+.range-menu .rm-day.today { font-weight: 650; color: var(--accent); }
+.range-menu .rm-day.in { background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 0; }
+.range-menu .rm-day.end { background: var(--accent); color: var(--accent-fg, #fff); }
+.range-menu .rm-day:disabled { color: var(--faint); opacity: .5; }
+@media (max-width: 640px) { .range-opt:not(.on) > span { display: none; } }
 /* a subscription's allowance, under its name */
 .accts .acc.with-aq { flex-wrap: wrap; row-gap: 3px; padding-top: 7px; padding-bottom: 8px; }
 .acc .aq { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding-left: 25px; font-size: 10.5px; color: var(--muted); min-height: 14px; }
@@ -2902,6 +2925,33 @@ body.panel .modal { padding: 16px 12px; }
   body.web .pop { max-width: calc(100vw - 16px); max-height: calc(100% - 16px); }
   body.web .pop .picker-body { min-height: 0; }
   body.web .pop #list li { min-height: 44px; }
+  /* A row's trailing pills go to a second line on a phone rather than
+     squeeze its name to a letter or push its switch out of the card
+     (zaidu259434 on X): the empty ::after is the line break. */
+  body.web :is(.row.provider, .row.model, .row.gw, .call)::after { content: ""; order: 1; flex-basis: 100%; }
+  body.web :is(.row.provider, .row.model) { flex-wrap: wrap; row-gap: 3px; }
+  body.web :is(.row.provider, .row.model) > .who { flex: 1 1 0; }
+  body.web .row.provider > .key { order: 2; margin-left: 37px; }
+  body.web .row.provider.off > .key { margin-left: 27px; }
+  body.web .row.provider > .uses { order: 3; }
+  body.web .row.model > .minfo { order: 2; margin-left: 0; flex-wrap: wrap; }
+  body.web .row.gw { flex-wrap: wrap; }
+  body.web .row.gw > .who { flex: 1 1 0; min-width: 0; }
+  body.web .row.gw .sub { white-space: normal; }
+  body.web .row.gw > .url { order: 2; margin-left: 17px; max-width: calc(100% - 17px); }
+  body.web .call { flex-wrap: wrap; height: auto; min-height: 24px; padding: 3px 6px; }
+  body.web .call > .m { order: 2; margin-left: 20px; min-width: 0; }
+  body.web .call > .p { order: 3; }
+  body.web .call > .st { max-width: none; }
+  /* a key's or account's own buttons follow its name on a line of their own */
+  body.web .acc { flex-wrap: wrap; row-gap: 4px; }
+  body.web .acc > .grow { flex: 1 0 100%; height: 0; margin: -2px 0; }
+  body.web .acc > .grow + * { margin-left: auto; }
+  /* nothing hovers on a phone: what a row shows on hover is shown, and a
+     key's row gives it back the room it folds away till a hover (#841) */
+  body.web .acc :is(.text.quiet, .proto, .amodels, .alane) { opacity: 1; }
+  body.web .accts.keys .acc > :is(.amodels, .proto, .alane, .text.quiet) { max-width: none !important; padding: 0 7px !important; flex-shrink: 0 !important; }
+  body.web .accts.keys .acc > .alane:not(.set) { margin-left: 0 !important; }
 }
 
 /* Import from other apps: a checklist per app */

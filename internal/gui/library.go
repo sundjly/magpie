@@ -29,14 +29,23 @@ type libraryJSON struct {
 	Problems []library.Problem `json:"problems,omitempty"`
 }
 
-func libraryView(res *library.Result) (libraryJSON, error) {
+func libraryView(res *library.Result) (libraryJSON, error) { return libraryRead(res, false) }
+
+// libraryRead is libraryView, or with glance the page but for what takes
+// reading the agents' skill folders through (library.Glance), for the
+// page to show at once while the rest is read (#541).
+func libraryRead(res *library.Result, glance bool) (libraryJSON, error) {
 	lastProblems.Lock()
 	if res != nil {
 		lastProblems.p = res.Problems
 	}
 	p := lastProblems.p
 	lastProblems.Unlock()
-	v, err := library.Read(p)
+	read := library.Read
+	if glance {
+		read = library.Glance
+	}
+	v, err := read(p)
 	home, _ := os.UserHomeDir()
 	return libraryJSON{View: v, Result: res, Home: home, Problems: p}, err
 }
@@ -88,7 +97,7 @@ func revealable(v *library.View) []string {
 
 func libraryRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("GET /api/library", func(rw http.ResponseWriter, r *http.Request) {
-		v, err := libraryView(nil)
+		v, err := libraryRead(nil, r.URL.Query().Get("glance") == "1")
 		if err != nil {
 			fail(rw, err)
 			return

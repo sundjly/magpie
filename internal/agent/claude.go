@@ -86,9 +86,10 @@ const claudeEffortEnv = "CLAUDE_CODE_EFFORT_LEVEL"
 var claudeNameRe = regexp.MustCompile(`claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:[^0-9]|$)`)
 
 // claudeName is the Claude model a model id names, "" for another vendor's,
-// an alias (opus) or none.
+// an alias (opus) or none. A version written with a dot (claude-opus-4.6)
+// is the one Claude Code is given with dashes (provider.ClaudeSpelled).
 func claudeName(model string) string {
-	m := claudeNameRe.FindStringSubmatch(strings.ToLower(model))
+	m := claudeNameRe.FindStringSubmatch(strings.ToLower(provider.ClaudeDashed(model)))
 	if m == nil {
 		return ""
 	}
@@ -232,7 +233,8 @@ func claudeCapabilities(first []string, own, desktop bool) string {
 	type seg struct{ id, caps string }
 	var segs []seg
 	add := func(id string, levels []string) {
-		id = strings.ToLower(strings.TrimSuffix(id, "[1m]"))
+		// as Claude Code is given it (provider.ClaudeSpelled)
+		id = strings.ToLower(strings.TrimSuffix(provider.ClaudeSpelled(id), "[1m]"))
 		if id == "" || strings.ContainsAny(id, ";=,") || strings.HasSuffix(id, "*") {
 			return
 		}
@@ -257,7 +259,9 @@ func claudeCapabilities(first []string, own, desktop bool) string {
 		}
 	}
 	rank := func(s seg) int {
-		if slices.ContainsFunc(first, func(f string) bool { return strings.ToLower(strings.TrimSuffix(f, "[1m]")) == s.id }) {
+		if slices.ContainsFunc(first, func(f string) bool {
+			return strings.ToLower(strings.TrimSuffix(provider.ClaudeSpelled(f), "[1m]")) == s.id
+		}) {
 			return 0
 		}
 		return 1
@@ -353,6 +357,14 @@ func claudeLight(main string) string {
 
 func tierEnv(tier string) string { return "ANTHROPIC_DEFAULT_" + strings.ToUpper(tier) + "_MODEL" }
 
+// claudeModelEnv are the keys of Claude Code's env that name a model, each
+// written as Claude Code is given it (provider.ClaudeSpelled).
+var claudeModelEnv = []string{
+	"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
+	"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+}
+
 // claudeSameModel says two of a tier's models as written are one model,
 // whatever effort each is fixed at and however its 1M is marked: what the
 // env says about the one is about the other.
@@ -418,7 +430,19 @@ func claude(home string) *Agent { return claudeIn(here(home)) }
 // reaches it from there.
 func claudeIn(at place) *Agent {
 	path := filepath.Join(at.home, ".claude", "settings.json")
-	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return v }
+	// a model in the env is read as magpie serves it, its dashed spelling
+	// taken back (claudeModelEnv)
+	rawEnv := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return v }
+	env := func(k string) string {
+		v := rawEnv(k)
+		if contains(claudeModelEnv, k) {
+			v = provider.ClaudeRead(v)
+		}
+		return v
+	}
+	// spell is a model of magpie's as Claude Code is given it: a dotted
+	// Claude version dashed, which it would read as Claude Opus 4
+	spell := provider.ClaudeSpelled
 	model := jsonGet(path, "model")
 	routed := func() bool { return env("ANTHROPIC_BASE_URL") == at.gw() }
 	// the main model while routed: settings.json's model, which Claude
@@ -644,7 +668,7 @@ func claudeIn(at place) *Agent {
 			if o.Group == RoutingGroups {
 				continue
 			}
-			rows = append(rows, map[string]any{"model": mark1M(o.Value), "label": cmp.Or(o.Label, o.Value), "description": o.Note})
+			rows = append(rows, map[string]any{"model": spell(mark1M(o.Value)), "label": cmp.Or(o.Label, o.Value), "description": o.Note})
 		}
 		if len(rows) == 0 {
 			return dropPicker()
@@ -846,7 +870,8 @@ func claudeIn(at place) *Agent {
 						at.key("claude.auth_token"): env("ANTHROPIC_AUTH_TOKEN"),
 					}
 					for _, k := range claudeOwnEnv {
-						kept[at.key("claude.env."+k)] = env(k)
+						// as the user wrote it, never respelled
+						kept[at.key("claude.env."+k)] = rawEnv(k)
 					}
 					stash(kept)
 				}
@@ -886,7 +911,7 @@ func claudeIn(at place) *Agent {
 			}
 			// so do subagents that follow it at an effort of their own
 			if m, e := subagentAt(); routed() && m == "" && e != "" {
-				if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: tierWith(v, e)}); err != nil {
+				if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: spell(tierWith(v, e))}); err != nil {
 					return err
 				}
 			}
@@ -934,8 +959,8 @@ func claudeIn(at place) *Agent {
 		kvs := []edit.KV{
 			{Path: "env.ANTHROPIC_BASE_URL", Value: at.gw()},
 			{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: wiredKey()},
-			{Path: "env.ANTHROPIC_SMALL_FAST_MODEL", Value: tiers["haiku"]},
-			{Path: "model", Value: main},
+			{Path: "env.ANTHROPIC_SMALL_FAST_MODEL", Value: spell(tiers["haiku"])},
+			{Path: "model", Value: spell(main)},
 		}
 		// a tier on no model is left out, for Claude Code's own (fable on
 		// a Claude model, follow)
@@ -945,7 +970,7 @@ func claudeIn(at place) *Agent {
 				none = append(none, "env."+tierEnv(t))
 				continue
 			}
-			kvs = append(kvs, edit.KV{Path: "env." + tierEnv(t), Value: tiers[t]})
+			kvs = append(kvs, edit.KV{Path: "env." + tierEnv(t), Value: spell(tiers[t])})
 		}
 		if len(none) > 0 {
 			if err := edit.DelJSON(path, none...); err != nil {
@@ -953,7 +978,7 @@ func claudeIn(at place) *Agent {
 			}
 		}
 		if sub != "" {
-			kvs = append(kvs, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: mark(sub)})
+			kvs = append(kvs, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: spell(mark(sub))})
 		} else if err := edit.DelJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL"); err != nil {
 			return err
 		}
@@ -1187,7 +1212,7 @@ func claudeIn(at place) *Agent {
 			if err := edit.DelJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL"); err != nil {
 				return err
 			}
-		} else if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: tierWith(cmp.Or(model, mainModel()), effort)}); err != nil {
+		} else if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: spell(tierWith(cmp.Or(model, mainModel()), effort))}); err != nil {
 			return err
 		}
 		return writeTiers(curTiers())
@@ -1355,6 +1380,18 @@ func claudeIn(at place) *Agent {
 				if err := dropAbout(nil); err != nil {
 					return err
 				}
+			}
+			// a model of magpie's an older magpie wrote with a dotted Claude
+			// version goes in as Claude Code is given it now (spell)
+			raw := []string{jsonGet(path, "model")()}
+			for _, k := range claudeModelEnv {
+				raw = append(raw, rawEnv(k))
+			}
+			if slices.ContainsFunc(raw, func(v string) bool {
+				m, _ := tierAt(provider.ClaudeRead(v))
+				return v != "" && isMagpie(m) && spell(provider.ClaudeRead(v)) != v
+			}) {
+				return writeTiers(curTiers())
 			}
 			models := []string{mainModel()}
 			tiers := map[string]string{}
@@ -1701,9 +1738,10 @@ func claudeOwnCompact(path, model string) bool {
 	if json.Unmarshal([]byte(raw), &per) != nil {
 		return false
 	}
-	model = strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(model, "magpie/"), "[1m]"))
+	// Claude Code keys it by the model as it was given it (ClaudeSpelled)
+	model = strings.ToLower(provider.ClaudeDashed(strings.TrimSuffix(strings.TrimPrefix(model, "magpie/"), "[1m]")))
 	for k, v := range per {
-		if v.Window != nil && strings.ToLower(strings.TrimSuffix(k, "[1m]")) == model {
+		if v.Window != nil && strings.ToLower(provider.ClaudeDashed(strings.TrimSuffix(k, "[1m]"))) == model {
 			return true
 		}
 	}
@@ -1834,7 +1872,7 @@ func claudeStandIn(path, model string) string { return claudeStandInAt(path, mod
 // claudeStandInAt is claudeStandIn for a Claude Code that reaches the
 // gateway at gw.
 func claudeStandInAt(path, model, gw string) string {
-	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return v }
+	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return provider.ClaudeRead(v) }
 	if env("ANTHROPIC_BASE_URL") != gw {
 		return ""
 	}
@@ -1879,6 +1917,6 @@ func claudeMain(path string) string {
 	if m == "" {
 		m = env(tierEnv("sonnet"))
 	}
-	m, _ = tierAt(m)
+	m, _ = tierAt(provider.ClaudeRead(m))
 	return m
 }

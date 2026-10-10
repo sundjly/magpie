@@ -125,6 +125,7 @@ line; agents connected to magpie lose it when it quits.
 | Grok Build   | `~/.grok/config.toml` (`$GROK_HOME`) | model, effort |
 | ZCode        | `~/.zcode/v2/config.json`         | provider (magpie's models in ZCode's picker) |
 | WorkBuddy    | `~/.workbuddy/models.json` (`$WORKBUDDY_CONFIG_DIR`) | provider (magpie's models in WorkBuddy's picker) |
+| WorkBuddy AI | `~/.workbuddy-ai/models.json` (the international build) | provider (magpie's models in WorkBuddy AI's picker) |
 | CodeBuddy Code | `~/.codebuddy/models.json` (`$CODEBUDDY_CONFIG_DIR`), `settings.json` | model (magpie's models in its list; the session model) |
 | T3 Code      | `~/.t3/userdata/settings.json` (`$T3CODE_HOME/userdata`) | provider (a `magpie` provider instance on Claude Code, magpie's models as its custom models) |
 | OpenHanako   | `~/.hanako/provider-catalog.json` + `agents/<id>/config.yaml` (`$HANA_HOME`; its local API while it runs) | model (the primary agent's; magpie's models as a provider) |
@@ -535,6 +536,109 @@ first day, `qianfan-token-plan`, is taken too. The plans serve no model list,
 so the preset carries their documented models; pay as you go serves its own
 at `/v2/models`.
 
+Alibaba's Token Plan is sold in two places, each with its own `sk-sp-` key
+that only its own host takes: on the Qwen AI platform as `qwen-token-plan`
+(`token-plan.maas.qianwenaiapi.com`), and on Alibaba Cloud Bailian as
+`bailian-token-plan` (`token-plan.cn-beijing.maas.aliyuncs.com`). Both serve
+Chat Completions at `/compatible-mode/v1` and Anthropic Messages at
+`/apps/anthropic`, and carry the plans' documented text models for when the
+host lists none. Bailian's also answers its decision model,
+`decision-model-preview`, on System One at `/compatible-mode/v1/systemone`
+with the same key, so a routing group can pick it as its classifier. The
+same model on the Qwen AI platform's pay as you go is `qwen-decision`
+(`maas.qianwenaiapi.com`), and on a Bailian workspace `bailian-decision`.
+Neither plan has an API for its credits: the console's subscription page
+shows them, so magpie shows no plan usage for these keys.
+
+### Google Vertex AI
+
+Google Vertex AI (`google-vertex`), which Google's documentation now calls
+Gemini Enterprise Agent Platform, serves Google's Gemini models from your own
+Google Cloud project, which is billed for them. It takes no API key: each
+request is signed with a token minted from your Google credentials. First turn
+on the Agent Platform API (`aiplatform.googleapis.com`) in the project (billing
+has to be on there), then sign in with `gcloud auth application-default login`
+or have a service account's key file
+([Google's guide](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/gcp-auth)).
+[Where magpie looks for the credentials, and the kinds it reads](subsystems/providers-accounts.md#responsibilities-and-sources-of-truth).
+
+```sh
+magpie provider add google-vertex project=my-project
+magpie provider set google-vertex location=us-central1        # global (the default), us, eu or a region
+magpie provider set google-vertex credentials=~/keys/vertex.json
+magpie provider set google-vertex impersonate=vertex@my-project.iam.gserviceaccount.com
+magpie provider set google-vertex impersonate=                # empty clears it
+magpie provider test google-vertex
+```
+
+`project=` is the project's id. `location=` is `global` (the default, and what
+an empty value goes back to), `us`, `eu` or a region such as `us-central1`.
+`credentials=` names a credentials file to sign with in place of gcloud's
+sign-in, such as a service account's key; a relative path is made full from
+the folder the command runs in. `impersonate=` has requests made as that
+service account; the account signed in needs the Service Account Token Creator
+role on it. The app's editor asks the same in **Project ID**,
+**Location**, **Credentials file** and **Service account**; the TUI's `a` asks
+for the project alone, and the CLI sets the rest. A key is refused, and so is
+an address (`url=` and the like): the project and location make the only one
+its token is sent to. Adding, listing and showing it ask Google nothing; the
+credentials are read when a request is signed.
+
+Each location serves models of its own, and Vertex AI has no list to ask which,
+so magpie gives each location the models it answered with on 2026-10-06:
+
+| Location | Models |
+| --- | --- |
+| `global` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
+| `us`, `eu` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` |
+| A region | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
+
+A region that serves one more, as asia-northeast1 serves `gemini-3.5-flash`,
+has it typed in with the rest you want:
+
+```sh
+magpie provider models google-vertex gemini-2.5-pro gemini-2.5-flash gemini-2.5-flash-lite gemini-3.5-flash
+magpie provider models google-vertex all     # back to the location's list
+```
+
+`magpie provider set google-vertex location=…` keeps the models picked, so pick
+again after a move.
+
+Google's [Priority PayGo](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/priority-paygo)
+and [Flex PayGo](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/flex-paygo)
+are asked for with request headers. The editor's **Headers** offers both,
+`X-Vertex-AI-LLM-Request-Type` and `X-Vertex-AI-LLM-Shared-Request-Type`, to
+add; their values are the ones Google's pages give. From the CLI:
+`magpie provider set google-vertex header.<Name>=<value>`. [What was seen of
+Priority PayGo](subsystems/providers-accounts.md#constraints-and-failure-behavior).
+
+When a request fails:
+
+- `no Google credentials at <file>`: there is no credentials file there. When
+  it is the provider's own, correct `credentials=`, or clear it with
+  `credentials=` alone; otherwise run `gcloud auth application-default login`,
+  or set `credentials=`.
+- `GOOGLE_APPLICATION_CREDENTIALS names <file>, which isn't there`, or
+  `GOOGLE_APPLICATION_CREDENTIALS is "…", not a full path` (`CLOUDSDK_CONFIG`
+  too): the variable names no file magpie can read, and gcloud's own isn't
+  read in its place. Give the whole path (a `~/` at its start is the home),
+  unset it, or set `credentials=`.
+- `the Google credentials in <file>: the sign-in was refused`, with the advice
+  to sign in again: the sign-in expired or was revoked. Run the command the
+  advice names for that file: `gcloud auth application-default login` (with
+  `--impersonate-service-account=` when the file impersonates one) for
+  gcloud's Application Default Credentials, `gcloud auth login <account>`
+  for a file under gcloud's `legacy_credentials`. A file of your own is
+  written anew, or another one given with `credentials=`. The next request
+  reads the new file, with no restart.
+- A 403 `PERMISSION_DENIED` naming `aiplatform.endpoints.predict`: the account
+  that signs, or the service account it goes as, may not use Vertex AI in the
+  project. Give it Agent Platform User (`roles/aiplatform.user`) on the project
+  ([the role](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/general/access-control#aiplatform.user)).
+- `impersonating …: the sign-in was refused (403)`: the account signed in
+  needs Service Account Token Creator (`roles/iam.serviceAccountTokenCreator`)
+  on that service account.
+
 ### Plugins
 
 A subscription magpie doesn't sign in to itself can come from an
@@ -720,6 +824,12 @@ The four numbers are USD per million tokens. All four are asked for, because
 a price missing one would understate the rest of every call; `0` is a model
 served at no cost, which is a price, not the absence of one. Decimals take a
 point or, in the app's boxes, a comma (`0,25`).
+
+A call to a model no price is known for is counted at the price of the model
+the reply said answered, at the same provider, when that one has a price: a
+relay that sells `kimi-k3` as `moonshot-kimi-k3` answers as `kimi-k3`, so its
+calls are counted at `relay-a/kimi-k3`'s price. A model with a price of its
+own, `0` included, keeps it whatever its reply says.
 
 A **Kimi Code** membership's models are counted at the Kimi API model each
 one is, not at the $0 models.dev lists them at for the plan: `k3` and
@@ -1273,6 +1383,28 @@ subscription account, plan and key that answered a request through the
 gateway in the last 30 days, and `last: true` on the latest. It is kept
 in `served.json` beside `providers.json`, so a restart keeps it.
 
+An app of your own can read the Usage page's numbers too.
+`GET /v1/magpie/usage?period=<today|week|month|all>` is the page's summary,
+the same JSON as the window's `/api/usage` (`path` is left out for another
+machine). `GET /v1/magpie/usage/requests` is its requests a page at a time
+(`offset`, `limit` up to 500), with the same filters as the Requests log:
+`period`, `day`, `agent`, `provider`, `model`, `account`, `callerKey`,
+`purpose`, `failed`, `q`, `via`, `computer`. What was said in a call is not
+in either. Like `/v1/magpie/quotas`, they answer this machine, and another
+only with a gateway key. A key held to a budget, to some models or to some
+accounts is told its own calls alone: `/v1/magpie/usage` refuses it with a
+403, and `/v1/magpie/usage/requests` keeps only its rows and filter lists.
+
+A row's `session` is the conversation it belongs to. A Claude Code
+subagent's call keeps its parent conversation there and adds `subagent`,
+its agent id (the `agentId` of its lines and its
+`<session>/subagents/agent-<id>.jsonl` file), and `parent_agent`: the
+subagent that started it (Claude Code's `x-claude-code-parent-agent-id`, or
+the `parentAgentId` of the subagent's `.meta.json`); none when the main
+conversation did.
+Records written before these fields came have neither. Codex's sub-agents are told
+apart by `kind` only.
+
 `magpie quota wait <provider|account>` blocks until that subscription (any
 of its accounts magpie has on) or that one account has allowance again — no
 window that stops it used up — then exits 0, so a long task stopped by its
@@ -1374,7 +1506,7 @@ you press *Add*. `magpie import <link>` does the same in a terminal.
 
 | Parameter   | Meaning                                                            |
 | ----------- | ------------------------------------------------------------------ |
-| `preset`    | a preset id (`magpie presets`); its endpoints are used             |
+| `preset`    | a preset id (`magpie presets`); its endpoints are used. Not `google-vertex`, which is asked at your own Google Cloud project |
 | `region`    | with a preset that has regions, which one                          |
 | `name`      | the provider's name; required without a preset                     |
 | `id`        | its id; derived from the name when absent                          |

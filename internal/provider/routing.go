@@ -520,6 +520,47 @@ func tellRenewed(agent, user string) {
 	}
 }
 
+// AwaitAllowance has agent's accounts read again unless a reading is out,
+// and waits, till ctx ends, for one that knows user: after a reset is
+// spent, routing then counts the account's windows started again, rather
+// than not known and behind the rest till a later request reads them
+// (#1491). A reading out already, begun before the reset, doesn't count
+// it, so another is asked for; three at most. It says whether user is
+// known now.
+func AwaitAllowance(ctx context.Context, agent, user string) bool {
+	c := &usedCache
+	knows := func() bool {
+		c.Lock()
+		defer c.Unlock()
+		for u := range c.m[agent] {
+			if strings.EqualFold(u, user) {
+				return true
+			}
+		}
+		return false
+	}
+	for range 3 {
+		Allowances(agent)
+		c.Lock()
+		done := c.loading[agent]
+		c.Unlock()
+		if done != nil {
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return knows()
+			}
+		}
+		if knows() {
+			return true
+		}
+		if done == nil {
+			return false // read lately, and user wasn't in it
+		}
+	}
+	return knows()
+}
+
 // forgetAllowance leaves agent's account user out of the allowances last
 // read, and has the next Allowances read them again.
 func forgetAllowance(agent, user string) {

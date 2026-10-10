@@ -10,6 +10,7 @@ package agent
 // like may name them as well (ompRefKeys); magpie stays while any does.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -337,6 +338,71 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			},
 		}
 	}
+	roles := []Field{
+		role("model", "model", "default", false),
+		// omp's own agents run on its roles (src/task/agents.ts,
+		// prompts/agents): task on @task; scout and sonic on @smol;
+		// reviewer on @slow, also the eval tool's "slow" tier. Unset,
+		// task gives its agent the parent session's model, and smol
+		// and slow take the default role's (model-resolver.ts,
+		// shouldInheritDefaultBeforePriority). The designer role went
+		// in omp 18.1.5. smol is labelled as omp names it: "small" is
+		// other agents' picker of its own
+		role("subagent", "subagents", "task", true),
+		role("small", "smol", "smol", true),
+		role("slow", "slow", "slow", true),
+		// plan mode's role (omp's "Architect"), images handed to a model
+		// that sees them, and the second opinion the advisor gives. Unset,
+		// omp picks for each from its own list; the advisor takes the slow
+		// role first (model-resolver.ts, ROLE_CONFIGURED_FALLBACK), never
+		// the default's (#1397)
+		role("plan", "plan", "plan", true),
+		role("vision", "vision", "vision", true),
+		role("advisor", "advisor", "advisor", true),
+	}
+	// each role but the default one has a thinking level of its own, the
+	// ":level" omp reads off the end of the role's model
+	// (splitThinkingSuffix, resolveModelRoleValue): #1397, the slow role at
+	// high while sessions start at medium. It is the role's value written
+	// again, so it goes through the role's own Set (magpie's provider, the
+	// stash). Offered while the role is one model: a role that follows
+	// another, or a list omp falls back through, has no level here. Unset,
+	// the role runs at the session's level
+	fields := []Field{roles[0]}
+	for _, r := range roles[1:] {
+		fields = append(fields, r, Field{
+			Key: r.Key + "_thinking", Label: r.Label + " thinking", Quiet: true,
+			Get: func() string {
+				if _, level, one := ompSplit(r.Get()); one {
+					return strings.TrimPrefix(level, ":")
+				}
+				return ""
+			},
+			Set: func(v string) error {
+				cur := r.Get()
+				model, _, one := ompSplit(cur)
+				if cur == "" || !one {
+					if v == "" {
+						return nil
+					}
+					return fmt.Errorf("omp's %s role is not on one model: pick its model first", r.Label)
+				}
+				if v != "" && v != "off" && v != "auto" && !slices.Contains(ompEfforts, v) {
+					return fmt.Errorf("%q is not one of omp's thinking levels", v)
+				}
+				if v != "" {
+					model += ":" + v
+				}
+				return r.Set(model)
+			},
+			Options: func(cur map[string]string) []Option {
+				if _, _, one := ompSplit(cur[r.Key]); cur[r.Key] == "" || !one {
+					return nil
+				}
+				return static(append([]string{"auto", "off"}, ompEfforts...)...)
+			},
+		})
+	}
 	return &Agent{
 		ID: "omp", Name: "omp", Icon: "omp", Aliases: []string{"oh-my-pi"}, Spelled: prefixed,
 		UA:  []string{"oh-my-pi"},
@@ -401,36 +467,22 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			return wiringOff("omp", models, func(k string) (string, bool) { return edit.GetYAML(models, "providers."+magpieID+"."+k) },
 				"baseUrl", at.v1())
 		},
-		Fields: []Field{
-			role("model", "model", "default", false),
-			// omp's own agents run on its roles (src/task/agents.ts,
-			// prompts/agents): task on @task; scout and sonic on @smol;
-			// reviewer on @slow, also the eval tool's "slow" tier. Unset,
-			// task gives its agent the parent session's model, and smol
-			// and slow take the default role's (model-resolver.ts,
-			// shouldInheritDefaultBeforePriority). The designer role went
-			// in omp 18.1.5. smol is labelled as omp names it: "small" is
-			// other agents' picker of its own
-			role("subagent", "subagents", "task", true),
-			role("small", "smol", "smol", true),
-			role("slow", "slow", "slow", true),
-			{
-				// the thinking level sessions start with, as omp's settings save
-				// it; unset omp takes high. auto has omp pick a level each turn:
-				// not a level a model lists, so it is offered here and kept out of
-				// ompEfforts, which a model's thinking levels are filtered by. First,
-				// as omp's own picker has it (16.3.5 and 18.4.4 alike)
-				Key: "effort", Label: "thinking",
-				Get: func() string { v, _ := edit.GetYAML(path, "defaultThinkingLevel"); return v },
-				Set: func(v string) error {
-					if v == "" {
-						return edit.DelYAML(path, "defaultThinkingLevel")
-					}
-					return edit.SetYAML(path, edit.KV{Path: "defaultThinkingLevel", Value: v})
-				},
-				Options: func(map[string]string) []Option { return static(append([]string{"auto"}, ompEfforts...)...) },
+		Fields: append(fields, Field{
+			// the thinking level sessions start with, as omp's settings save
+			// it; unset omp takes high. auto has omp pick a level each turn:
+			// not a level a model lists, so it is offered here and kept out of
+			// ompEfforts, which a model's thinking levels are filtered by. First,
+			// as omp's own picker has it (16.3.5 and 18.4.4 alike)
+			Key: "effort", Label: "thinking",
+			Get: func() string { v, _ := edit.GetYAML(path, "defaultThinkingLevel"); return v },
+			Set: func(v string) error {
+				if v == "" {
+					return edit.DelYAML(path, "defaultThinkingLevel")
+				}
+				return edit.SetYAML(path, edit.KV{Path: "defaultThinkingLevel", Value: v})
 			},
-		},
+			Options: func(map[string]string) []Option { return static(append([]string{"auto"}, ompEfforts...)...) },
+		}),
 	}
 }
 

@@ -926,7 +926,8 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 			if clineKeyCard(j.p) {
 				// ClinePass's limits beside the credits (cline_usage.go)
 				if ws, amount, err := clineKeyUsage(ctx, j.p); err != nil {
-					q.Error = err.Error()
+					// a balance read beside limits that weren't is kept
+					q.Error, q.Balance = err.Error(), amount
 				} else {
 					q.Windows = append(q.Windows, ws...)
 					q.Balance = amount

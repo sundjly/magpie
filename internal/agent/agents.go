@@ -121,6 +121,7 @@ func builtins(home, cfg string) []*Agent {
 		grok(home),
 		zcode(home),
 		workbuddy(home),
+		workbuddyAI(home),
 		codebuddy(home),
 		pencil(home),
 		t3code(home),

@@ -480,9 +480,14 @@ func codexIn(at place) *Agent {
 		}
 		return nil
 	}
+	// the user disconnected Codex and hasn't connected it since: magpie
+	// writes nothing of its own back (paynezhuang on Discord: the base URL
+	// was back after every update)
+	disconnected := func() bool { return stashLoad()[at.key("codex"+disconnectedKey)] == "1" }
 	// Codex on one of its own models goes through magpie too while more of
 	// its ChatGPT accounts are on there, so one out of its allowance hands
-	// the turn to the next; with none, it goes straight to OpenAI again
+	// the turn to the next; with none, or once the user disconnected Codex,
+	// it goes straight to OpenAI again
 	failover := func() error {
 		if wired() || asProvider() {
 			return nil
@@ -495,7 +500,7 @@ func codexIn(at place) *Agent {
 		if p != "" && p != "openai" && !mirror {
 			return nil
 		}
-		on := codexFailover()
+		on := !disconnected() && codexFailover()
 		if mirror {
 			t, _ := edit.GetTOMLTable(path, "model_providers."+p)
 			hasGateway := t["base_url"] == at.codexURL()
@@ -856,8 +861,9 @@ func codexIn(at place) *Agent {
 				return err
 			}
 			// magpie API on one of Codex's own models, as an older magpie
-			// left it unwired: wired again, as picking it does now (#701)
-			if m := get("model"); api() && !isMagpie(m) && !asProvider() && codexOwnViaMagpie(m) != "" {
+			// left it unwired: wired again, as picking it does now (#701);
+			// not one the user disconnected, which this left the same
+			if m := get("model"); api() && !disconnected() && !isMagpie(m) && !asProvider() && codexOwnViaMagpie(m) != "" {
 				return set(m)
 			}
 			// on a magpie model by the base URL alone with no ChatGPT

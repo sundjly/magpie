@@ -8,6 +8,7 @@
   if (!page) return;
 
   let lib = null;        // the page, as /api/library gives it
+  let taken = 0;         // how many times lib was set, for a read to tell a newer answer came first
   let tab = "instructions";
   let shown = "";        // the tab the page last drew, which fades in only when it changes
   let fits = [];         // textareas to fit before the page is painted
@@ -387,6 +388,7 @@
   function take(v) {
     const was = lib && shelf();
     lib = v;
+    taken++;
     for (const w of writing.values()) {
       const x = lib[w.list].find((y) => y.name === w.name);
       if (x) x.agents = w.want;
@@ -420,13 +422,35 @@
   // quiet is a read on coming back to the window: the page is drawn again
   // only when the library changed meanwhile, so a click that brings the
   // window forward doesn't redraw what it clicked on.
+  // The first read is a glance: the page but for the skills the agents
+  // have of their own and which copies are out of date, which take reading
+  // their skill folders through, and on a machine with many big skills
+  // that took minutes before anything showed (0day404, #541). It is drawn
+  // at once, and the whole page after it; only the Skills tab shows what
+  // the glance left out, so the others aren't drawn again for it.
   async function load(quiet) {
-    if (!lib) renderLoading();
+    let glanced = false;
+    if (!lib) {
+      renderLoading();
+      const at = taken;
+      try {
+        const g = await api("library?glance=1");
+        if (!lib && taken === at) {
+          take(g);
+          glanced = true;
+          render();
+        }
+      } catch {}
+    }
     try {
+      const at = taken;
       const v = await api("library");
+      // a change answered meanwhile, with the library as it is after it
+      if (taken !== at) return;
       const was = lib && seen(lib);
       take(v);
-      if (quiet === true && seen(lib) === was) return;
+      if (glanced && tab !== "skills") return;
+      if ((quiet === true || glanced) && seen(lib) === was) return;
       rtk = null; // asked again when its tab is drawn: an agent may have been installed since
       render();
     } catch (e) {
@@ -1307,9 +1331,10 @@
     if (skip.length) body.append(el("p", "lib-aside", t("{agents} has no MCP servers magpie can write.", { agents: skip.map((a) => a.name).join(", ") })));
     // WorkBuddy connects a server only once it is trusted there, again
     // after its command or address changes (#1266)
-    const wb = shownAgents().find((a) => a.id === "workbuddy" && a.mcp);
-    if (wb && lib.servers.some((s) => s.agents?.includes(wb.id))) {
-      body.append(el("p", "lib-aside lib-wb-trust", t("{agent} connects a server only once you trust it: switch it on in {agent}'s MCP settings, and again after its command or address changes.", { agent: wb.name })));
+    for (const wb of shownAgents().filter((a) => (a.id === "workbuddy" || a.id === "workbuddy-ai") && a.mcp)) {
+      if (lib.servers.some((s) => s.agents?.includes(wb.id))) {
+        body.append(el("p", "lib-aside lib-wb-trust", t("{agent} connects a server only once you trust it: switch it on in {agent}'s MCP settings, and again after its command or address changes.", { agent: wb.name })));
+      }
     }
     body.append(discover("mcp"));
   }
@@ -1841,7 +1866,13 @@
       if (picking) body.append(pickBar(all));
     }
     if (lib.newSkills?.length) renderNewSkills(body);
-    if (lib.foundSkills.length) {
+    // a glance hasn't looked through the agents' own skills yet (#541)
+    if (lib.partial) {
+      const rh = el("div", "row-head lib-found-wait");
+      rh.setAttribute("aria-busy", "true");
+      rh.append(el("span", "label", t("In your agents")), el("span", "grow"), el("span", "note", t("Looking through the agents' skill folders…")));
+      body.append(rh);
+    } else if (lib.foundSkills.length) {
       const rh = el("div", "row-head");
       rh.append(el("span", "label", t("In your agents")), el("span", "grow"), el("span", "note", t("not in the library — bring one in to give it to the others")));
       // every one at once, rather than a click for each

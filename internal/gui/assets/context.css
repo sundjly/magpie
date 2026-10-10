@@ -47,7 +47,7 @@ i.dot.free { background: var(--k-free); box-shadow: inset 0 0 0 1px color-mix(in
 .ctx-health.warn { background: var(--amber-soft); color: var(--amber); }
 .ctx-health.bad { background: var(--red-soft); color: var(--red); }
 .ctx-bar { position: relative; display: block; height: 6px; border-radius: 3px; background: var(--k-free); overflow: hidden; }
-.ctx-bar i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--green); transform-origin: left; animation: ctx-grow .7s var(--ease, ease) both; }
+.ctx-bar i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--green); transform-origin: left; animation: ctx-grow .7s var(--ease, ease) backwards; }
 .ctx-cache .ctx-bar { margin: 3px 0 2px; }
 .ctx-cache .ctx-bar i { transition: width .3s var(--ease, ease); }
 /* under way: the last request's cache, dimmed till this one's comes */
@@ -64,7 +64,7 @@ i.dot.free { background: var(--k-free); box-shadow: inset 0 0 0 1px color-mix(in
 .ctx-waffle { display: grid; grid-template-columns: repeat(50, minmax(0, 1fr)); gap: 2px; }
 /* a card 520px wide or less (context.js sets max520 by its width) */
 :where(.ctx-card.max520) .ctx-waffle { grid-template-columns: repeat(25, minmax(0, 1fr)); }
-.ctx-waffle > i { aspect-ratio: 1; border-radius: 2px; background: var(--k, var(--k-free)); transition: opacity .16s, transform .16s; animation: ctx-cell .32s var(--ease, ease) both; animation-delay: var(--d, 0ms); }
+.ctx-waffle > i { aspect-ratio: 1; border-radius: 2px; background: var(--k, var(--k-free)); transition: opacity .16s, transform .16s; animation: ctx-cell .32s var(--ease, ease) backwards; animation-delay: var(--d, 0ms); }
 .ctx-waffle > i.free { --k: var(--k-free); }
 @keyframes ctx-cell { from { opacity: 0; transform: scale(.4); } }
 .ctx-waffle[data-f] > i { opacity: .16; }
@@ -163,7 +163,7 @@ i.dot.free { background: var(--k-free); box-shadow: inset 0 0 0 1px color-mix(in
 .ctx-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
 .ctx-ring circle { fill: none; stroke-width: 5; stroke-linecap: round; }
 .ctx-ring .track { stroke: var(--k-free); }
-.ctx-ring .arc { stroke: var(--tone); stroke-dashoffset: var(--to); animation: ctx-arc .9s var(--ease, ease) both; }
+.ctx-ring .arc { stroke: var(--tone); stroke-dashoffset: var(--to); animation: ctx-arc .9s var(--ease, ease) backwards; }
 .ctx-pane.still .ctx-waffle > i, .ctx-pane.still .ctx-bar i, .ctx-pane.still .ctx-ring .arc { animation: none; }
 @keyframes ctx-arc { from { stroke-dashoffset: 163.36; } }
 .ctx-ring b { position: absolute; inset: 0; display: grid; place-items: center; font-size: 16px; font-weight: 650; letter-spacing: -.02em; }
@@ -271,10 +271,10 @@ i.dot.free { background: var(--k-free); box-shadow: inset 0 0 0 1px color-mix(in
 .ctx-tune-chart .cool { stop-color: var(--red); stop-opacity: .02; }
 .ctx-tune-chart .level { stroke: var(--green); stroke-width: 1; stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; opacity: .7; }
 .ctx-tune-chart .line { fill: none; stroke: var(--red); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-.ctx-tc-plot svg { animation: ctx-draw 1s var(--ease, ease) both; }
+.ctx-tc-plot svg { animation: ctx-draw 1s var(--ease, ease) backwards; }
 @keyframes ctx-draw { from { clip-path: inset(-20px 100% -20px 0); } to { clip-path: inset(-20px 0 -20px 0); } }
 @keyframes ctx-pop { from { opacity: 0; transform: scale(.4); } }
-.ctx-tc-dot { animation: ctx-pop .35s .8s var(--ease, ease) both; }
+.ctx-tc-dot { animation: ctx-pop .35s .8s var(--ease, ease) backwards; }
 .ctx-tc-dot { position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; border: 2px solid var(--card); box-sizing: border-box; }
 .ctx-tc-dot.now { background: var(--red); box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 22%, transparent); width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; }
 .ctx-tc-dot.worst { background: color-mix(in srgb, var(--red) 55%, var(--card)); }

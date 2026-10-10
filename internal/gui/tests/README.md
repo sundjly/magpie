@@ -547,6 +547,14 @@ each language), with the story telling whose share went first, while keys
 under Smart keep Smart's chip and the keys' own mode line. It runs in
 English, Chinese, Japanese and German on Chromium and WebKit.
 
+`routing-mode-goes.test.cjs` checks where the stage's routing chip leads
+(xczzhh on X: it always said Smart and nothing changed it). With one key
+on, the chip and the Accounts and keys heading name no routing and the mode
+paragraph says how to get one. With a provider over two keys, the chip and
+the heading are a way to its row under Several accounts or keys: a click
+or Enter brings it into view, marks it and focuses its routing. It runs in
+every language on Chromium and WebKit, at 1100px and 420px.
+
 `balance-fix.test.cjs` opens a custom provider whose balance token sits
 beside new-api's `/api/usage/token` (and a new one with a token and no
 Balance URL): the editor says so, one click moves it to `/api/user/self`

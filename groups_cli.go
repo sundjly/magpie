@@ -38,6 +38,13 @@ const groupUsage = `usage:
                                           (as clicking it on the group's card in the Routing view does)
   magpie group copy <id> [name]           duplicate a group with its models, routing and rules, listed after it
                                           (name: "<its name> copy" when left out; also: magpie group duplicate)
+  magpie group template [kind] [name]     a group for a common need, made of your own models in one go; without
+                                          a kind, lists them and the models each would take: smart (hard turns
+                                          to the strongest model, easy ones to a cheap one, a classifier telling
+                                          them apart), thrifty (a cheap model first, the strongest for high
+                                          reasoning or when the cheap ones fail), steady (the strongest model of
+                                          each of up to three providers, each behind the other). A name or id in
+                                          use is numbered, never replaced
   magpie group rm <id>…                   remove groups (one magpie found is hidden instead)
   magpie group restore <id>               bring back a group magpie found that you removed
   magpie group auto [on|off]              whether magpie finds groups on its own (on by default); off, none is
@@ -608,6 +615,8 @@ func groupCmd(args []string) error {
 		}
 		fmt.Println(green.Render("✓"), "copied", bold.Render(src.Name), "to", bold.Render(g.Name), muted.Render("· agents pick it as "+provider.GroupPrefix+g.ID))
 		return showGroup(g)
+	case "template", "templates", "tpl":
+		return templateCmd(rest)
 	case "rule", "rules":
 		return ruleCmd(rest)
 	case "show":
@@ -1082,4 +1091,36 @@ func whyNotServed(member string) string {
 		return "not served: not exposed · magpie provider models " + p.ID + " +" + model
 	}
 	return "not served"
+}
+
+// templateCmd: magpie group template [kind] [name] (provider.Templates):
+// each template and the models it would take, or one of them added.
+func templateCmd(rest []string) error {
+	if len(rest) == 0 {
+		for _, tp := range provider.Templates() {
+			fmt.Println(bold.Render(tp.Kind), muted.Render("· "+provider.TemplateNames[tp.Kind]))
+			if tp.Why != "" {
+				fmt.Println("  " + muted.Render("can't be made: "+tp.Why))
+				continue
+			}
+			fmt.Println("  " + strings.Join(tp.Group.Members, " → "))
+			if tp.Group.Classifier != "" {
+				fmt.Println("  " + muted.Render("classifier "+tp.Group.Classifier))
+			}
+		}
+		fmt.Println(muted.Render("magpie group template <kind> [name] adds one"))
+		return nil
+	}
+	kind := strings.ToLower(rest[0])
+	for k, id := range provider.TemplateIDs {
+		if kind == id {
+			kind = k
+		}
+	}
+	g, err := provider.AddTemplate(kind, strings.Join(rest[1:], " "))
+	if err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), "added", bold.Render(g.Name), muted.Render("· agents pick it as "+provider.GroupPrefix+g.ID))
+	return showGroup(g)
 }

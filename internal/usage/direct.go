@@ -28,9 +28,8 @@ func Summaries(p Period) (Summary, Summary) {
 
 func direct(p Period, now time.Time, rows []Row) Summary {
 	s := Summary{Period: p, Since: p.Since(now), Bucket: "day", Agents: []Group{}, Models: []Group{}, ProviderKeys: []Group{}, Accounts: []Group{}, CallerKeys: []Group{}, Sessions: []Group{}, Series: []Point{}}
-	if p != Today && p != Week && p != Month {
-		s.Period = All
-	}
+	s.Period = p.shown()
+	until := p.Until(now)
 	agents, models, accounts, sessions := map[string]*Group{}, map[string]*Group{}, map[string]*Group{}, map[string]*Group{}
 	put := func(m map[string]*Group, k string, g Group, r Row) {
 		if m[k] == nil {
@@ -39,7 +38,7 @@ func direct(p Period, now time.Time, rows []Row) Summary {
 		m[k].addRow(r)
 	}
 	for _, r := range rows {
-		if r.Source != "log" || r.IsRejected() || r.Time.Before(s.Since) {
+		if r.Source != "log" || r.IsRejected() || r.Time.Before(s.Since) || after(until, r.Time) {
 			continue
 		}
 		s.Totals.addRow(r)

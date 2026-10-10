@@ -5,6 +5,7 @@ package proc
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -159,6 +160,14 @@ func npmPrefix(home string) string {
 // shellEnv asks the user's login shell for its PATH and the values it has
 // for agentenv.Vars ("" for one it hasn't); "" and nil when it can't say
 // within a few seconds.
+//
+// fish and nushell are asked too, when they are installed and set up here
+// but aren't the login shell: they aren't POSIX shells, so many keep zsh or
+// bash as the login shell and have the terminal open fish instead (its
+// profile setting, or exec fish from .zshrc). An agent installed in a folder
+// only config.fish adds wasn't found (John on Discord: 二进制文件没有从用户环境变量
+// 找到，我终端环境使用的fish). Their PATH comes after the login shell's, and
+// a variable the login shell leaves empty is taken from them.
 func shellEnv() (string, map[string]string) {
 	sh := os.Getenv("SHELL")
 	if sh == "" || !filepath.IsAbs(sh) {
@@ -167,7 +176,115 @@ func shellEnv() (string, map[string]string) {
 			sh = "/bin/sh"
 		}
 	}
-	return askShell(sh)
+	asks := append([]string{sh}, termShells(sh)...)
+	paths := make([]string, len(asks))
+	vars := make([]map[string]string, len(asks))
+	var wg sync.WaitGroup
+	for i, s := range asks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			paths[i], vars[i] = askShell(s)
+		}()
+	}
+	wg.Wait()
+	return mergeShellEnv(paths, vars)
+}
+
+// termShells are the shells other than the login shell sh that a terminal
+// here may open instead of it: fish and nushell, when installed and their
+// config folder is there (each makes it on its first run).
+func termShells(sh string) []string {
+	home, _ := os.UserHomeDir()
+	cfg := os.Getenv("XDG_CONFIG_HOME")
+	if !filepath.IsAbs(cfg) && home != "" {
+		cfg = filepath.Join(home, ".config")
+	}
+	confs := map[string][]string{
+		"fish": {filepath.Join(cfg, "fish")},
+		"nu":   {filepath.Join(cfg, "nushell"), filepath.Join(home, "Library", "Application Support", "nushell")},
+	}
+	var out []string
+	for _, n := range []string{"fish", "nu"} {
+		if filepath.Base(sh) == n || cfg == "" {
+			continue
+		}
+		set := slices.ContainsFunc(confs[n], func(d string) bool {
+			st, err := os.Stat(d)
+			return err == nil && st.IsDir()
+		})
+		if p := FindShell(n); set && p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// shellDirs are the folders FindShell looks in, before /etc/shells and
+// PATH: the system's, Homebrew's, MacPorts', Nix's, cargo's.
+var shellDirs = func() []string {
+	home, _ := os.UserHomeDir()
+	dirs := []string{"/bin", "/usr/bin", "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
+		"/home/linuxbrew/.linuxbrew/bin", "/run/current-system/sw/bin", "/nix/var/nix/profiles/default/bin"}
+	if home != "" {
+		dirs = append(dirs, filepath.Join(home, ".nix-profile", "bin"), filepath.Join(home, ".local", "bin"), filepath.Join(home, ".cargo", "bin"))
+	}
+	return dirs
+}
+
+// FindShell is the program of the shell name (zsh, bash, fish, nu)
+// installed here, "" when there is none. A desktop app's PATH is launchd's,
+// so the folders shells are installed in are looked in first, then the
+// shells /etc/shells lists, then PATH.
+func FindShell(name string) string {
+	isProg := func(p string) bool {
+		st, err := os.Stat(p)
+		return err == nil && !st.IsDir() && st.Mode()&0o111 != 0
+	}
+	for _, d := range shellDirs() {
+		if p := filepath.Join(d, name); isProg(p) {
+			return p
+		}
+	}
+	if b, err := os.ReadFile("/etc/shells"); err == nil {
+		for _, l := range strings.Split(string(b), "\n") {
+			l = strings.TrimSpace(l)
+			if filepath.IsAbs(l) && filepath.Base(l) == name && isProg(l) {
+				return l
+			}
+		}
+	}
+	p, _ := exec.LookPath(name)
+	return p
+}
+
+// mergeShellEnv puts shellEnv's answers together, the login shell's first:
+// the PATH folders the first lacks after its own, and each variable from
+// the first that has it.
+func mergeShellEnv(paths []string, vars []map[string]string) (string, map[string]string) {
+	var dirs []string
+	for _, p := range paths {
+		for _, d := range filepath.SplitList(p) {
+			if d != "" && !slices.Contains(dirs, d) {
+				dirs = append(dirs, d)
+			}
+		}
+	}
+	var merged map[string]string
+	for _, vs := range vars {
+		if vs == nil {
+			continue
+		}
+		if merged == nil {
+			merged = make(map[string]string, len(vs))
+		}
+		for k, v := range vs {
+			if merged[k] == "" {
+				merged[k] = v
+			}
+		}
+	}
+	return strings.Join(dirs, string(os.PathListSeparator)), merged
 }
 
 // askShell runs sh as a terminal opens it and reads what shellEnv says.
@@ -182,12 +299,35 @@ func shellEnv() (string, map[string]string) {
 // the whole group, magpie with it (DD on Discord: magpie web → zsh:
 // suspended (tty input)). A timeout also killed only the shell, leaving
 // what its profile started holding the terminal; a probe's whole group goes.
+//
+// It is asked as an interactive login shell first, since many put PATH in
+// .zshrc/.bashrc or a config.fish block under `status is-interactive`. A
+// profile that hands an interactive shell over to something else — `exec
+// tmux` or zellij's auto-start, common in config.fish — or takes longer
+// than shellAsk to come up never runs the probe, and magpie got no PATH at
+// all (John on Discord, fish set with chsh: an agent fish's PATH has
+// wasn't found). Without an answer it is asked again as a login shell
+// only, which still reads config.fish, .zprofile and .bash_profile.
+// MAGPIE_SHELL_PROBE=1 is in its environment both times, for a profile to
+// tell magpie's question from a terminal.
 func askShell(sh string) (string, map[string]string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	for _, flags := range []string{"-ilc", "-lc"} {
+		if p, vars := askShellAs(sh, flags); p != "" || vars != nil {
+			return p, vars
+		}
+	}
+	return "", nil
+}
+
+// shellAsk is how long one question to a shell may take.
+var shellAsk = 5 * time.Second
+
+func askShellAs(sh, flags string) (string, map[string]string) {
+	ctx, cancel := context.WithTimeout(context.Background(), shellAsk)
 	defer cancel()
-	// interactive too, since many put PATH in .zshrc/.bashrc
-	cmd := ProbeContext(ctx, sh, "-ilc", shellProbe(sh))
+	cmd := ProbeContext(ctx, sh, flags, shellProbe(sh))
 	cmd.Stdin = nil
+	cmd.Env = append(os.Environ(), "MAGPIE_SHELL_PROBE=1")
 	out, _ := cmd.Output()
 	return parseShellEnv(string(out), shellMark)
 }
@@ -210,7 +350,9 @@ const shellMark = "__magpie_path__"
 // agentenv.Vars, between two marks. A NUL (which no variable can hold)
 // parts the values: PATH first, then each of agentenv.Vars in order.
 //
-// A POSIX shell (zsh, bash, fish too) expands "$PATH" itself. nushell
+// A POSIX shell (zsh, bash) expands "$PATH" itself, and so does fish:
+// PATH, as each variable whose name ends in PATH, is a path variable there,
+// joined with ':' in double quotes, not with the spaces another list gets. nushell
 // doesn't: a double-quoted string is literal there, so it printed "$PATH",
 // "$CLAUDE_CONFIG_DIR", ... and magpie set each variable to its own name
 // (#738: then Claude sign-in failed with "mkdir $CLAUDE_CONFIG_DIR:

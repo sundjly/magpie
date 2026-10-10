@@ -137,7 +137,9 @@ func claudeLooking(e provider.Entry) string {
 		return desktopEffortAlias + aliasNumber(e.ID)
 	}
 	if desktopAccepts(e.ID) && !strings.HasPrefix(e.ID, desktopAlias) {
-		return e.ID
+		// its Code tab hands it to Claude Code, which reads a dotted
+		// Claude version (claude-opus-4.6) as Claude Opus 4
+		return provider.ClaudeSpelled(e.ID)
 	}
 	return aliasFor(e.ID)
 }

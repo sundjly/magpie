@@ -143,6 +143,9 @@ func Everywhere() []string {
 	return out
 }
 
+// LastRun is when Desktop last ran in any of dirs (lastRun).
+func LastRun(dirs ...string) time.Time { return lastRun(dirs...) }
+
 // lastRun is when Desktop last ran in any of dirs, its userData folders:
 // the time Chromium's "Local State" there was written, zero for none. A
 // folder holding only claude_desktop_config.json (another tool's MCP

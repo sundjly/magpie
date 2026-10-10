@@ -27,10 +27,16 @@ var summaries struct {
 }
 
 func indexedSummary(p Period, now time.Time) Summary {
-	if p != Today && p != Week && p != Month {
-		p = All
-	}
+	p = p.shown()
 	snapshot := logSnapshotFor(true)
+	if p.IsRange() {
+		// a picked range is read afresh each time, so ranges never pile up
+		// in the cache (#1492)
+		if snapshot.uncached && len(snapshot.blocks) == 0 {
+			snapshot = readLogSnapshot()
+		}
+		return summarizeFrom(p, now, snapshot.first, snapshot.keyProviders, func(fn func(Record)) { snapshot.visit(p.Since(now), fn) })
+	}
 	meta := usagePriceCacheKey(now)
 	summaries.Lock()
 	old, ok := summaries.entries[p]
