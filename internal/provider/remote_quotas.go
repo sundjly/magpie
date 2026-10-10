@@ -47,9 +47,10 @@ const errRemoteNothingRead = "nothing read on that magpie yet; refresh to have i
 const errRemoteNoShare = "remote magpie doesn't share its quotas; update magpie on that computer"
 
 // errRemoteNotShared is a remote magpie that answers models but not its
-// quotas (403): it isn't shared on its local network, as a gateway that
-// MAGPIE_ADDR opens (Docker's) isn't until it is (Fim980 on X: the card
-// said only "Allowance unavailable").
+// quotas (403): it isn't shared on its local network, as an older magpie's
+// gateway that MAGPIE_ADDR opened (Docker's) wasn't until it was (Fim980 on
+// X: the card said only "Allowance unavailable"). A newer one asks a key of
+// every other machine and, given one, answers the quotas too.
 const errRemoteNotShared = "remote magpie isn't shared; turn on Share on local network on that computer"
 
 // errRemoteKey is a remote magpie that didn't take this provider's key (401).

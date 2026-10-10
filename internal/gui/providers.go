@@ -319,10 +319,13 @@ type gatewayJSON struct {
 	URL     string   `json:"url"`
 	LAN     bool     `json:"lan"`
 	LANURLs []string `json:"lanURLs,omitempty"`
-	Open    bool     `json:"open,omitempty"` // listens beyond loopback with no key: anyone reaching it is let in
-	Running bool     `json:"running"`
-	Mine    bool     `json:"mine"`   // this process serves it
-	Window  bool     `json:"window"` // the magpie serving it shows its routing
+	// OnNetwork: MAGPIE_ADDR puts it beyond loopback (a server, a Docker
+	// image), so every caller is shown a gateway key, and LAN is true too:
+	// callers from elsewhere, a container's host among them, need one
+	OnNetwork bool `json:"onNetwork,omitempty"`
+	Running   bool `json:"running"`
+	Mine      bool `json:"mine"`   // this process serves it
+	Window    bool `json:"window"` // the magpie serving it shows its routing
 	// Version is another magpie's, serving it, and Older says it is older
 	// than this one: agents' requests are then sent as that version sends
 	// them, without this one's fixes (#506)
@@ -688,8 +691,8 @@ func providersState() providersJSON {
 		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID], ZhipuTeam: team, AccessKey: provider.TakesVolcAccessKey(bases)})
 	}
 	cat := provider.Catalog()
-	s.Gateway = gatewayJSON{URL: gateway.URL(), Open: gateway.OpenToAnyone(), Models: len(cat), Calls: []gateway.Call{}, Groups: []gwGroupJSON{}}
-	s.Gateway.LAN = settings.Load().LAN
+	s.Gateway = gatewayJSON{URL: gateway.URL(), OnNetwork: gateway.OnNetwork(), Models: len(cat), Calls: []gateway.Call{}, Groups: []gwGroupJSON{}}
+	s.Gateway.LAN = settings.Load().LAN || s.Gateway.OnNetwork
 	if s.Gateway.LAN {
 		s.Gateway.LANURLs = gateway.LANURLs()
 	}
@@ -1608,17 +1611,20 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		st.Moved = moved
 		writeJSON(rw, st)
 	})
-	// Codex's background app-server, left on the account before a switch:
-	// restarting it (which ends the Codex sessions on it), or letting it be.
+	// Codex's background app-server, left on the account before a switch
+	// or on the model list before a change (the Agents row's Restart):
+	// restarting it (Codex 0.162's sessions on it reconnect, after a turn
+	// running, for up to a minute; an older Codex's end), or letting it be.
 	mux.HandleFunc("POST /api/codex/daemon/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		switch r.PathValue("action") {
 		case "restart":
-			ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 			defer cancel()
 			if err := provider.RestartCodexDaemon(ctx); err != nil {
 				fail(rw, err)
 				return
 			}
+			agent.CodexDaemonRestarted()
 		case "dismiss":
 			provider.DismissCodexDaemon()
 		default:

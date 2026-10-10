@@ -114,6 +114,7 @@ func All() []*Agent {
 		t3code(home),
 		hanako(home),
 		atomcode(home),
+		snow(home),
 		alma(),
 		cindy(),
 	}, append(ompProfiles(home), wslAgents()...)...)

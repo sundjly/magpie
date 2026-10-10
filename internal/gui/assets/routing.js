@@ -1501,8 +1501,41 @@
       }
     }
     renderSteps(r);
+    holdStory();
     renderCtx(r);
   }
+  // holdStory keeps the story of the live request, its head and its lines,
+  // as tall as it has been since the reader began following live, at this
+  // width: a request under way is told in fewer lines than one answered
+  // ("is answering…", then "answered in 4.0 s…" over two lines at a
+  // phone's width), and its head gets View usage and Replay, taller than
+  // the words, once it is done. So each new request moved the context
+  // window under it up and back down (dumplings on Discord: the card
+  // jittered on every request). A request picked, a replay or a past day
+  // is drawn at its own height. A change of width measures it again at
+  // once, as it is then (the list coming in under it can take a
+  // scrollbar's width off it before the first live request)
+  let storyHold = { key: "", h: [0, 0] }, storyDrawn = "";
+  function holdStory() {
+    const follow = !pinned && !rp && !day;
+    const w = steps.clientWidth;
+    const key = JSON.stringify([follow, w, document.documentElement.lang]);
+    if (key === storyHold.key && storyDrawn === headKey + stepsKey) return;
+    if (key !== storyHold.key) storyHold = { key, h: [0, 0] };
+    storyDrawn = headKey + stepsKey;
+    [logHead, steps].forEach((e, i) => {
+      e.style.minHeight = "";
+      if (!follow || !w) return;
+      const h = e.getBoundingClientRect().height;
+      storyHold.h[i] = Math.max(storyHold.h[i], h);
+      if (storyHold.h[i] > h) e.style.minHeight = storyHold.h[i] + "px";
+    });
+  }
+  new ResizeObserver(() => {
+    holdStory();
+    // grown since it was measured (a font come in): that is its height
+    [logHead, steps].forEach((e, i) => { storyHold.h[i] = Math.max(storyHold.h[i], e.getBoundingClientRect().height); });
+  }).observe(steps);
   // renderCtx draws the request's context window under its story, with
   // its session's prompts request by request; drawn again only when what
   // it shows changes. Live, the next request is patched into the card

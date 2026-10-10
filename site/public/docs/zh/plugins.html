@@ -46,6 +46,8 @@
     <a href="/docs/zh/start">快速上手</a>
     <a href="/docs/zh/intent">意图路由</a>
     <a href="/docs/zh/plugins">插件开发</a>
+    <a class="toc-only" href="/docs/zh/remote">远程 magpie</a>
+    <a class="toc-only" href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -209,9 +211,9 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
       <li><b>代理。</b>插件为某个供应商或账号发出的每个 fetch，都走用户给这个供应商或账号设置的代理；没有设置就走 magpie 自己的代理，除非设成<em>直连</em>。回环地址从不走代理。自己传了 <code>proxy</code> 选项的 fetch 不会被改动。</li>
       <li><b>更新。</b>
         <ul>
-          <li>社区的包（<code>@magpie-community/*</code>）在 magpie 启动后不久自动更新，之后每六小时一次。</li>
+          <li>社区的包（<code>@magpie-community/*</code>）在 magpie 启动后不久自动更新，之后每小时一次。</li>
           <li>其他包有新版本时，<span class="ui">插件</span>上会出现一个小圆点，用户点一下或运行 <code>magpie plugin update</code> 更新。</li>
-          <li>固定了版本的写法（<code>name@1.2.3</code>）会停在那个版本。</li>
+          <li>固定了版本的写法（<code>name@1.2.3</code>）会停在那个版本，直到用户自己更新：<span class="ui">更新到 …</span>、<span class="ui">全部更新</span>和 <code>magpie plugin update</code> 会装上最新版并取消固定。</li>
         </ul></li>
     </ul>
     <p>magpie 在它的配置目录（<code>~/.config/magpie</code> 或 <code>$XDG_CONFIG_HOME/magpie</code>）里保存这些：</p>
@@ -709,6 +711,8 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
     <a href="/zh/">首页</a>
     <a href="/docs/zh/intent">意图路由</a>
     <a href="/docs/zh/plugins">插件开发</a>
+    <a href="/docs/zh/remote">远程 magpie</a>
+    <a href="/docs/zh/docker">Docker</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

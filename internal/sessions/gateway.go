@@ -194,7 +194,8 @@ func SetGatewayRecording(on, clear bool) error {
 		return err
 	}
 	if clear {
-		return os.RemoveAll(gatewayDir())
+		// deleted sessions' text in magpie's trash is recorded text too
+		return errors.Join(os.RemoveAll(gatewayDir()), clearGatewayTrash(nil))
 	}
 	return nil
 }
@@ -204,6 +205,9 @@ func SetGatewayRecording(on, clear bool) error {
 // delete. A folder that can't be read counts as holding some: the reader can
 // still ask to clear it.
 func HasGatewayConversations() bool {
+	if paths, _ := gatewayTrashFiles(); len(paths) > 0 {
+		return true
+	}
 	errFound := errors.New("found")
 	err := filepath.WalkDir(gatewayDir(), func(_ string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -222,7 +226,15 @@ func HasGatewayConversations() bool {
 func PruneGatewayConversations(now time.Time) error {
 	gatewayMu.Lock()
 	root, generation := gatewayDir(), gatewayGeneration
+	// a deleted session's text in magpie's trash expires as it would have
+	trashErr := clearGatewayTrash(func(d string) bool {
+		date, err := time.Parse(time.DateOnly, d)
+		return err == nil && !date.Add(24*time.Hour).After(now.Add(-GatewayRetention))
+	})
 	gatewayMu.Unlock()
+	if trashErr != nil {
+		return trashErr
+	}
 	type saved struct {
 		path    string
 		info    os.FileInfo

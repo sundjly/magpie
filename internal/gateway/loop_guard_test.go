@@ -252,12 +252,25 @@ func TestLoopGuardLeavesOrdinaryRepliesAlone(t *testing.T) {
 // loopingVendor is DeepSeek on its Chat API, its reasoning looping until
 // the request is let go, or, with lines set, for that many lines and then
 // the reply's end. It says whether the request was let go.
+//
+// Looping until let go, it sends loopMost lines and then waits, its stream
+// open, for its request to be let go. How many lines it has sent by the
+// time it sees that isn't how soon the guard cut: the lines it wrote ahead
+// into the sockets' and transports' buffers, which the gateway hadn't read
+// yet, count too. A gateway slowed by load let it get ~2,800 lines ahead
+// of a cut made at the 259th (#1443). Stopping at loopMost makes being let
+// go mean the guard found the loop within that many lines, however the
+// test is scheduled; loopCut bounds how soon by what reached the agent.
 type loopingVendor struct {
 	reasoning string // what it reasons, else the reporter's loop
 	lines     int    // 0: loop until let go
 	sent      atomic.Int64
 	letGo     chan bool
 }
+
+// loopMost is how many lines of its loop loopingVendor sends before it
+// waits to be let go.
+const loopMost = 2000
 
 func (v *loopingVendor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	io.ReadAll(r.Body)
@@ -282,8 +295,13 @@ func (v *loopingVendor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for i := 0; v.lines == 0 || i < v.lines; i++ {
-			if i > 200000 {
-				v.letGo <- false
+			if v.lines == 0 && i == loopMost {
+				select {
+				case <-r.Context().Done():
+					v.letGo <- true
+				case <-time.After(20 * time.Second):
+					v.letGo <- false
+				}
 				return
 			}
 			v.sent.Add(1)
@@ -387,11 +405,15 @@ func loopCut(t *testing.T, v *loopingVendor, got, done, failed, provider string)
 		if !letGo {
 			t.Fatalf("the vendor's request was not let go (%d lines)", v.sent.Load())
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("the vendor's request was not let go")
 	}
-	if n := v.sent.Load(); n > 2000 {
-		t.Fatalf("let go only after %d lines", n)
+	// the guard cut within its window of the loop's start: what reached
+	// the agent of the loop is that window and at most one 32K read of the
+	// vendor's stream more, which the cut's write sends whole. It doesn't
+	// depend on how far the vendor got ahead of the gateway (#1443).
+	if n := loopLines(got); n > loopWindow+(32<<10)/100 {
+		t.Fatalf("the loop was cut only after %d of its lines reached the agent", n)
 	}
 	restingUntil.Lock()
 	rests := len(restingUntil.m)
@@ -410,6 +432,16 @@ func loopCut(t *testing.T, v *loopingVendor, got, done, failed, provider string)
 	if rec.ErrType != loopErrType || !strings.Contains(rec.Error, "stuck in a loop") || rec.Provider != provider {
 		t.Fatalf("usage record %+v", rec)
 	}
+}
+
+// loopLines counts the lines of the reporter's loop in what the agent got,
+// each a delta of its own in any protocol.
+func loopLines(got string) int {
+	var n int
+	for _, l := range []string{"Now.", "Writing.", "Go.", "Let me write.", "OK.", "Here.", "Produce.", "Final.", "Producing."} {
+		n += strings.Count(got, `"`+l+`\n\n"`)
+	}
+	return n
 }
 
 // The reporter's route (#1359): WorkBuddy's DeepSeek v4.1 flash at max

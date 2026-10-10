@@ -3,22 +3,19 @@ package main
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // magpie plugin lists both plugins that sign in to one provider (neiko on
 // Discord: a third-party plugin and their own), says which one serves it
 // and how to have the other one serve it; `magpie plugin use` does that.
 func TestPluginListSaysClash(t *testing.T) {
-	bun, err := exec.LookPath("bun")
-	if err != nil {
-		t.Skip("no bun on PATH")
-	}
+	bun := testenv.Bun(t)
 	groupsHome(t)
 	t.Setenv("MAGPIE_BUN", bun)
 	t.Setenv("MAGPIE_PLUGIN_MARKET", "off")

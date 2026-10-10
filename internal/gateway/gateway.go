@@ -562,8 +562,9 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 // quotas is what is left of every subscription, plan and key magpie has,
 // for an agent choosing where to send its work (magpie quota --json is the
 // same). It names the accounts and their balances, so it answers this
-// machine, and another only with the key of the gateway shared on the
-// local network — never a gateway MAGPIE_ADDR opens without one.
+// machine, and another only with an enabled gateway key, which lanGuard
+// asks of it while the gateway is shared or MAGPIE_ADDR puts it on the
+// network.
 func (s *Server) quotas(w http.ResponseWriter, r *http.Request) {
 	if !local(r) && !sharedWith(r) {
 		writeError(w, provider.Chat, http.StatusForbidden, "magpie's quotas are told to another machine only when magpie is shared on the local network (Settings → Share on local network) and the request carries its API key (Authorization: Bearer <key> or x-api-key: <key>)")
@@ -2879,6 +2880,8 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		// what every path to an Anthropic endpoint sends, relayed or
 		// built, with the model named as the vendor names it
 		body = adaptiveThinking(body)
+		body = thinkingOffAsTaken(body, path)
+		body = samplingAsTaken(body, path)
 		asked := askedBetas(in)
 		if gjson.GetBytes(body, "speed").String() == "fast" && provider.HostOf(p.Base(to)) == "api.anthropic.com" {
 			asked = append(slices.Clone(asked), claudeFastBeta) // a group's member sent fast
@@ -3307,7 +3310,19 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		res.Body.Close()
 		res.Body = io.NopCloser(bytes.NewReader(b))
-		if nb, ok := withoutThinkingOff(body); ok && (alwaysThinks.Match(b) || mandatoryReasoning.Match(b)) {
+		// Sonnet 5.5 by a name thinkingOffAsTaken doesn't know asks for
+		// between_tools in place of disabled (#1454)
+		if nb, ok := withBetweenTools(body); ok && asksBetweenTools.Match(b) {
+			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(nb), r.Header); err != nil {
+				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
+			}
+		} else if nb, ok := withoutThinkingOff(body); ok && (alwaysThinks.Match(b) || mandatoryReasoning.Match(b) || thinkingOffRefused.Match(b)) {
+			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(nb), r.Header); err != nil {
+				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
+			}
+		} else if nb, ok := withoutSampling(body); ok && samplingDeprecated.Match(b) {
+			// a Claude by a name samplingAsTaken doesn't know refusing
+			// temperature, top_p or top_k (#1454)
 			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(nb), r.Header); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}

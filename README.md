@@ -57,7 +57,7 @@ Runs on macOS, Windows and Linux (menu bar app, window, TUI, web UI and CLI), in
 curl -fsSL https://usemagpie.ai/install.sh | sh
 ```
 
-<sub>Mac builds are signed and notarised, and every build updates itself. Behind a firewall, use `--proxy` or `--mirror`. Or `go install github.com/yetone/magpie@latest`, or the [Docker image](docs/reference.md#docker).</sub>
+<sub>Mac builds are signed and notarised, and every build updates itself. Behind a firewall, use `--proxy` or `--mirror`. Or `go install github.com/yetone/magpie@latest`, or the [Docker image](https://usemagpie.ai/docs/docker).</sub>
 
 **2 · Add a provider.** Open magpie and go to **Providers → Add provider**. Pick a preset and paste a key, or sign in with a subscription.
 
@@ -81,7 +81,7 @@ magpie tui                                      # the whole thing, in a terminal
 <table>
 <tr><td>
 
-Claude Code · Claude Desktop · Codex · Gemini CLI · Antigravity CLI · OpenCode · OpenChamber · MiMo Code · Pi · oh-my-pi · Aside · OmO · Goose · Cursor CLI · Cursor Private Inference · Zed · VS Code Chat · VS Code Insiders · VSCodium Chat · JetBrains Air · Copilot (JetBrains) · Copilot CLI · Crush · DeepSeek Harness · Reasonix Studio · Command Code · fx · Devin · Hermes Agent · Mister Morph · Kimi Code · Qwen Code · Muse Code · Empryo · MiniMax Code · Droid · Cline · Qoder · Qoder CN · Grok Build · ZCode · WorkBuddy · CodeBuddy Code · Pencil · T3 Code · OpenHanako · AtomCode · Alma · Cindy
+Claude Code · Claude Desktop · Codex · Gemini CLI · Antigravity CLI · OpenCode · OpenChamber · MiMo Code · Pi · oh-my-pi · Aside · OmO · Goose · Cursor CLI · Cursor Private Inference · Zed · VS Code Chat · VS Code Insiders · VSCodium Chat · JetBrains Air · Copilot (JetBrains) · Copilot CLI · Crush · DeepSeek Harness · Reasonix Studio · Command Code · fx · Devin · Hermes Agent · Mister Morph · Kimi Code · Qwen Code · Muse Code · Empryo · MiniMax Code · Droid · Cline · Qoder · Qoder CN · Grok Build · ZCode · WorkBuddy · CodeBuddy Code · Pencil · T3 Code · OpenHanako · AtomCode · Snow CLI · Alma · Cindy
 
 </td></tr>
 </table>
@@ -251,8 +251,8 @@ Find them under Plugins › Discover › Gateway middleware. See [Gateway middle
 | | |
 | :-- | :-- |
 | **Local network** | Turn on *Share on local network* and give each client a named gateway key with its own daily, weekly or monthly token and cost limit |
-| **Remote magpie** | A laptop uses the providers, accounts and groups of the magpie on your desktop, and still wires its own agents |
-| **Docker** | Run `ghcr.io/yetone/magpie` on a server or a NAS and manage it from the web UI |
+| **[Remote magpie](https://usemagpie.ai/docs/remote)** | A laptop uses the providers, accounts and groups of the magpie on your desktop, and still wires its own agents |
+| **[Docker](https://usemagpie.ai/docs/docker)** | Run `ghcr.io/yetone/magpie` on a server or a NAS and manage it from the web UI |
 | **Sync** | Back up to a file, or sync machines over WebDAV (Nutstore, Nextcloud…) or S3 |
 
 ### Also
@@ -272,6 +272,8 @@ Find them under Plugins › Discover › Gateway middleware. See [Gateway middle
 | **[Plugins](https://usemagpie.ai/docs/plugins)** | Use plugins and write your own |
 | **[Intent routing](https://usemagpie.ai/docs/intent)** | Route each turn by what it asks for |
 | **[Import links](https://usemagpie.ai/docs/import)** | "Add to magpie" buttons for provider websites |
+| **[Remote magpie](https://usemagpie.ai/docs/remote)** | Use one magpie's providers and groups from your other computers |
+| **[Docker](https://usemagpie.ai/docs/docker)** | Run magpie on a server or a NAS |
 
 ## Privacy
 

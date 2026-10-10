@@ -32,8 +32,19 @@ type manageAgentJSON struct {
 type managedJSON struct {
 	sessions.Managed
 	Via []usage.Via `json:"via,omitempty"`
-	// Gateway: seen only through magpie's gateway, with no file of its own
-	Gateway bool `json:"gateway,omitempty"`
+}
+
+// listedGateway are the gateway sessions the session lists show: not those
+// deleted here (sessions.DeleteGateway) and not used since.
+func listedGateway(gs []usage.GatewaySession) []usage.GatewaySession {
+	hidden := sessions.GatewayHidden()
+	out := gs[:0:0]
+	for _, g := range gs {
+		if !hidden(g.Agent, g.ID, g.Last) {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 type trashedJSON struct {
@@ -108,7 +119,7 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			}
 			counts[a.Agent] = &j
 		}
-		gateway := usage.GatewaySessions(time.Time{}, nil)
+		gateway := listedGateway(usage.GatewaySessions(time.Time{}, nil))
 		nativeCounts := map[string]map[string]bool{}
 		for _, s := range sessions.List(sessions.All) {
 			if nativeCounts[s.Agent] == nil {
@@ -129,6 +140,8 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 				counts[s.Agent] = j
 			}
 			j.Count++
+			// what magpie keeps of it can be deleted, whatever the agent
+			j.Deletable = true
 		}
 		for _, j := range counts {
 			out.Agents = append(out.Agents, *j)
@@ -167,12 +180,15 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 				s.Path = tilde(s.Path)
 				out.Sessions = append(out.Sessions, managedJSON{Managed: s, Via: vias[s.Agent+"|"+s.ID]})
 			}
+			sizes := sessions.GatewaySizes()
 			for _, g := range gateway {
 				if g.Agent != out.Agent || native[g.ID] {
 					continue
 				}
 				s := gatewaySession(g)
-				out.Sessions = append(out.Sessions, managedJSON{Managed: sessions.Managed{Session: s}, Via: vias[s.Agent+"|"+s.ID], Gateway: true})
+				// its size is the conversation text magpie recorded of it
+				m := sessions.Managed{Session: s, Deletable: true, Size: sizes(s.Agent, s.ID)}
+				out.Sessions = append(out.Sessions, managedJSON{Managed: m, Via: vias[s.Agent+"|"+s.ID]})
 			}
 			sort.SliceStable(out.Sessions, func(i, j int) bool {
 				return out.Sessions[i].Last.After(out.Sessions[j].Last)
@@ -181,7 +197,8 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 		writeJSON(rw, out)
 	})
 	// delete moves the sessions named to magpie's trash, one by one; one
-	// still being written is left, and said so.
+	// still being written is left, and said so. One seen only through the
+	// gateway, of any agent, has what magpie keeps of it moved there.
 	mux.HandleFunc("POST /api/sessions/delete", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Agent string   `json:"agent"`
@@ -191,9 +208,18 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		if !sessions.Deletable(in.Agent) {
-			fail(rw, errors.New("magpie can't delete this agent's sessions"))
-			return
+		// the gateway sessions as listed: those with no native session
+		native := map[string]bool{}
+		for _, s := range sessions.List(sessions.All) {
+			if s.Agent == in.Agent {
+				native[s.ID] = true
+			}
+		}
+		listed := map[string]usage.GatewaySession{}
+		for _, g := range listedGateway(usage.GatewaySessions(time.Time{}, nil)) {
+			if g.Agent == in.Agent && !native[g.ID] {
+				listed[g.ID] = g
+			}
 		}
 		type refused struct {
 			ID     string `json:"id"`
@@ -205,7 +231,15 @@ func sessionManageRoutes(mux *http.ServeMux, w Windows) {
 			Refused []refused `json:"refused"`
 		}{Deleted: []string{}, Refused: []refused{}}
 		for _, id := range in.IDs {
-			if _, err := sessions.Delete(in.Agent, id); err != nil {
+			var err error
+			if g, ok := listed[id]; ok {
+				_, err = sessions.DeleteGateway(g.Agent, g.ID, g.ID, g.Last)
+			} else if !sessions.Deletable(in.Agent) {
+				err = errors.New("magpie can't delete this agent's sessions")
+			} else {
+				_, err = sessions.Delete(in.Agent, id)
+			}
+			if err != nil {
 				out.Refused = append(out.Refused, refused{ID: id, Error: err.Error(), Active: errors.Is(err, sessions.ErrActive)})
 				continue
 			}

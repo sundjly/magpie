@@ -77,10 +77,15 @@ type Settings struct {
 	// RedactWords for the user's own words. RedactRules are the user's own
 	// rules for secrets magpie's don't know (a gateway's oc_sk_… key), a
 	// prefix or a pattern each, masked with the secrets while Redact is on.
-	Redact         bool          `json:"redact,omitempty"`
-	RedactPersonal bool          `json:"redactPersonal,omitempty"`
-	RedactWords    []string      `json:"redactWords,omitempty"`
-	RedactRules    []redact.Rule `json:"redactRules,omitempty"`
+	// RedactKinds turns the other kinds of personal data on or off one by
+	// one, by redact.Categories' ids (ssn, ip, home…), under
+	// RedactPersonal: only the user's choices, a kind not in it is as its
+	// category's On says.
+	Redact         bool            `json:"redact,omitempty"`
+	RedactPersonal bool            `json:"redactPersonal,omitempty"`
+	RedactKinds    map[string]bool `json:"redactKinds,omitempty"`
+	RedactWords    []string        `json:"redactWords,omitempty"`
+	RedactRules    []redact.Rule   `json:"redactRules,omitempty"`
 	// LAN shares the gateway on the local network; remote callers must use
 	// named caller keys. LANKey is retained for older Magpie versions.
 	LAN    bool   `json:"lan,omitempty"`

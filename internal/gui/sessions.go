@@ -83,7 +83,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		for _, s := range list {
 			nativeKeys[s.Agent+"|"+s.ID] = true
 		}
-		gateway := usage.GatewaySessions(time.Time{}, nativeKeys)
+		gateway := listedGateway(usage.GatewaySessions(time.Time{}, nativeKeys))
 		ext := make([]sessions.ExternalSession, 0, len(gateway))
 		for _, g := range gateway {
 			ext = append(ext, gatewayExternal(g))

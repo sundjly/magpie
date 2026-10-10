@@ -46,6 +46,8 @@
     <a href="/docs/start">Get started</a>
     <a href="/docs/intent">Intent routing</a>
     <a href="/docs/plugins">Plugins</a>
+    <a class="toc-only" href="/docs/remote">Remote magpie</a>
+    <a class="toc-only" href="/docs/docker">Docker</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie-releases/releases">Releases</a>
@@ -209,9 +211,9 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
       <li><b>Proxy.</b> Every fetch a plugin makes for a provider or an account goes through the proxy the user set for that provider or account. Otherwise it goes through magpie’s own proxy, unless the setting is <em>direct</em>. Loopback addresses never go through a proxy. A fetch that passes its own <code>proxy</code> option is left alone.</li>
       <li><b>Updates.</b>
         <ul>
-          <li>The community’s packages (<code>@magpie-community/*</code>) update by themselves a little after magpie starts, then every six hours.</li>
+          <li>The community’s packages (<code>@magpie-community/*</code>) update by themselves a little after magpie starts, then every hour.</li>
           <li>Any other package with a newer version shows a dot on <span class="ui">Plugins</span>, and the user updates it with a click or <code>magpie plugin update</code>.</li>
-          <li>A spec pinned to a version (<code>name@1.2.3</code>) stays on it.</li>
+          <li>A spec pinned to a version (<code>name@1.2.3</code>) stays on it until the user updates it: <span class="ui">Update to …</span>, <span class="ui">Update all</span> and <code>magpie plugin update</code> install the newest version and unpin it.</li>
         </ul></li>
     </ul>
     <p>What magpie keeps, in its config folder (<code>~/.config/magpie</code>, or <code>$XDG_CONFIG_HOME/magpie</code>):</p>
@@ -709,6 +711,8 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
     <a href="/">Home</a>
     <a href="/docs/intent">Intent routing</a>
     <a href="/docs/plugins">Plugins</a>
+    <a href="/docs/remote">Remote magpie</a>
+    <a href="/docs/docker">Docker</a>
     <a href="/docs/import">Add to magpie</a>
     <a href="/docs/integrate">Integrate</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

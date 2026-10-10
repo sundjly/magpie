@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // besideFake installs the fake plugin as the plugin of the built-in id,
@@ -23,10 +23,7 @@ import (
 // key, its requests going to up; it gives the provider's id.
 func besideFake(t *testing.T, id string, up http.Handler) string {
 	t.Helper()
-	bun, err := exec.LookPath("bun")
-	if err != nil {
-		t.Skip("no bun on PATH")
-	}
+	bun := testenv.Bun(t)
 	fresh(t)
 	t.Setenv("MAGPIE_BUN", bun)
 	t.Setenv("FAKE_ID", id)

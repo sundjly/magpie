@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -19,10 +18,7 @@ import (
 // /api/plugins carries the clash, naming the plugin that serves it and
 // the provider as it is listed, and prefer hands it to the other one.
 func TestPluginsClashRows(t *testing.T) {
-	bun, err := exec.LookPath("bun")
-	if err != nil {
-		t.Skip("no bun on PATH")
-	}
+	bun := testenv.Bun(t)
 	dir := t.TempDir()
 	testenv.SetHome(t, dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))

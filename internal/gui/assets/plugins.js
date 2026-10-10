@@ -70,11 +70,29 @@
   const onNPM = (spec) => !isPath(spec) && !isGit(spec);
   // the providers a plugin signs in to, as the add sheet knows them
   const subsOf = (pkg) => (providers?.plugins || []).filter((x) => name(x.spec) === pkg);
+  // whether version a comes after b, in semver's order, the same as
+  // update.Newer, which puts the dot on Plugins: a pre-release before its
+  // release, numbers in it as numbers ("beta.10" after "beta.9"), a number
+  // before a word, a shorter list first; build metadata ("+…") ignored. A
+  // version that isn't x.y.z is never newer.
   const newer = (a, b) => {
-    const p = (v) => (v || "").split(/[.+-]/).slice(0, 3).map((x) => parseInt(x, 10) || 0);
+    const p = (v) => {
+      const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([^+]*))?(?:\+.*)?$/.exec(String(v || "").trim());
+      return m && { n: [+m[1], +m[2], +m[3]], pre: m[4] || "" };
+    };
     const [x, y] = [p(a), p(b)];
-    for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
-    return false;
+    if (!x || !y) return false;
+    for (let i = 0; i < 3; i++) if (x.n[i] !== y.n[i]) return x.n[i] > y.n[i];
+    if (x.pre === y.pre) return false;
+    if (!x.pre || !y.pre) return !x.pre;
+    const [s, u] = [x.pre.split("."), y.pre.split(".")];
+    for (let i = 0; i < s.length && i < u.length; i++) {
+      const [d, e] = [/^\d+$/.test(s[i]), /^\d+$/.test(u[i])];
+      if (d && e) { if (+s[i] !== +u[i]) return +s[i] > +u[i]; }
+      else if (d !== e) return e;
+      else if (s[i] !== u[i]) return s[i] > u[i];
+    }
+    return s.length > u.length;
   };
 
   function glyph(d, size = 14, stroke = 1.5) { return svg(d, size, stroke); }

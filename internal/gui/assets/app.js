@@ -166,7 +166,7 @@ function keepIcons(...roots) {
     keptIcons.get(e.dataset.icon).push(e);
   }
 }
-const pngIcons = new Set(["crush", "zcode", "alma", "hanako", "cindy", "typesafe", "atomcode", "mlx-serve"]);
+const pngIcons = new Set(["crush", "zcode", "alma", "hanako", "cindy", "typesafe", "atomcode", "snow", "mlx-serve"]);
 
 function icon(name) {
   const kept = keptIcons?.get(name || "")?.shift();
@@ -1318,6 +1318,29 @@ function desktopLongestLine() {
   return l;
 }
 
+// daemonRestart: the button that restarts Codex's background app-server
+// left on the old list, then shows the row as it is after
+function daemonRestart() {
+  const go = el("button", "ag-quiet accent", t("Restart"));
+  go.type = "button";
+  go.title = "codex app-server daemon restart";
+  go.onclick = async () => {
+    go.disabled = true;
+    go.classList.add("busy");
+    try {
+      await api("codex/daemon/restart", {});
+      state = await api("state");
+      renderAgents();
+      status(t("Codex's background service restarted"));
+    } catch (e) {
+      go.disabled = false;
+      go.classList.remove("busy");
+      status(e.message, "err");
+    }
+  };
+  return go;
+}
+
 // connectPanel: a connected agent's row, opened
 function connectPanel(a, { fields, fieldBtn }) {
   const box = el("div", "ag-exp");
@@ -1365,6 +1388,10 @@ function connectPanel(a, { fields, fieldBtn }) {
         const [pre, post] = t(how[0], { agent: a.name, when: ago(c.since), app: c.app || "" }).split("{cmd}");
         const l = line(pre, ...(how[1] ? [code(how[1]), post || ""] : []));
         l.classList.add("ag-stale-copy");
+        // Codex's daemon, which magpie restarts itself while no codex
+        // session is on it: with one on, here, when the user says (open
+        // sessions of Codex 0.162 reconnect to the new one)
+        if (c.kind === "daemon" && a.id === "codex") l.append(daemonRestart());
         parts.push(l);
       }
     }
@@ -2917,6 +2944,14 @@ const MEMORIES = "memories";
 // for (willz on Discord): one of a ChatGPT account's, as a subagent's task
 // is sealed for them
 const SUB_MODEL = "subagent model";
+// Codex's subagents square is [agents] default_subagent_model, the model a
+// subagent starts on only when its lead names none in spawn_agent
+// (codex-rs core/src/agent/child_config.rs). Unset, a subagent isn't held to
+// the model: the lead may name another, and GPT-6.1-Sol's spawned GPT-6-Astra
+// (willz on Discord). So it says the lead picks, and points at the subagent
+// model square, which holds every subagent to one.
+const leadPicks = (a, f) => f.label === "subagents" && a.id.split("@wsl:")[0] === "codex";
+const LEAD_PICKS = "Codex's lead may name another model for a subagent; set the subagent model to hold every subagent to one";
 const extra = (f) => f.key === "tiers" || FOLLOWS_MODEL.includes(f.label) || f.label === "sign-in" || f.key === "ultracode" || f.label === SUB_EFFORT || f.label === SUB_MODEL || f.label === MEMORIES;
 const EXTRA_GLYPH = {
   subagents: "M4.5 2.75v10.5M4.5 9.25c0-2.2 1.6-3.75 3.9-3.75h3.35M9.9 3.6l1.9 1.9-1.9 1.9",
@@ -2943,7 +2978,7 @@ function extraField(a, f) {
   b.append(svg(EXTRA_GLYPH[f.label] || EXTRA_GLYPH.tiers, 13, 1.5));
   const opt = optionFor(f, f.value);
   b.title = f.label === SUB_EFFORT ? subEffortTitle(a, f, opt) : f.menu ? menuTitle(f)
-    : t("{label}: {value}", { label: f.label === MEMORIES ? t("Codex memories model") : t(f.label), value: t(opt?.label || f.value || (f.label === MEMORIES ? MEMORIES_DEFAULT : f.label === SUB_MODEL ? "the model the lead asks for" : "same as model")) }) + (opt?.note && !FOLLOWS_MODEL.includes(f.label) ? "\n" + t(opt.note) : "");
+    : t("{label}: {value}", { label: f.label === MEMORIES ? t("Codex memories model") : t(f.label), value: t(opt?.label || f.value || (f.label === MEMORIES ? MEMORIES_DEFAULT : f.label === SUB_MODEL ? "the model the lead asks for" : leadPicks(a, f) ? "the lead's pick, else same as model" : "same as model")) }) + (opt?.note && !FOLLOWS_MODEL.includes(f.label) ? "\n" + t(opt.note) : "") + (leadPicks(a, f) ? "\n" + t(LEAD_PICKS) : "");
   b.setAttribute("aria-label", b.title);
   b.dataset.key = f.key;
   b.onclick = (ev) => openPicker(a, f, b, ev);
@@ -3696,7 +3731,9 @@ function openPicker(agent, field, anchor, ev, only) {
   // the agent's own default: magpie's wiring comes out and the key is removed
   if (FOLLOWS_MODEL.includes(field.label)) {
     const main = agent.fields.find((f) => f.key === "model");
-    options.unshift(main ? { value: "", label: t("Same as model"), note: optionFor(main, main.value)?.label || main.value, icon: optionFor(main, main.value)?.icon, reset: true }
+    const mainName = main && (optionFor(main, main.value)?.label || main.value);
+    options.unshift(main && leadPicks(agent, field) ? { value: "", label: t("Lead's pick"), note: t("{model} unless the lead names another", { model: mainName }), icon: optionFor(main, main.value)?.icon, reset: true }
+      : main ? { value: "", label: t("Same as model"), note: mainName, icon: optionFor(main, main.value)?.icon, reset: true }
       : { value: "", label: t("Not set"), note: t("a Claude model of the tier, else the chat's model"), icon: agent.icon, reset: true });
   } else if (!only && !field.menu && !field.onPick && !options.some((o) => o.value === "")) {
     // Pi has no default model of its own: with none set it takes the first
@@ -5723,7 +5760,9 @@ function renderConnect() {
   const snipLang = langs.some(([id]) => id === lang) ? lang : "curl";
   const urls = [g.url, ...(g.lanURLs || [])];
   if (!urls.includes(connectURL)) connectURL = g.url;
-  const remote = connectURL !== g.url;
+  // a gateway MAGPIE_ADDR puts on the network (a Docker image's, whose
+  // host is another machine to it) is shown with a gateway key everywhere
+  const remote = connectURL !== g.url || !!g.onNetwork;
   const keys = g.lan ? (gatewayKeys || []).filter((k) => !k.off) : [];
   if (!keys.some((k) => k.id === connectKeyID)) {
     connectKeyID = "";
@@ -5744,7 +5783,7 @@ function renderConnect() {
   note.replaceChildren();
   note.classList.toggle("brief", connectFolded);
   if (connectFolded) note.append(el("code", "", base), copyBtn(base, "Base URL"));
-  else note.textContent = t(g.open ? "Open to the network · anyone who reaches it can use any key" : remote ? "Local network · an enabled gateway key is required" : g.lan && gatewayKeys?.length ? "Use a gateway key to track usage" : "Loopback only · the key can be anything");
+  else note.textContent = t(remote ? "Local network · an enabled gateway key is required" : g.lan && gatewayKeys?.length ? "Use a gateway key to track usage" : "Loopback only · the key can be anything");
 
   box.append(...field("API", segs(Object.entries(FLAVORS).map(([k, v]) => [k, v.name]), flavor, (id) => { flavor = id; localStorage.setItem("magpie.flavor", id); renderConnect(); }), t(f.note)));
 
@@ -9048,7 +9087,7 @@ function renderImport(im) {
 }
 
 // Which of the vendor's models the agents get to see: click to toggle, type
-// to add one the vendor's list lacks, Refresh to ask the vendor again.
+// to add one the vendor's list lacks, Fetch models to ask the vendor again.
 // The endpoints a provider serves, with a Test that reports against each one.
 function renderEndpoints(p, src) {
   const eps = el("div", "eps");
@@ -9515,7 +9554,7 @@ function renderModels(p) {
       c.onclick = () => { draft.chosen = draft.chosen.filter((x) => x !== id); draw(); };
       chips.append(c);
     }
-    if (!p.models.length && !draft.chosen.length) chips.append(el("span", "hint", t("The vendor's list is empty. Refresh, or type a model id.")));
+    if (!p.models.length && !draft.chosen.length) chips.append(el("span", "hint", t("The vendor's list is empty. Fetch models again, or type a model id.")));
     // the list is of models agents chat with: image, embedding and speech
     // models are left out of it, and an image model is set in Settings
     else if (f && !chips.children.length) chips.append(el("span", "hint", t("No model here matches “{q}”. Image, embedding and speech models aren't listed, as agents can't chat with them: pick an image model in Settings → Images.", { q: q.value.trim() })));
@@ -9899,8 +9938,13 @@ function renderModels(p) {
     if (e.key === "Enter") take();
     else if (e.key === "Escape") cancelEdit();
   };
-  const refresh = el("button", "text action", t("Refresh"));
-  refresh.title = t("Ask the vendor which models it serves");
+  // named as the add form's Fetch models is, the button there before the
+  // Save (耍赖天都爱 on Discord: 模型拉取一次就没有这个按钮了 — a key moved
+  // to another group on a relay serves another list), and "again" once a
+  // list was fetched. It asks with the key typed (asTyped), and merges as
+  // Refetch does: picks the new list lacks go, ids added by hand stay
+  const refresh = el("button", "text action fetch-models", t(p.fetched ? "Fetch models again" : "Fetch models"));
+  refresh.title = t("Ask the vendor for its model list with the key typed here, and again after the key moves to another group: picks it no longer lists are dropped, ids added by hand stay");
   refresh.onclick = async () => {
     refresh.classList.add("busy");
     try {
@@ -9962,14 +10006,14 @@ function renderModels(p) {
   // a plugin's list that failed is its defaults, not the vendor's
   if (p.fetched && !p.listError) foot.append(el("span", "hint", t("vendor list · {when}", { when: ago(p.fetched) })));
   // a signed-in account's list, until the vendor gives one, is magpie's own
-  else if (p.models.length) foot.append(el("span", "hint", t(p.account ? "magpie's list · Refresh asks the vendor" : decideOnly(p) ? "Jev's names · Refresh asks the vendor" : "from models.dev · Refresh asks the vendor")));
+  else if (p.models.length) foot.append(el("span", "hint", t(p.account ? "magpie's list · Fetch models asks the vendor" : decideOnly(p) ? "Jev's names · Fetch models asks the vendor" : "from models.dev · Fetch models asks the vendor")));
   if (p.fetched && !p.account) {
     // the fetched list stands in for the picks when none are made
     const forget = el("button", "text action", t("Forget"));
-    forget.title = t("Drop the list fetched from the vendor; the models.dev one is used until Refresh");
+    forget.title = t("Drop the list fetched from the vendor; the models.dev one is used until models are fetched again");
     forget.onclick = async () => {
       forget.classList.add("busy");
-      try { await api("provider/unfetch", { id: p.id }); await loadProviders(); } // the picks stay in the draft, as on a Refresh
+      try { await api("provider/unfetch", { id: p.id }); await loadProviders(); } // the picks stay in the draft, as on a Fetch models
       catch (e) { status(e.message, "err"); forget.classList.remove("busy"); }
     };
     foot.append(forget);
@@ -10277,8 +10321,10 @@ function pluginSubs() {
 }
 
 // importSay: what the import of an app's accounts says — where its files
-// come from, and who they are checked with. A ChatGPT or Claude sign-in is
-// refreshed as it comes in, which spends the file's refresh token.
+// come from, and who they are checked with. A ChatGPT sign-in is refreshed
+// as it comes in, which spends the file's refresh token; a Claude one is
+// kept as it came and spent when Claude Code first renews it (#1453: the
+// tool a file came from is told it loses the account either way).
 function importSay(agent) {
   if (agent === "factory") {
     return {
@@ -10291,15 +10337,25 @@ function importSay(agent) {
       row: t("Add an account by API key…"),
     };
   }
-  if (agent === "codex" || agent === "claude") {
-    const vendor = agent === "codex" ? "ChatGPT" : "Claude";
-    const own = agent === "codex" ? "Codex's auth.json" : "Claude Code's .credentials.json";
+  if (agent === "codex") {
+    // Cockpit Tools exports in its own shape (CLIProxyAPI's), Codex's
+    // auth.json, CPA and Sub2API: all read (login_import.go)
     return {
-      from: t("Bring in accounts from CLIProxyAPI's auth files or {own}", { own }),
-      intro: t("Choose or paste CLIProxyAPI's auth files (JSON) or {own}. Each account's sign-in is refreshed with {vendor} before it is added.", { own, vendor }),
-      spent: t("Refreshing it spends the file's sign-in: the tool it came from will need to sign in again to use that account."),
-      checking: t("Checking the accounts with {vendor}…", { vendor }),
+      from: t("Bring in accounts from Codex's auth.json, or exports from Cockpit Tools, CLIProxyAPI or Sub2API"),
+      intro: t("Choose or paste one or more files: Codex's auth.json, or an export from Cockpit Tools, CLIProxyAPI or Sub2API. Each account's sign-in is refreshed with ChatGPT before it is added."),
+      spent: t("This takes the sign-in over: the tool the file came from (Codex on another computer, Cockpit Tools, CLIProxyAPI) is signed out of that account and has to sign in again. The file itself is only read."),
+      checking: t("Checking the accounts with {vendor}…", { vendor: "ChatGPT" }),
       checks: t("Each account's sign-in is refreshed and its account looked up, as signing in does."),
+    };
+  }
+  if (agent === "claude") {
+    // nothing is asked of Anthropic: the sign-in is kept as the file has it
+    return {
+      from: t("Bring in accounts from CLIProxyAPI's auth files or {own}", { own: "Claude Code's .credentials.json" }),
+      intro: t("Choose or paste CLIProxyAPI's auth files (JSON) or {own}. Each account is kept as the file has it.", { own: "Claude Code's .credentials.json" }),
+      spent: t("Claude Code renews the sign-in the first time it uses it, and the file's copy then stops working: the tool it came from has to sign in again."),
+      checking: t("Adding the accounts…"),
+      checks: t("Each account is kept as the file has it; nothing is asked of Claude."),
     };
   }
   return {
@@ -11218,16 +11274,18 @@ function startImport(agent) {
 
 async function runImport(agent) {
   const files = signing.files.map((f) => f.text);
-  if (signing.text.trim()) files.push(signing.text);
+  // each file's name, to say which one held no account (a result's file)
+  const names = signing.files.map((f) => f.name);
+  if (signing.text.trim()) { files.push(signing.text); names.push(t("The pasted text")); }
   if (!files.length) return;
-  signing = { agent, state: "importing" };
+  signing = { agent, state: "importing", names };
   renderProviders();
   try {
     const r = await api("signin/import", { agent, files });
     if (signing?.agent !== agent) return;
     providers = r.providers;
     const added = r.results.filter((x) => x.status === "added" || x.status === "updated");
-    signing = { agent, state: "imported", results: r.results };
+    signing = { agent, state: "imported", results: r.results, names };
     delete loginUsage[agent];
     const p = providers.providers.find((x) => x.account?.agent === agent);
     if (p && added.length) {
@@ -11265,7 +11323,9 @@ function renderLoginImport(sub) {
     const rs = el("span", "results");
     for (const r of signing.results || []) {
       const row = el("span", "res " + r.status);
-      row.append(el("span", "u", r.user), el("span", "st", t(importStatus[r.status] || r.status)));
+      // a file that held no account is named, not passed over
+      const who = r.user || (r.file && signing.names?.[r.file - 1]) || "";
+      row.append(el("span", "u", who), el("span", "st", t(importStatus[r.status] || r.status)));
       if (r.error) { row.title = r.error; row.append(el("span", "why", r.error)); }
       rs.append(row);
     }
@@ -19894,6 +19954,23 @@ function renderReplies(s, keep) {
   box.append(r, l);
 }
 
+// REDACT_KINDS are redact.Categories as Settings lists them: id, name,
+// what it finds, and whether it is masked until the user chooses (a Go test
+// holds the ids and the defaults to redact's). The ones in nearly every
+// coding request (the agent's folder, logs, configs) are off.
+const REDACT_KINDS = [
+  ["ssn", "Social Security numbers", "US SSNs, in the ranges that are given out", true],
+  ["passport", "Passport numbers", "After the word passport, 护照 or パスポート", true],
+  ["iban", "IBANs", "Bank account numbers whose checksum adds up", true],
+  ["birthday", "Birthdays", "A date after birthday, DOB, born or 生日; a date alone stays", true],
+  ["mac", "MAC addresses", "A network card's hardware address", true],
+  ["serial", "Serial numbers", "After S/N, Serial or 序列号", true],
+  ["home", "User name in home folders", "The name in /Users/name, /home/name and C:\\Users\\name. Off by default: agents send their folder with every request", false],
+  ["userhost", "User and computer names", "user@host in a shell prompt or an ssh command, and hostname or user lines", false],
+  ["ip", "Public IP addresses", "Private, local and documentation addresses stay. Off by default: logs and configs are full of them", false],
+  ["bucket", "Cloud storage buckets", "The bucket in s3://, gs://, oss://, cos:// and storage URLs; the path in it stays", false],
+];
+
 // renderRedact: what the gateway masks before a request goes to a vendor —
 // secrets, personal data, the user's own words — and puts back in what the
 // vendor answers.
@@ -19918,6 +19995,19 @@ function renderRedact(s, keep) {
       if (redactPersonal) window.hideAccounts?.set(true);
       savePrefs({ ...keep, redactPersonal });
     }));
+  // each other kind of personal data, on or off of its own while personal
+  // data is masked; only the user's choices are kept (redactKinds)
+  if (s.redactPersonal) for (const [id, name, sub, on] of REDACT_KINDS) {
+    const kinds = s.redactKinds || {};
+    const r = el("div", "row pref redact-kind");
+    r.dataset.redact = id;
+    const who = el("div", "who");
+    who.append(el("div", "name", t(name)), el("div", "sub", t(sub)));
+    const val = el("div", "val");
+    val.append(onOff(kinds[id] ?? on, (v) => savePrefs({ ...keep, redactKinds: { ...kinds, [id]: v } })));
+    r.append(who, val);
+    box.append(r);
+  }
   // Routing's and Usage's Hide accounts, here too, where privacy is looked for
   if (window.hideAccounts) row(t("Hide accounts"), t("Email addresses and account names on Usage and Routing are blurred, for a screenshot to share"),
     onOff(window.hideAccounts.on(), (on) => { window.hideAccounts.set(on); renderSettings(); }));
@@ -20470,7 +20560,7 @@ function prefsKeep(s) {
     uiFont: s.uiFont || null, codeFont: s.codeFont || null,
     otel: s.otel || {},
     trayUsages: s.trayUsages || [],
-    redact: !!s.redact, redactPersonal: !!s.redactPersonal, redactWords: s.redactWords || [], codexWarmup: s.codexWarmup || "",
+    redact: !!s.redact, redactPersonal: !!s.redactPersonal, redactKinds: s.redactKinds || {}, redactWords: s.redactWords || [], codexWarmup: s.codexWarmup || "",
     claudeWarmup: s.claudeWarmup || "", codexWarmAt: s.codexWarmAt || "", claudeWarmAt: s.claudeWarmAt || "",
     codexWarmAts: warmTimes(s.codexWarmAts, s.codexWarmAt), claudeWarmAts: warmTimes(s.claudeWarmAts, s.claudeWarmAt), workbuddyCheckin: !!s.workbuddyCheckin, traeCheckin: !!s.traeCheckin, minimaxCheckin: !!s.minimaxCheckin, qoderCheckin: !!s.qoderCheckin, noStats: !!s.noStats, noUsageStats: !!s.noUsageStats,
     memberModel: !!s.memberModel, noLoopGuard: !!s.noLoopGuard,

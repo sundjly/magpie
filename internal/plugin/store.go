@@ -476,22 +476,33 @@ func notPlugin(target string) error {
 	return errors.New(why)
 }
 
-// Update installs the version of each npm plugin its spec says now
-// (latest, for the most part: npm's newest, asked now, installAt), and
-// fetches each git one again.
+// Update installs npm's newest version (asked now, installAt) of each npm
+// plugin, and fetches each git one again. A plugin pinned to a version
+// that npm has a newer one of is updated too, and unpinned, as its row's
+// Update does: the page counts it in Update all, and the CLI's update
+// says it installs the newest of each (ARNO on Discord: a plugin updated
+// with Update all still said an update was out, pinned where it was). A
+// pinned one already at npm's newest stays as its spec says.
 func Update(ctx context.Context) error {
 	var errs []error
 	for _, e := range Load().Plugins {
 		if !IsPath(e.Spec) {
 			v := ""
-			if !IsGit(e.Spec) && !Pinned(e.Spec) {
+			if !IsGit(e.Spec) {
 				v = newestOf(ctx, Name(e.Spec))
 			}
 			var err error
-			if v != "" {
+			switch {
+			case v != "" && Pinned(e.Spec):
+				if update.Newer(v, Installed(e.Spec)) {
+					_, err = add(ctx, Name(e.Spec), v)
+				} else {
+					err = reinstall(ctx, e.Spec)
+				}
+			case v != "":
 				err = installAt(ctx, Name(e.Spec), v)
-			} else {
-				// pinned, a git one, or npm not answering: as its spec says
+			default:
+				// a git one, or npm not answering: as its spec says
 				err = reinstall(ctx, e.Spec)
 			}
 			if err != nil {

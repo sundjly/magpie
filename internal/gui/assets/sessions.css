@@ -87,3 +87,5 @@
 .sm-record-sub { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
 .sm-record-clear { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 5px; }
 .sm-record-clear:hover:not(:disabled) { color: var(--red); background: var(--red-soft); }
+/* a folder's next page of sessions, under the ones drawn */
+.sm-group .sm-more { margin: 4px 8px 6px; }

@@ -345,6 +345,18 @@ level picked is posted for `subagent_effort` alone and lights the square.
 Claude Code's subagents (#468) get no square until it runs through magpie
 (nothing to pick), and one that says "same as model" once it does.
 
+`codex-subagents-lead.test.cjs` draws Codex's subagents square (willz on
+Discord) in Chromium and WebKit, in English, Chinese, Traditional Chinese,
+Japanese and German, at 1100px and 560px. Codex's lead may name a model in
+spawn_agent, and that overrides `default_subagent_model`. So the unset square
+reads "the lead's pick, else same as model" (「由主代理自选，未指定时同主模型」)
+and its title says how to make every subagent use one model. This holds on
+the local row and on a WSL row. The picker opens on "Lead's pick", with the
+model and "unless the lead names another" beside it. Picking a model posts
+`subagent`, and the square still carries the hint. Clicking the first entry
+unsets it again. A click doesn't scroll the page. Claude Code's subagents
+still say "same as model".
+
 `tier-effort.test.cjs` draws Claude Code's per-tier effort (#536) in Chromium
 and WebKit, English and Chinese: no tier's effort is a field of its own; the
 tiers' square lists each tier's model and then its effort (the bars, and "the

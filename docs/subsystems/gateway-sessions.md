@@ -17,9 +17,33 @@ lookups use the cached identity index. Native exclusions are applied per caller.
 
 When the same identity is present in a native session, the native session wins
 and the gateway projection is omitted. Gateway projections have no path,
-resume command, terminal action, or native-file delete capability. Their
+resume command or terminal action: the agent's own files of them are not on
+this computer. Their rows carry `gateway: true`; the Sessions page groups them
+under "Seen through the gateway" rather than "No folder", and their size is the
+text magpie recorded of them (`sessions.GatewaySizes`), shown only when there
+is some. Their
 models, token totals, start/last timestamps and effective prices come from the
 same usage records used by Usage and stats endpoints.
+
+A gateway projection can be deleted (lc on Discord). `sessions.DeleteGateway`
+moves its recorded text folders (`gateway-conversations/<date>/<identity hash>`)
+into magpie's session trash under `trash/sessions/gateway/`, with a note
+marked `gateway`, and adds `{agent, id, last}` to
+`gateway-sessions-hidden.json` in the config directory. `/api/sessions` and
+`/api/sessions/manage` leave out a hidden session up to that last request; a
+newer request lists it again. The usage ledger is not changed, so Usage,
+`/api/sessions/one` and the stats endpoints keep what it spent. A session with
+a request in the last minute is refused as active. Restore moves the text back
+(items that expired or were cleared meanwhile are skipped; a session recorded
+again on the same day is refused rather than overwritten) and unhides it; it
+accepts only items that are that session's identity folders in the store.
+Delete forever keeps it hidden. The recording's promises hold in the trash:
+the hourly cleanup erases trashed gateway text past the seven days, "Delete
+saved conversations…" erases it too (the notes stay, so Restore can still
+list the session), and `HasGatewayConversations` counts it.
+Implementation: [`internal/sessions/gateway_delete.go`](../../internal/sessions/gateway_delete.go),
+`Restore` in [`internal/sessions/manage.go`](../../internal/sessions/manage.go), and
+[`internal/gui/sessions_manage.go`](../../internal/gui/sessions_manage.go).
 All-time statistics include gateway history older than native files. Calendar
 activity and output totals use each session's actual request dates, including
 intermediate dates; extending the range rebases existing native calendar indices.
@@ -45,7 +69,8 @@ Other Settings saves retain the latest stored consent under that lock, so an
 older snapshot cannot re-enable recording after it is stopped. `KeepOwn`
 also prevents sync/restore from enabling it.
 `POST /api/sessions/recording` changes this switch; `clear: true` disables it and
-erases only locally recorded gateway content, leaving usage and native files.
+erases only locally recorded gateway content (the store and deleted sessions'
+text in the trash), leaving usage and native files.
 The existing browser-mode authentication guard protects these APIs; this is an
 administrator view, not per-caller-key access control.
 
@@ -106,5 +131,8 @@ cannot replace content fetched after clearing the store.
 Verification: `TestGatewayConversation*` (`TestGatewayConversationNeedsTheClientsSession`
 and `TestGatewayConversationClientRequestPrefixedSession` for the two rules above), `TestGatewaySessionHistoryAndCalendar`,
 `TestGatewaySessionsNativeWinsBeforeLimits`,
-`TestGatewayStatsRebaseNativeCalendar`, and `TestCORSKeyThroughTheServer`; browser
-`gateway-conversations.test.cjs`, `sessions-talk.test.cjs`, and locale checks.
+`TestGatewayStatsRebaseNativeCalendar`, `TestCORSKeyThroughTheServer`,
+`TestSessionsDeleteGatewaySession`, `TestGatewayDeleteTrashExpires`, `TestGatewayPurgeKeepsItHidden`, `TestGatewayDeleteNothingRecorded` and
+`TestGatewayRestoreRefusesForeignItems`; browser
+`gateway-conversations.test.cjs`, `sessions-talk.test.cjs`,
+`sessions-gateway-delete.test.cjs`, and locale checks.

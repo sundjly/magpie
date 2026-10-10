@@ -28,7 +28,8 @@ type ExternalSession struct {
 
 // MergeExternal adds external sessions to a file-backed listing. Native
 // sessions win on the exact Agent+ID identity and external entries are kept
-// read-only with a gateway transcript reader, but no resume, terminal or delete capability.
+// read-only (no file of the agent's to resume or open) with a gateway transcript
+// reader; magpie's own record of one is deleted by DeleteGateway.
 func MergeExternal(native []Session, external []ExternalSession) []Session {
 	seen := map[string]bool{}
 	for _, s := range native {
@@ -39,7 +40,7 @@ func MergeExternal(native []Session, external []ExternalSession) []Session {
 		if e.Agent == "" || e.ID == "" || seen[e.Agent+"|"+e.ID] {
 			continue
 		}
-		s := Session{ReadOnly: true, Transcript: true, Agent: e.Agent, ID: e.ID, Title: e.ID, Start: e.Start, Last: e.Last, Models: []Model{}, Unpriced: e.Unpriced}
+		s := Session{ReadOnly: true, Gateway: true, Transcript: true, Agent: e.Agent, ID: e.ID, Title: e.ID, Start: e.Start, Last: e.Last, Models: []Model{}, Unpriced: e.Unpriced}
 		for _, m := range e.Models {
 			s.Models = append(s.Models, Model{Model: m.Model, Tokens: m.Tokens, Cost: m.Cost, Priced: m.Priced})
 			s.Tokens.add(m.Tokens)

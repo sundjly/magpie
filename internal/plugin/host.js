@@ -1458,7 +1458,8 @@ async function load({ provider, account, proxy }) {
 //       count, when it counts in amounts: amount of limit used, in unit,
 //       "credits"), span? (seconds the window runs), model? (a
 //       word in the ids of the only models it counts), models? / notModels?
-//       (the ids it counts, or all but these), aside? (using it up doesn't
+//       (the ids it counts, or all but these; a bare id and its id@size
+//       count as one), aside? (using it up doesn't
 //       stop the account) }],
 //     signIn?: "expired" | "kept" | "renewed" (what the read means for the
 //       account's sign-in, as a model request's X-Magpie-Sign-In says;

@@ -37,7 +37,7 @@ const providerUsage = `usage:
   magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose:
                                           ids… replace the list, +id adds one, -id takes one out, all: the default
-  magpie provider refresh <id>            fetch the vendor's model list again (as the app's Refresh)
+  magpie provider refresh <id>            fetch the vendor's model list again (as the app's Fetch models)
   magpie provider account-models <id> [account|key [ids…|all]]
                                           the models one account or key alone serves; all: every model the provider has
   magpie provider account-cap <id> [account [percent|off]]
@@ -960,15 +960,16 @@ func refreshLive(ctx context.Context) {
 	}
 }
 
-// keyNote says who the gateway takes any key from: this machine alone,
-// unless MAGPIE_ADDR puts it on the network (a server, a Docker image)
-// without sharing it from Settings, when it is anyone who reaches it.
+// keyNote says who the gateway takes any key from: this machine (in a
+// container, the container) alone. Shared from Settings, or put on the
+// network by MAGPIE_ADDR (a server, a Docker image), it takes others with
+// an enabled gateway key.
 func keyNote() string {
-	if s := settings.Load(); s.LAN {
+	if settings.Load().LAN || gateway.OnNetwork() {
+		if gateway.InContainer() {
+			return "(anything works inside the container; from its host and other machines, an enabled gateway key — magpie gateway-key add <name>)"
+		}
 		return "(anything works from this machine; from others, an enabled gateway key — magpie gateway-key add <name>)"
-	}
-	if gateway.OpenToAnyone() {
-		return "(anything works, from anyone who reaches it — share it from Settings to require a key)"
 	}
 	return "(anything works; the gateway only listens on localhost)"
 }
@@ -1008,6 +1009,9 @@ func serve() error {
 	s := gateway.New()
 	go stats.Run(version, "serve")
 	go catalog.KeepFresh() // new models' prices, in a gateway left running
+	// Codex's background app-server, restarted when it has the list from
+	// before a change and no codex session is on it
+	go agent.KeepCodexDaemonCurrent(context.Background())
 	public := advertisedURL()
 	fmt.Println(green.Render("●"), "magpie gateway on", bold.Render(gateway.URL()))
 	fmt.Println(muted.Render("  OpenAI  "), public+"/v1/chat/completions", muted.Render("·"), public+"/v1/responses")

@@ -1191,10 +1191,16 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		s := settings.Load()
+		was := s.DesktopLongest
 		s.DesktopLongest = in.On
 		if err := settings.Save(s); err != nil {
 			fail(rw, err)
 			return
+		}
+		// a model listed by its 1M id leaves the window Claude Code is
+		// told for Desktop's others, or joins it (#1458)
+		if was != in.On {
+			catalog.Touched()
 		}
 		writeJSON(rw, settingsState())
 	})

@@ -130,6 +130,27 @@ func codexIn(at place) *Agent {
 		}
 		return at.spell == nil && !filepath.IsAbs(c) && filepath.Clean(filepath.Join(dir, c)) == filepath.Clean(catalogPath)
 	}
+	// ownList is magpie's model list for Codex as written to catalogPath:
+	// what the user added by hand to the list there (a key magpie doesn't
+	// write, supports_reasoning_summaries on a model magpie gave none) is
+	// kept, not written over by the next model switch or sync (#1450)
+	ownList := func() []byte {
+		cur, _ := edit.Read(catalogPath)
+		return codexcat.Keep(cur, codexcat.Catalog(magpieModels("codex")))
+	}
+	// dropList takes the list away as magpie steps out as Codex's
+	// provider; one holding what the user added stays, which the config
+	// no longer names, for ownList to keep when magpie is back
+	dropList := func() {
+		cur, err := edit.Read(catalogPath)
+		if err != nil {
+			return
+		}
+		b := codexcat.Catalog(magpieModels("codex"))
+		if string(codexcat.Keep(cur, b)) == string(b) {
+			os.Remove(catalogPath)
+		}
+	}
 	asProvider := func() bool { return get("model_provider") == magpieID }
 	viaBase := func() bool { return isCodexGatewayOn(get("openai_base_url"), at.host()) }
 	routed := func() bool { return asProvider() || viaBase() }
@@ -241,7 +262,7 @@ func codexIn(at place) *Agent {
 		if err := edit.DelTOMLTop(path, "model_provider", "model_catalog_json"); err != nil {
 			return err
 		}
-		os.Remove(catalogPath)
+		dropList()
 		return nil
 	}
 	// isCCSwitchMirror reports whether a model_providers table is CC Switch's
@@ -634,7 +655,7 @@ func codexIn(at place) *Agent {
 			if err := edit.DelTOMLTop(path, "model", "model_provider", "model_catalog_json"); err != nil {
 				return err
 			}
-			os.Remove(catalogPath)
+			dropList()
 			forget(at.key("codex.model"), at.key("codex.effort"), at.key("codex.provider"), at.key("codex.catalog"), at.key("codex.out"), at.key("codex.joined"), at.key("codex.beside"))
 			return nil
 		}
@@ -700,7 +721,7 @@ func codexIn(at place) *Agent {
 			if err := putProvider(); err != nil {
 				return err
 			}
-			if err := edit.WriteAtomic(catalogPath, codexcat.Catalog(magpieModels("codex"))); err != nil {
+			if err := edit.WriteAtomic(catalogPath, ownList()); err != nil {
 				return err
 			}
 			// a thread started on Codex's built-in provider stays on it when
@@ -771,7 +792,7 @@ func codexIn(at place) *Agent {
 			if err != nil {
 				return err
 			}
-			os.Remove(catalogPath)
+			dropList()
 			forget(at.key("codex.model"), at.key("codex.effort"), at.key("codex.provider"), at.key("codex.catalog"))
 			return settle()
 		},
@@ -882,7 +903,7 @@ func codexIn(at place) *Agent {
 						return err
 					}
 				}
-				b := codexcat.Catalog(magpieModels("codex"))
+				b := ownList()
 				if cur, _ := edit.Read(catalogPath); string(cur) != string(b) {
 					if err := edit.WriteAtomic(catalogPath, b); err != nil {
 						return err
@@ -966,10 +987,16 @@ func codexIn(at place) *Agent {
 		// codex session keeps the old list: a new one shows Codex's own
 		// models until that daemon is restarted, while the desktop app's
 		// own app-server, restarted with the app, has magpie's (TJHHHH,
-		// luci). magpie doesn't restart it: that ends its sessions.
+		// luci). With no codex session on it magpie restarts it itself
+		// (codexDaemonNotice); with one, the user says when.
 		Notice: func() string {
+			if at.spell == nil {
+				if n, ok := codexDaemonNotice(path); ok {
+					return n
+				}
+			}
 			if codexRunning() {
-				return "Codex builds its model list at start-up — restart the Codex app, open codex sessions and the app-server they share (" + provider.CodexDaemonRestart + ") to see this."
+				return codexRestartAll
 			}
 			return ""
 		},
@@ -1000,7 +1027,11 @@ func codexIn(at place) *Agent {
 				// Codex lists only the first few models in the spawn_agent
 				// tool it gives the model, its own ahead of magpie's, so a
 				// subagent is put on one of magpie's here, where it can't be
-				// by the model unless asked by name
+				// by the model unless asked by name. It is only the model a
+				// spawn that names none starts on: unset, the lead's own,
+				// but a lead naming another in spawn_agent gets that one
+				// (core/src/agent/child_config.rs), so the GUI says the
+				// lead picks rather than "same as model" (willz on Discord)
 				Key: "subagent", Label: "subagents", Quiet: true,
 				Get: func() string { v, _ := subagent(); return v },
 				Set: func(v string) error {

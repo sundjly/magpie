@@ -119,6 +119,8 @@ var cliSpecs = map[string]cliSpec{
 	// exists, but its installed-binary update path is not exercised here, so
 	// only its npm package and brew cask are recognized
 	"atomcode": {npm: []string{"@atomgit.com/atomcode"}, brew: []string{"atomcode"}},
+	// Snow CLI is published on npm alone (snow-ai)
+	"snow": {npm: []string{"snow-ai"}},
 	// omo update, however it was installed: OmO's own updater, which moves
 	// the engine it pins (senpi) with it
 	"omo": {npm: []string{"omo-ai"},
