@@ -34,10 +34,10 @@ type Tagged struct {
 	License     string    `json:"license,omitempty"` // SPDX id
 	Pushed      time.Time `json:"pushed"`
 	// from its package.json on the default branch: what bun will install
-	// it as, its version, and whether it is gateway middleware
+	// it as, its version, and whether it is gateway middleware or an agent
 	Package string `json:"package,omitempty"`
 	Version string `json:"version,omitempty"`
-	Kind    string `json:"kind,omitempty"` // "middleware" when that is all it is
+	Kind    string `json:"kind,omitempty"` // "middleware" or "agent" when that is all it is
 	// its package.json's magpie.icon, as an installed plugin gives its
 	// provider one: an https URL or a data:image URI, as it is written
 	Icon string `json:"icon,omitempty"`
@@ -211,6 +211,7 @@ func askTagged(ctx context.Context) ([]Tagged, error) {
 				Exports json.RawMessage `json:"exports"`
 				Magpie  struct {
 					Middleware string `json:"middleware"`
+					Agent      string `json:"agent"`
 					Icon       string `json:"icon"`
 				} `json:"magpie"`
 			}
@@ -221,11 +222,14 @@ func askTagged(ctx context.Context) ([]Tagged, error) {
 			t.Package, t.Version = pj.Name, pj.Version
 			// a picture, as host.js's iconOf takes one: magpie checks and
 			// keeps it before the page shows it (the GUI's /api/plugins/github)
-			if ic := strings.TrimSpace(pj.Magpie.Icon); len(ic) <= 3<<19 && (strings.HasPrefix(strings.ToLower(ic), "https://") || strings.HasPrefix(strings.ToLower(ic), "data:image/")) {
-				t.Icon = ic
-			}
-			if strings.TrimSpace(pj.Magpie.Middleware) != "" && pj.Main == "" && len(pj.Exports) == 0 {
-				t.Kind = "middleware"
+			t.Icon = ownIcon(pj.Magpie.Icon)
+			if pj.Main == "" && len(pj.Exports) == 0 {
+				switch {
+				case strings.TrimSpace(pj.Magpie.Middleware) != "":
+					t.Kind = "middleware"
+				case strings.TrimSpace(pj.Magpie.Agent) != "":
+					t.Kind = "agent"
+				}
 			}
 			// published to npm from this repository: npm's copy is the one
 			// built to be installed (a repository often leaves its dist out,
@@ -252,7 +256,9 @@ func askTagged(ctx context.Context) ([]Tagged, error) {
 			// would never load (#1327)
 			if IsGit(t.Spec) || !npmNames {
 				entry := pj.Magpie.Middleware
-				if t.Kind != "middleware" {
+				if t.Kind == "agent" {
+					entry = pj.Magpie.Agent
+				} else if t.Kind != "middleware" {
 					entry = pkgEntry(pj.Exports, pj.Main)
 					if !IsGit(t.Spec) {
 						entry = pkgEntry(nil, "")

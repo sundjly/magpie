@@ -219,7 +219,7 @@ func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (ou
 	var unlisted []candidate
 	for i, k := range keys {
 		q := p.WithKey(k)
-		if len(q.Speaks()) == 0 {
+		if len(q.Speaks()) == 0 && !q.DecidesModel(model) {
 			continue // made for a protocol this provider has no endpoint for
 		}
 		rest := p.ID
@@ -346,7 +346,8 @@ func (s *Server) plan(p provider.Provider, model string, from provider.Protocol)
 // weighed together as the group's routing says — in order, member by
 // member, each as its own provider's routing orders it; else all as one,
 // so a subscription whose allowance renews soonest goes first whichever
-// provider it is of. A group in the group is planned by its own routing
+// provider it is of, but for a provider set to route another way, which
+// is planned as a group in the group is (ownRouting). A group in the group is planned by its own routing
 // alone, whatever the group's (#576): in order, in its place; else as
 // one, weighed with the rest by the one it would try first, and tried
 // whole where that one goes — the group's routing picks between its
@@ -399,7 +400,7 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 		// where the one it would try first is, the rest of it after
 		type unit struct {
 			m     provider.Member // the model, for one of its keys
-			cs    []candidate     // a group in g: its own order
+			cs    []candidate     // a group in g, or a provider routed its own way: its own order
 			order []Weighed
 		}
 		var units []unit
@@ -420,19 +421,28 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 				cs := planLevel(m.Via[depth], ms[i:j], depth+1, from, &sub, asides, wAsides)
 				pl.left = append(pl.left, sub.left...)
 				if len(cs) > 0 {
-					// weighed by the first it would try that isn't resting
-					head := cs[0]
-					for _, c := range cs {
-						if _, resting := restOf(c.restKey()); !resting {
-							if _, resting = restOf(c.restID()); !resting {
-								head = c
-								break
-							}
-						}
-					}
-					add(unit{cs: cs, order: sub.order}, head)
+					add(unit{cs: cs, order: sub.order}, firstAwake(cs))
 				}
 				i = j
+				continue
+			}
+			if ownRouting(m.Provider, g) {
+				// a provider routed its own way keeps it, as a group
+				// in the group does: weighed as one by the first it
+				// would try, and tried whole in its own order (kchen0x
+				// on X: Antigravity in order inside a Smart group)
+				cs, wg := weigh(m.Provider, keys(m), m.Model, from)
+				var order []Weighed
+				for k, c := range cs {
+					w := weighed(c, m.Provider, wg, false, from)
+					w.Turn = k == 0 && (m.Provider.Routing == provider.Rotate || m.Provider.Routing == provider.Weighted) && len(cs) > 1
+					w.Via = m.Groups()
+					order = append(order, w)
+				}
+				if len(cs) > 0 {
+					add(unit{cs: cs, order: order}, firstAwake(cs))
+				}
+				i++
 				continue
 			}
 			for _, c := range keys(m) {
@@ -490,6 +500,29 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 	return out
 }
 
+// firstAwake is the first of cs that isn't resting, else the first: what
+// a group in a group, or a provider routed its own way, is weighed by.
+func firstAwake(cs []candidate) candidate {
+	for _, c := range cs {
+		if _, resting := restOf(c.restKey()); !resting {
+			if _, resting = restOf(c.restID()); !resting {
+				return c
+			}
+		}
+	}
+	return cs[0]
+}
+
+// ownRouting: p, a model's provider in g, is routed by its own routing
+// rather than weighed key by key with the rest of g. One left on Smart,
+// the default, or routed as g is, is weighed with g's other keys and
+// accounts as one pool, so a subscription whose allowance renews soonest
+// goes first whichever provider it is of; one set another way keeps it,
+// as the user set it, whatever g's routing.
+func ownRouting(p provider.Provider, g provider.Group) bool {
+	return p.Routing != "" && p.Routing != g.Routing
+}
+
 // capHeld is how the account acct of p is held at its usage cap for
 // model at now — a window at or past its own cap, else the account's — or
 // at 100% as a Codex account set not to spend its credits; nil when
@@ -501,6 +534,12 @@ func capHeld(p, acct provider.Provider, model string, now time.Time) *capHold {
 	}
 	a := acct.Account
 	caps := provider.HoldCaps(p, a.Agent, a.User)
+	if a.Agent == "codex" && freeOnChatGPT(model) {
+		// a call ChatGPT counts in no window spends nothing a usage cap
+		// keeps (#1593); credits set not to be spent still hold it at
+		// 100%, as nothing says the backend answers it there
+		caps = provider.WindowCaps{Credits: caps.Credits}
+	}
 	if !caps.Holds() {
 		return nil
 	}
@@ -742,11 +781,25 @@ var retiredWords = regexp.MustCompile(`(?i)"ModelDeprecated"|model_deprecated|mo
 func modelRetired(status int, body []byte) bool {
 	switch status {
 	case 400, 404, 410, 422:
+	case 401:
+		// OpenCode Zen's word for a model it serves no more, said with
+		// its sign-in status: the key is good (a bad one is AuthError)
+		return zenModelGone.Match(body)
 	default:
 		return false
 	}
 	return retiredWords.Match(body) && !quotaWords.Match(body)
 }
+
+// zenModelGone is OpenCode Zen's 401 for a model it no longer serves,
+// as it answered glm-5-free and kimi-k2.5-free on 2026-10-10 once they
+// left its free list: {"type":"error","error":{"type":"ModelError",
+// "message":"Model glm-5-free is not supported"}}. Read in the vendor's
+// body, or in the message magpie put it into ("OpenCode Zen Free: Model
+// glm-5-free is not supported"). Not its "is not supported for format
+// anthropic", a model served on another API (wrongEndpoint), and not its
+// AuthError "Invalid API key." for a key it doesn't take.
+var zenModelGone = regexp.MustCompile(`(^|[\s:"])Model [^"\s]+ is not supported("|\s*$)`)
 
 // refusedWords are how a vendor says it won't take requests from this
 // client at all — WorkBuddy's "Illegal API invocation from an unapproved
@@ -772,6 +825,23 @@ var shapeWords = regexp.MustCompile(`(?i)failed to deserialize|unknown (item |co
 func shapeRefused(status int, body []byte) bool {
 	return (status == 400 || status == 422) && shapeWords.Match(body) &&
 		!quotaWords.Match(body) && !unservedWords.Match(body) && !refusedWords.Match(body)
+}
+
+// regionWords are how a vendor says it doesn't serve where the request
+// comes from: Google's 400 FAILED_PRECONDITION "User location is not
+// supported for the API use." (Gemini, Antigravity, Code Assist; #1621),
+// and OpenAI's "unsupported_country_region_territory", which a relay may
+// pass on as a 400. It is about the address the request leaves from, not
+// the request or the model: another member, going another way, may
+// answer, and this one rests only as briefly as any other failure does.
+// A request's own field named location ("location field is not
+// supported") isn't one.
+var regionWords = regexp.MustCompile(`(?i)\buser location is not supported for the api use\b|unsupported_country_region_territory|country, region,? or territory not supported`)
+
+// regionRefused says the vendor refused the request for where it came
+// from, with regionWords.
+func regionRefused(status int, body []byte) bool {
+	return status >= 400 && regionWords.Match(body)
 }
 
 // protectionWords are how the ChatGPT backend answers a long Codex
@@ -821,7 +891,7 @@ func retryable(status int, body []byte) bool {
 		// in front of zcode.z.ai): another provider goes another way
 		return true
 	case status == 400, status == 422:
-		return quotaWords.Match(body) || unservedWords.Match(body) || refusedWords.Match(body) || shapeWords.Match(body)
+		return quotaWords.Match(body) || unservedWords.Match(body) || refusedWords.Match(body) || shapeWords.Match(body) || regionWords.Match(body)
 	}
 	return false
 }
@@ -849,7 +919,8 @@ const unsaidMargin = 1.2
 // another account of the model, it fails the same, and the agent, told it
 // as a vendor's error, never compacts. The message it is told instead
 // says the prompt is too long. Not for a rate limit, an account's
-// trouble, a model it doesn't serve, or one already saying it overflowed.
+// trouble, a model it doesn't serve, a region it doesn't serve, or one
+// already saying it overflowed.
 func tooLongUnsaid(p provider.Provider, model string, tokens, status int, body []byte) (string, bool) {
 	switch status {
 	case 400, 413, 422, 500, 502, 503, 504:
@@ -857,7 +928,7 @@ func tooLongUnsaid(p provider.Provider, model string, tokens, status int, body [
 		return "", false
 	}
 	if overflowed(status, body) || failure(status, body) != failOther || quotaWords.Match(body) ||
-		unservedWords.Match(body) || refusedWords.Match(body) || provider.EdgeBlocked(body) {
+		unservedWords.Match(body) || refusedWords.Match(body) || provider.EdgeBlocked(body) || regionRefused(status, body) {
 		return "", false
 	}
 	window := windowOf(p, model)
@@ -922,7 +993,7 @@ func passing(status int, header http.Header, body []byte, again int) (time.Durat
 	case status == 429:
 		// a relay's 429 often says nothing of when (#503: "负载已饱和，请稍
 		// 后再试"); a plan used up or no money left won't clear in seconds
-		return wait, again < rateRetries && failure(status, body) == failRate && !creditWords.Match(body)
+		return wait, again < rateRetries && failure(status, body) == failRate && !creditWords.Match(wordsOf(body))
 	}
 	return 0, false
 }
@@ -1438,7 +1509,7 @@ func (h *holdWriter) scan() {
 		h.flow()
 		return
 	}
-	if (h.thinking || h.buffered || waiting || h.keptQuiet()) && time.Since(h.since) >= keepHeldAfter {
+	if (h.thinking || h.buffered || waiting || h.keptQuiet()) && (time.Since(h.since) >= keepHeldAfter || h.alive != nil && h.alive.sent) {
 		h.keepAlive()
 	}
 }
@@ -1784,7 +1855,10 @@ func (h *holdWriter) watch() func() {
 					h.mu.Unlock()
 					return
 				}
-				if time.Since(began) >= keepHeldAfter {
+				// an agent already kept alive (keepQueued, an earlier try)
+				// goes on hearing one every keepaliveEvery: waiting
+				// keepHeldAfter again left it up to twice that with none
+				if time.Since(began) >= keepHeldAfter || h.alive != nil && h.alive.sent {
 					h.keepQuiet()
 				}
 				h.mu.Unlock()

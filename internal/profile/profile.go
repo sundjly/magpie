@@ -13,6 +13,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -106,9 +107,22 @@ func Load() (map[string]Profile, error) {
 		return out, nil
 	}
 	if err := json.Unmarshal(b, &out); err != nil {
-		return nil, fmt.Errorf("%s: %w", Path(), err)
+		// one a crash left all zero (#1505) is its last good generation
+		bak, ferr := lastgood.Fallback(Path(), b, validProfiles)
+		if ferr != nil {
+			return nil, fmt.Errorf("%s: %w", Path(), err)
+		}
+		out = map[string]Profile{}
+		if err := json.Unmarshal(bak, &out); err != nil {
+			return nil, fmt.Errorf("%s: %w", Path(), err)
+		}
 	}
 	return out, nil
+}
+
+func validProfiles(b []byte) bool {
+	var m map[string]Profile
+	return json.Unmarshal(b, &m) == nil
 }
 
 // Names lists profiles alphabetically.
@@ -124,6 +138,9 @@ func Names(ps map[string]Profile) []string {
 func store(ps map[string]Profile) error {
 	b, err := json.MarshalIndent(ps, "", "  ")
 	if err != nil {
+		return err
+	}
+	if err := lastgood.Keep(Path(), validProfiles, 0o600); err != nil {
 		return err
 	}
 	return edit.WriteAtomic(Path(), append(b, '\n'))

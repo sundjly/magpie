@@ -116,13 +116,14 @@ func claudeDesktop(home string) *Agent {
 					}
 				}
 			}
-			return false
+			// installed on Windows and not yet opened: none of them yet
+			return desktopdir.Installed(desktopdir.OS, home, os.Getenv)
 		},
 		Notice: func() string {
 			if desktopWiredAny(ps) {
-				return "Claude Desktop reads this at start-up — quit and reopen it to run on magpie (Code and Cowork, no Anthropic sign-in)."
+				return noticeClaudedesktop1.String()
 			}
-			return "Claude Desktop reads this at start-up — quit and reopen it to sign in with Anthropic again."
+			return noticeClaudedesktop2.String()
 		},
 		Check: func() string {
 			if !desktopWiredAny(ps) {
@@ -204,7 +205,7 @@ func desktopCheck(p desktopPaths) string {
 		return "Claude Desktop uses another gateway configuration now (appliedId in configLibrary/_meta.json), not magpie's"
 	}
 	return wiringOff("Claude Desktop", p.prof, func(k string) (string, bool) { return edit.GetJSON(p.prof, k) },
-		"inferenceGatewayBaseUrl", gateway.URL(), "inferenceGatewayApiKey", gateway.TokenFor("claude-desktop"))
+		"inferenceGatewayBaseUrl", gateway.URL(), "inferenceGatewayApiKey", agentKey("claude-desktop"))
 }
 
 // desktopTierFields pick the model each of Claude Code's tiers runs on in
@@ -376,7 +377,7 @@ func desktopOn(p desktopPaths) error {
 	kvs := []edit.KV{
 		{Path: "inferenceProvider", Value: "gateway"},
 		{Path: "inferenceGatewayBaseUrl", Value: gateway.URL()},
-		{Path: "inferenceGatewayApiKey", Value: gateway.TokenFor("claude-desktop")},
+		{Path: "inferenceGatewayApiKey", Value: agentKey("claude-desktop")},
 		{Path: "inferenceGatewayAuthScheme", Value: "bearer"},
 	}
 	// policies seeded once: the user may tighten them in Desktop
@@ -503,3 +504,9 @@ func desktopEmpty(b []byte) bool {
 	var m map[string]json.RawMessage
 	return json.Unmarshal(b, &m) == nil && len(m) == 0
 }
+
+// what claudedesktop says after a change (notice.go)
+var (
+	noticeClaudedesktop1 = newNotice("Claude Desktop reads this at start-up — quit and reopen it to run on magpie (Code and Cowork, no Anthropic sign-in).")
+	noticeClaudedesktop2 = newNotice("Claude Desktop reads this at start-up — quit and reopen it to sign in with Anthropic again.")
+)

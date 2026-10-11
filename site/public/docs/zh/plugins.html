@@ -215,6 +215,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
           <li>社区的包（<code>@magpie-community/*</code>）在 magpie 启动后不久自动更新，之后每小时一次。</li>
           <li>其他包有新版本时，<span class="ui">插件</span>上会出现一个小圆点，用户点一下或运行 <code>magpie plugin update</code> 更新。</li>
           <li>固定了版本的写法（<code>name@1.2.3</code>）会停在那个版本，直到用户自己更新：<span class="ui">更新到 …</span>、<span class="ui">全部更新</span>和 <code>magpie plugin update</code> 会装上最新版并取消固定。</li>
+          <li>git 仓库没有版本号可比。它的分支或标签（不写 <code>#ref</code> 时是默认分支）指向的提交和 Bun 装的那个不一样时，才显示有更新：GitHub 上的通过 GitHub API 查询，其他主机用 <code>git ls-remote</code>，最多每十分钟问一次，每小时的检查也会再问。固定到某个提交的写法不会有更新。这一行会显示已安装的提交。</li>
         </ul></li>
     </ul>
     <p>magpie 在它的配置目录（<code>~/.config/magpie</code> 或 <code>$XDG_CONFIG_HOME/magpie</code>）里保存这些：</p>
@@ -253,7 +254,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
     <p>OpenCode 会忽略 <code>magpie</code> 对象，所以给 OpenCode 插件加上它是安全的。</p>
     <div class="table-wrap"><table>
       <tr><th>字段</th><th>含义</th></tr>
-      <tr><td><code>magpie.icon</code></td><td>供应商的图标：<code>https://</code> 地址或 <code>data:image/…</code> URI，最大 1 MB，SVG、PNG 等都行。</td></tr>
+      <tr><td><code>magpie.icon</code></td><td>供应商的图标，也是这个插件在「发现」里卡片上的图标（从 npm 读取，GitHub 上的插件从仓库读取）：<code>https://</code> 地址或 <code>data:image/…</code> URI，最大 1 MB，SVG、PNG 等都行。</td></tr>
       <tr><td><code>magpie.maxConcurrency</code></td><td>每个账号同时接多少个请求，1 到 1000 的整数。用户在供应商上设置的上限优先。</td></tr>
     </table></div>
     <p>同样的字段也可以写在 <code>auth</code> 钩子上（<code>auth.icon</code>、<code>auth.maxConcurrency</code>），优先于 <code>package.json</code>。</p>
@@ -285,6 +286,10 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
 }</pre>
     </div>
     <p>模型还可以写 <code>provider: { npm, api }</code>，使用和供应商不同的 API 或地址；也可以写 <code>headers</code>、<code>options</code>，以及用 <code>disabled: true</code> 隐藏它。</p>
+
+        <h3 id="decide">决策 API（System One）</h3>
+    <p>插件可以为自己的提供商提供 TypeSafe 的 System One API，这样它的模型就能当<a href="/docs/zh/intent">路由组的分类器</a>。在 <code>config</code> 钩子里给提供商设 <code>decide: true</code>，并给每个只回答问题、不用来对话的模型设 <code>decides: true</code>（写在 <code>config</code> 钩子里或 <code>models</code> 钩子的列表上都行）。之后 magpie 会把每个问题以 <code>POST {baseURL}/systemone</code> 发给 loader 的 <code>fetch</code>，带上账号的登录信息，和其他请求一样。请求体是 <code>{"model", "questions", "state"}</code>；回答 <code>{"model", "answers": {"&lt;问题&gt;": {"choice", "score", "confidence"}}}</code>。</p>
+    <p>标了 <code>decides</code> 的模型，以及名为 <code>jev-*</code> 的模型，会作为分类器提供，并对智能体隐藏：发给它的对话请求会被拒绝。提供商没有 <code>decide: true</code> 时，<code>decides</code> 不起作用，所有模型照常用于对话。</p>
 
     <h3 id="apis">模型使用的 API</h3>
     <p>模型或供应商上 <code>npm</code> 指定的 AI SDK 包决定了 API，也就决定了你的 <code>fetch</code> 收到的请求格式。无论 agent 发来的是什么，magpie 的网关都已经转换好了：</p>
@@ -699,6 +704,7 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
       <tr><td><code>ua</code></td><td>Agent 的 User-Agent 里的词，请求没带它的 key 时，用来在用量里认出它。</td></tr>
       <tr><td><code>icon</code></td><td>这一行的图标：图标名、<code>https://</code> 或 <code>data:</code> URL。不写就用插件自己的图标，再没有就用通用图标。</td></tr>
       <tr><td><code>notice</code></td><td>换模型之后显示的提示，和内置 Agent 一样。</td></tr>
+      <tr><td><code>library</code></td><td>Agent 从哪里读<span class="ui">资源库</span>给它的东西：<code>instructions</code>（每次对话前读的 Markdown 文件）、<code>mcp</code>（它的 MCP 服务器文件）和 <code>mcpFormat</code>（这个文件的写法跟哪个 Agent 的一样：<code>alma</code>, <code>antigravity</code>, <code>claude</code>, <code>cline</code>, <code>codex</code>, <code>commandcode</code>, <code>copilot</code>, <code>crush</code>, <code>cursor</code>, <code>devin</code>, <code>gemini</code>, <code>goose</code>, <code>grok</code>, <code>hermes</code>, <code>kimi</code>, <code>omp</code>, <code>opencode</code>, <code>zed</code>；<code>claude</code> 即 <code>{"mcpServers": {…}}</code>），以及 <code>skills</code>（放 <code>SKILL.md</code> 文件夹的目录）。每项都可省略，<code>~</code> 和 <code>$VAR</code> 会展开：<code>library: { instructions: "~/.toy/AGENTS.md", mcp: "~/.toy/mcp.json", mcpFormat: "claude", skills: "~/.toy/skills" }</code>。不写的话，资源库不会给它任何东西，给它某一项时会被拒绝，并说明插件该写哪个键。</td></tr>
     </table></div>
     <h3>connect</h3>
     <p><code>connect(input)</code> 返回要在模型旁边一起写入的其他键，按键路径给出各自的值；可以是 <code>async</code>。它拿到 <code>gateway</code>（<code>url</code>、<code>v1</code>——以 <code>/v1</code> 结尾的地址——和 <code>key</code>，即这个 Agent 自己的 key，请求会按它的 id 计入用量）、<code>model</code>（<code>id</code>、<code>name</code>、<code>context</code>、<code>output</code>、<code>images</code>、<code>efforts</code>）、<code>models</code>（magpie 给这个 Agent 的所有模型，格式相同）和 <code>agent</code>（<code>id</code>、<code>config</code>）。没有 <code>connect</code> 的插件只写模型。</p>
@@ -708,6 +714,7 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
       <li><b>恢复。</b>重新选回 Agent 自己的模型，或关掉开关，每个键都恢复原值，原来没有的键会被删掉。文件从不整体覆盖。</li>
       <li><b>是否已接入。</b>只要存 magpie key 的那个键还是这个 key，这一行就显示已接入。之后手动改过的键会在这一行里指出，和内置 Agent 一样。</li>
       <li><b>运行方式。</b>和<a href="#middleware">中间件</a>一样：在 magpie 自己的进程里用 moejs 运行，只能导入插件内的文件，没有 Node API，<code>console.log</code> 进 magpie 的日志。加载和 <code>connect</code> 各有一秒。模块加载失败或 <code>connect</code> 抛错的插件，会在插件页它那一行写明原因，并且什么都不写入。</li>
+      <li><b>资源库。</b>写了 <code>library</code>，这个 Agent 就和内置 Agent 一样拿到资源库的内容：指令写在文件里 magpie 的两行标记之间，MCP 服务器和用户自己的写在同一个文件里（用户自己加的字段保留），技能以链接或副本放进文件夹。取消时只拿走 magpie 写的部分，文件原来的内容留在 magpie 的备份里。<code>mcpFormat</code> 不在列表中，或写了 <code>mcp</code> 却没写 <code>mcpFormat</code>，插件不会加载。</li>
       <li><b>声明方式。</b><code>package.json</code> 里写 <code>"magpie": { "agent": "./agent.js" }</code>，或者一个名为 <code>*.agent.js</code>（或 <code>.mjs</code>）的单文件。一个包可以同时是供应商、中间件和 Agent。插件市场里 Agent 条目写 <code>"kind": "agent"</code>，列在 <span class="ui">Agent</span> 下；社区包命名为 <code>@magpie-community/agent-&lt;name&gt;</code>。</li>
     </ul>
 

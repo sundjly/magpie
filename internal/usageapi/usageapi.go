@@ -62,8 +62,19 @@ type Usage struct {
 
 // State is the Usage page's summary of a period: what /api/usage and the
 // gateway's GET /v1/magpie/usage answer.
-func State(p usage.Period) Usage {
-	s := usage.Summarize(p)
+func State(p usage.Period) Usage { return stateOf(usage.Summarize(p)) }
+
+// PageSessions is how many sessions Page lists: the Usage page draws none of
+// them, and SessionCount says how many there are.
+const PageSessions = 100
+
+// Page is State with the top PageSessions sessions only, which is what the
+// Usage page asks for: over a long history (Vantiboo1ean, ~750k requests)
+// State sent the page every one of ~84k sessions (22 MB) and worked the
+// summary out again for each refresh.
+func Page(p usage.Period) Usage { return stateOf(usage.SummarizeTop(p, PageSessions)) }
+
+func stateOf(s usage.Summary) Usage {
 	out := Usage{Summary: s, Agents: []Group{}, Models: []Group{}, Accounts: []Group{}, Path: Tilde(usage.Path())}
 	agents := clients()
 	for _, g := range s.Agents {
@@ -138,7 +149,7 @@ func PeriodOf(s string) usage.Period {
 
 func FilterOf(q url.Values) usage.Filter {
 	id, _ := strconv.ParseInt(q.Get("route"), 10, 64)
-	return usage.Filter{Day: q.Get("day"), RouteID: id, Model: q.Get("model"), Agent: q.Get("agent"), Provider: q.Get("provider"), Purpose: q.Get("purpose"), Account: q.Get("account"), CallerKey: q.Get("callerKey"), Failed: q.Get("failed") == "1", Query: q.Get("q"), Computer: q.Get("computer"), Through: viaOf(q.Get("via"))}
+	return usage.Filter{Day: q.Get("day"), RouteID: id, Model: q.Get("model"), Agent: q.Get("agent"), Provider: q.Get("provider"), Purpose: q.Get("purpose"), Account: q.Get("account"), CallerKey: q.Get("callerKey"), Failed: q.Get("failed") == "1", Retried: q.Get("retried") == "1", Query: q.Get("q"), Computer: q.Get("computer"), Through: viaOf(q.Get("via"))}
 }
 
 // viaOf is the source a request's ?via= names, "" for both.

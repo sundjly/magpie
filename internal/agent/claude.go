@@ -429,7 +429,7 @@ func claude(home string) *Agent { return claudeIn(here(home)) }
 // a WSL distro's (see wsl.go), its settings.json naming the gateway as it
 // reaches it from there.
 func claudeIn(at place) *Agent {
-	path := filepath.Join(at.home, ".claude", "settings.json")
+	path := filepath.Join(at.claudeDir(), "settings.json")
 	// a model in the env is read as magpie serves it, its dashed spelling
 	// taken back (claudeModelEnv)
 	rawEnv := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return v }
@@ -647,8 +647,11 @@ func claudeIn(at place) *Agent {
 		return edit.SetJSON(path, edit.KV{Path: "env." + claudeCompactEnv, Value: w})
 	}
 	// Claude Code's /model lists what modelPicker says (2.1.287): while it
-	// runs on magpie, that is every one of magpie's models, so the user
-	// picks among them in Claude Code itself. One the user wrote is theirs.
+	// runs on magpie, that is every one of magpie's models, the routing
+	// groups first as viaMagpie lists them, so the user picks among them
+	// in Claude Code itself. Groups were left out, so one magpie had just
+	// made the main model and every tier wasn't in /model (#1575). One the
+	// user wrote is theirs.
 	pickerKey := at.key("claude.model_picker")
 	pickerOurs := func() bool { return stashLoad()[pickerKey] != "" }
 	dropPicker := func() error {
@@ -663,9 +666,22 @@ func claudeIn(at place) *Agent {
 			return nil
 		}
 		mark1M := claude1M()
+		// a model a tier is on is in /model as that tier: Claude Code
+		// leaves out a picker row naming a tier's model, but compares the
+		// ids whole, so a tier fixed at an effort (codex/gpt-6-luna:max)
+		// kept its model's row as a second entry (#1616, iTanX). That row
+		// is left out here; a tier at no effort Claude Code matches itself.
+		var onTier []string
+		for _, t := range claudeTiers {
+			if v := env(tierEnv(t)); v != "" {
+				if _, e := tierAt(v); e != "" {
+					onTier = append(onTier, v)
+				}
+			}
+		}
 		rows := []any{}
 		for _, o := range viaMagpie("claude", "") {
-			if o.Group == RoutingGroups {
+			if slices.ContainsFunc(onTier, func(v string) bool { return claudeSameModel(v, o.Value) }) {
 				continue
 			}
 			rows = append(rows, map[string]any{"model": spell(mark1M(o.Value)), "label": cmp.Or(o.Label, o.Value), "description": o.Note})
@@ -1483,7 +1499,10 @@ func claudeIn(at place) *Agent {
 			if stale == "" || !claudeRunning() {
 				return ""
 			}
-			return "an open Claude Code session keeps the " + stale + " it started with — restart it to use this."
+			if stale == "ultracode" {
+				return noticeClaudeUltracode.String()
+			}
+			return noticeClaudeEffort.String()
 		},
 	}
 	return self
@@ -1858,9 +1877,9 @@ func StandIn(agent, model string) string {
 		return ""
 	}
 	if agent == "codex" {
-		return codexStandIn(filepath.Join(home, ".codex", "config.toml"))
+		return codexStandIn(filepath.Join(here(home).codexHome(), "config.toml"))
 	}
-	if m := claudeStandIn(filepath.Join(home, ".claude", "settings.json"), model); m != "" || runtime.GOOS != "windows" {
+	if m := claudeStandIn(filepath.Join(here(home).claudeDir(), "settings.json"), model); m != "" || runtime.GOOS != "windows" {
 		return m
 	}
 	// a Claude Code in WSL is known by the same User-Agent
@@ -1920,3 +1939,9 @@ func claudeMain(path string) string {
 	m, _ = tierAt(provider.ClaudeRead(m))
 	return m
 }
+
+// what an open Claude Code session keeps (notice.go)
+var (
+	noticeClaudeEffort    = newNotice("an open Claude Code session keeps the effort it started with — restart it to use this.")
+	noticeClaudeUltracode = newNotice("an open Claude Code session keeps the ultracode it started with — restart it to use this.")
+)

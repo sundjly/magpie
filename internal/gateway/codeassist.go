@@ -162,6 +162,7 @@ func buildCodeAssistSent(r *Request, sent, agent string) []byte {
 			role = "model"
 		}
 		var parts, after []map[string]any // after: tools' images held back
+		toolImage := map[int]bool{}       // which of parts are a tool's images
 		// signed: a step Gemini signed, whose later calls go without, as
 		// Gemini signs the first (#1445, as chat's #687)
 		signed := false
@@ -244,7 +245,10 @@ func buildCodeAssistSent(r *Request, sent, agent string) []byte {
 					after = append(after, map[string]any{"text": label})
 					after = append(after, ims...)
 				} else {
-					parts = append(parts, ims...)
+					for _, im := range ims {
+						toolImage[len(parts)] = true
+						parts = append(parts, im)
+					}
 				}
 			}
 			// thinking isn't sent back: its signatures belong to whoever
@@ -263,21 +267,49 @@ func buildCodeAssistSent(r *Request, sent, agent string) []byte {
 			}
 			parts = append(append(lead, after...), rest...)
 		}
-		if len(parts) == 0 {
-			continue
+		// what the user said goes in a turn of its own after the tools'
+		// responses: Gemini answers a turn mixing a functionResponse with
+		// text "Requests ending with a model turn are not supported" (#1533,
+		// yycsyu: Codex's compaction prompt after a tool's output), and takes
+		// the two as separate turns. A Claude model on Antigravity keeps them
+		// in one, the tool_result turn Anthropic reads them as.
+		var said []map[string]any
+		if role == "user" && !(ag && claude) && hasResponse(parts) {
+			var tools []map[string]any
+			for i, part := range parts {
+				if part["functionResponse"] != nil || toolImage[i] {
+					tools = append(tools, part)
+				} else {
+					said = append(said, part)
+				}
+			}
+			parts = tools
 		}
-		if n := len(contents); n > 0 && contents[n-1]["role"] == role {
-			contents[n-1]["parts"] = append(contents[n-1]["parts"].([]map[string]any), parts...)
-			continue
+		for _, ps := range [][]map[string]any{parts, said} {
+			if len(ps) == 0 {
+				continue
+			}
+			if n := len(contents); n > 0 && contents[n-1]["role"] == role && (role != "user" || hasResponse(contents[n-1]["parts"].([]map[string]any)) == hasResponse(ps)) {
+				contents[n-1]["parts"] = append(contents[n-1]["parts"].([]map[string]any), ps...)
+				continue
+			}
+			contents = append(contents, map[string]any{"role": role, "parts": ps})
 		}
-		contents = append(contents, map[string]any{"role": role, "parts": parts})
 	}
+	contents = pairFunctionTurns(contents, ag, ag && claude)
 	if len(contents) > 0 && contents[0]["role"] == "model" {
 		// Gemini turns away a history that opens with the model's turn
 		// (what an agent's compaction can leave): "function call turn comes
 		// immediately after a user turn". Gemini CLI's hardenHistory puts
 		// this user turn before it, and so does this.
 		contents = append([]map[string]any{{"role": "user", "parts": []map[string]any{{"text": "[Continuing from previous AI thoughts...]"}}}}, contents...)
+	}
+	if n := len(contents); n > 0 && contents[n-1]["role"] == "model" {
+		// nor one that ends with it: "Requests ending with a model turn
+		// are not supported" on Vertex AI, Code Assist and Antigravity
+		// alike (yycsyu: Codex compacting on gemini-3.8-flash). A user
+		// turn goes after it, as Gemini CLI keeps its history ending
+		contents = append(contents, map[string]any{"role": "user", "parts": []map[string]any{{"text": modelLastAsk(r)}}})
 	}
 	req := map[string]any{"contents": contents}
 	if r.System != "" {
@@ -363,6 +395,85 @@ func buildCodeAssistSent(r *Request, sent, agent string) []byte {
 	}
 	b, _ := json.Marshal(map[string]any{"model": sent, "request": req})
 	return b
+}
+
+// interruptedToolNote is the result a call left unanswered is answered
+// with, the words the chat build gives such a call (pairToolMessages).
+const interruptedToolNote = "[The result of this tool call is unavailable: the turn was interrupted.]"
+
+// pairFunctionTurns answers a model turn's function calls in the turn
+// right after it, as Google's API reads its histories ("Please ensure
+// that the number of function response parts is equal to the number of
+// function call parts of the function call turn"): a call the client
+// answers nowhere — an interrupted turn leaves its call pending, and
+// Google turns every later turn of the conversation away with 400 over
+// the one — is answered with the synthetic result the chat build gives
+// such a call (pairToolMessages, #1275). The answer goes in the turn that
+// follows the calls when that turn already holds answers, and otherwise
+// in a turn of its own before it: a user turn mixing a functionResponse
+// with text is turned away too (#1533). A Claude model on Antigravity
+// (agClaude) keeps the answer and what the user said in one turn, the
+// tool_result turn Anthropic reads them as. A call with no id counts as
+// answered by a response of its name with no id.
+func pairFunctionTurns(contents []map[string]any, ag, agClaude bool) []map[string]any {
+	if len(contents) == 0 {
+		return contents
+	}
+	partsOf := func(c map[string]any) []map[string]any {
+		ps, _ := c["parts"].([]map[string]any)
+		return ps
+	}
+	answered := map[string]bool{}
+	answeredName := map[string]bool{}
+	for _, c := range contents {
+		for _, p := range partsOf(c) {
+			if fr, ok := p["functionResponse"].(map[string]any); ok {
+				if id, _ := fr["id"].(string); id != "" {
+					answered[id] = true
+				} else {
+					name, _ := fr["name"].(string)
+					answeredName[name] = true
+				}
+			}
+		}
+	}
+	key := "output"
+	if ag {
+		key = "result"
+	}
+	out := make([]map[string]any, 0, len(contents)+1)
+	for i, c := range contents {
+		out = append(out, c)
+		if c["role"] != "model" {
+			continue
+		}
+		var synth []map[string]any
+		for _, p := range partsOf(c) {
+			fc, ok := p["functionCall"].(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := fc["id"].(string)
+			name, _ := fc["name"].(string)
+			if id != "" && answered[id] || id == "" && answeredName[name] {
+				continue
+			}
+			res := map[string]any{"name": name, "response": map[string]any{key: interruptedToolNote}}
+			if id != "" {
+				res["id"] = id
+			}
+			synth = append(synth, map[string]any{"functionResponse": res})
+		}
+		if len(synth) == 0 {
+			continue
+		}
+		if i+1 < len(contents) && contents[i+1]["role"] == "user" && (agClaude || hasResponse(partsOf(contents[i+1]))) {
+			contents[i+1]["parts"] = append(synth, partsOf(contents[i+1])...)
+			continue
+		}
+		out = append(out, map[string]any{"role": "user", "parts": synth})
+	}
+	return out
 }
 
 // thinkingConfig says how hard the model should think: a level for
@@ -992,4 +1103,14 @@ func stopFromGemini(s string) string {
 	}
 	// SAFETY, RECITATION, BLOCKLIST, PROHIBITED_CONTENT, SPII, ...
 	return "filter"
+}
+
+// hasResponse says whether a Gemini turn's parts hold a tool's response.
+func hasResponse(parts []map[string]any) bool {
+	for _, p := range parts {
+		if p["functionResponse"] != nil {
+			return true
+		}
+	}
+	return false
 }

@@ -210,7 +210,7 @@ func plistExecutable(path string) string {
 // the app has the variables; opened from the Dock or Finder it has only
 // the login shell's.
 func CursorLocalLaunch(app, gw string) string {
-	key, base := gateway.TokenFor(CursorLocalID), gw+"/v1"
+	key, base := agentKeyAt(CursorLocalID, gw), gw+"/v1"
 	if runtime.GOOS == "windows" {
 		return `$env:CURSOR_LOCAL_AGENT_BASE_URL="` + base + `"; $env:CURSOR_LOCAL_AGENT_API_KEY="` + key + `"; & '` + strings.ReplaceAll(app, "'", "''") + `'`
 	}
@@ -222,7 +222,7 @@ var cursorLocalVars = []string{"CURSOR_LOCAL_AGENT_BASE_URL", "CURSOR_LOCAL_AGEN
 
 // cursorLocalEnv is what they are set to for the gateway at gw.
 func cursorLocalEnv(gw string) map[string]string {
-	return map[string]string{cursorLocalVars[0]: gw + "/v1", cursorLocalVars[1]: gateway.TokenFor(CursorLocalID)}
+	return map[string]string{cursorLocalVars[0]: gw + "/v1", cursorLocalVars[1]: agentKeyAt(CursorLocalID, gw)}
 }
 
 // cursorLocalMark is magpie's own note that the variables are set for the
@@ -317,7 +317,7 @@ func cursorLocal() *Agent {
 			},
 		}},
 		Notice: func() string {
-			return cursorLocalName + " reads magpie's gateway from CURSOR_LOCAL_AGENT_BASE_URL and CURSOR_LOCAL_AGENT_API_KEY, now set for your user: quit it (the app, not only its window) and open it again, as it keeps the model list it was first given until it quits. A base URL or API key set in its Open configuration or a model's settings comes first, so leave both empty (or set the base URL to " + gateway.URL() + "/v1 and the key to " + gateway.TokenFor(CursorLocalID) + ")."
+			return noticeCursorLocal.say("agent", cursorLocalName, "url", gateway.URL()+"/v1", "key", agentKey(CursorLocalID))
 		},
 	}
 }
@@ -344,3 +344,6 @@ func cursorLocalEfforts() []Option {
 	}
 	return append([]Option{{Value: ""}}, static(levels...)...)
 }
+
+// what Cursor Private Inference says after a change (notice.go)
+var noticeCursorLocal = newNotice("{agent} reads magpie's gateway from CURSOR_LOCAL_AGENT_BASE_URL and CURSOR_LOCAL_AGENT_API_KEY, now set for your user: quit it (the app, not only its window) and open it again, as it keeps the model list it was first given until it quits. A base URL or API key set in its Open configuration or a model's settings comes first, so leave both empty (or set the base URL to {url} and the key to {key}).")

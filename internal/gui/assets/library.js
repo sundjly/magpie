@@ -284,7 +284,10 @@
   // All, ahead of a row's chips: one click gives the item to every agent
   // shown that can take it (not those a chip is greyed out for: no SSE, no
   // remote server), and when they all have it, takes it from every one.
-  // An agent not shown keeps what it has, as with a chip.
+  // An agent not shown keeps what it has, as with a chip. The pickers that
+  // choose the agents before an item is added (installing skills, adding or
+  // bringing in servers) have it too (#1531): most start with every agent
+  // lit, and one agent alone was a click on each of the others.
   function allChip(box, all, on, onChange) {
     const can = [...box.children].filter((c) => !cannot(c)).map((c) => c.dataset.agent);
     if (can.length < 2) return;
@@ -458,20 +461,47 @@
     }
   }
   window.loadLibrary = load;
+  // drawn again as it is: the agents hidden are known only from the state,
+  // which can come after the page was drawn (it counted them, and Turn all
+  // on gave them the servers)
+  window.redrawLibrary = () => { if (lib) render(); };
   // the library as the page shows it: what a change did is said once, not shown
   const seen = (v) => JSON.stringify({ ...v, result: undefined });
 
-  // Every change answers with the page as it is after it, and what it did.
+  // Every change answers with the page as it is after it, and what it did;
+  // one to the instructions with them alone, the rest kept as it is (#1624).
+  // One change is on its way at a time: while it is, the page's buttons
+  // can't be pressed and the one pressed says it is saving, so a second
+  // click doesn't make or remove a set twice (Hipple, #1624: a minute a
+  // click with nothing to show for it).
+  let changing = false;
   async function change(path, body, done) {
+    if (changing) return false;
+    changing = true;
+    const ev = window.event;
+    const pressed = ev?.type === "click" && ev.target?.closest?.("button:not(.lib-switch):not(.lib-radio)");
+    const held = [...document.querySelectorAll("#view-library button, #modal.lib button")].filter((b) => !b.disabled);
+    for (const b of held) b.disabled = true;
+    page.setAttribute("aria-busy", "true");
+    if (pressed && pressed.textContent.trim()) saving(pressed, t("Saving…"));
+    status(t("Saving…"), "", 120000);
+    let ok = false;
     try {
       const v = await api("library/" + path, body);
-      take(v);
+      take(v.part === "instructions" ? { ...lib, instructions: v.instructions, problems: v.problems, result: v.result } : v);
+      status(""); // what it did, said next, or nothing for one that says nothing
       report(v.result, done);
-      render();
+      ok = true;
       return true;
     } catch (e) {
       status(e.message, "err", 6000);
       return false;
+    } finally {
+      changing = false;
+      page.removeAttribute("aria-busy");
+      for (const b of held) b.disabled = false;
+      if (pressed) doneSaving(pressed);
+      if (ok) render();
     }
   }
   // given, for a row's agent chips, is the agents that have it now: an
@@ -768,7 +798,7 @@
       if (behind || rtkUpgrading) {
         const ub = button(rtkUpgrading ? t("Upgrading…") : t("Upgrade"), "action", upgradeRTK);
         ub.disabled = rtkUpgrading || !rtk.upgrade;
-        ub.title = rtk.upgrade ? t("Runs {cmd}", { cmd: rtk.upgrade }) : t("magpie can't tell how this RTK was installed — update it the way you installed it");
+        ub.title = rtk.upgrade ? (rtk.admin ? t("Runs {cmd}, as administrator: Windows asks first", { cmd: rtk.upgrade }) : t("Runs {cmd}", { cmd: rtk.upgrade })) : t("magpie can't tell how this RTK was installed — update it the way you installed it");
         ttl.append(ub);
       }
       card.append(ttl);
@@ -1311,8 +1341,10 @@
       after.append(button(t("＋ Add server"), "", () => editServer(null)));
       body.append(after);
       // each server is checked once a session, and again only once it
-      // changed; once the rows are on the page, for them to show it
-      const unchecked = lib.servers.filter((s) => health.get(s.name)?.key !== healthKey(s));
+      // changed; once the rows are on the page, for them to show it. One
+      // that no agent and no project has is started for nobody, so it is
+      // checked only when the reader clicks its status (#1597, xiaozhu1337)
+      const unchecked = lib.servers.filter((s) => inUse(s) && health.get(s.name)?.key !== healthKey(s));
       queueMicrotask(() => checkHealth(unchecked));
     }
     // an agent's own servers (Codex's node_repl, added each time it starts)
@@ -1350,7 +1382,7 @@
     who.append(nm, healthEl(s.name));
     const sub = el("div", "sub mono", serverLine(s));
     sub.title = serverLine(s);
-    who.append(sub);
+    who.append(sub, toolsEl(s.name));
     row.append(mark(s.icon, s.transport === "stdio" ? GLYPH.cmd : GLYPH.web), who,
       agentChips(all, s.agents, chipsChange("servers/agents", s.name, "servers", (x) => serverRow(x, all)), { problems: s.problems, blocked: sseBlocked(s), all: true }));
     if (picking) return pickRow(row, s.name);
@@ -1362,19 +1394,119 @@
   // Whether a server works, as magpie found by connecting to it: started
   // (or reached) and asked for its tools. Its row shows it as a dot and a
   // few words, the whole reason in its tooltip; a click checks it again.
+  // A server that listed its tools shows them instead, by name and what
+  // each says it does (nf1qaz2w on Discord), with Check again under them.
   const health = new Map(); // name → { key: the server as checked, h: what was found, null while checking }
+  const toolsOpen = new Set(); // the servers whose tools are shown
   const healthKey = (s) => JSON.stringify([s.transport, s.command, s.args, s.env, s.url, s.headers, s.signIn]);
+  const toolList = (name) => { const h = health.get(name)?.h; return h?.state === "ok" ? h.toolList || [] : []; };
+  // whether any agent gets the server, here or in a project magpie keeps
+  const inUse = (s) => !!s.agents?.length || (lib.projects || []).some((p) => p.servers?.[s.name]?.length);
+  // a click checks a server again, or for the first time one in no use;
+  // not while it is being checked
+  function recheck(name) {
+    const s = lib.servers.find((x) => x.name === name), e = health.get(name);
+    if (s && (!e || e.h)) checkHealth([s], true);
+  }
   function healthEl(name) {
     const b = el("button", "lib-health");
     b.type = "button";
     b.dataset.server = name;
     b.onclick = (e) => {
       e.stopPropagation(); // the row opens the editor
-      const s = lib.servers.find((x) => x.name === name);
-      if (s && health.get(name)?.h) checkHealth([s], true);
+      if (!toolList(name).length) return recheck(name);
+      if (toolsOpen.has(name)) toolsOpen.delete(name); else toolsOpen.add(name);
+      paintHealth(name);
     };
     paintHealth(b);
     return b;
+  }
+  // toolsEl is the list a server's status opens: filled by paintHealth
+  function toolsEl(name) {
+    const box = el("div", "lib-tools");
+    box.dataset.server = name;
+    box.hidden = true;
+    box.onclick = (e) => e.stopPropagation(); // reading or selecting it opens no editor
+    paintTools(box);
+    return box;
+  }
+  function paintTools(box) {
+    const name = box.dataset.server, list = toolList(name);
+    // while it is checked again the list stays as it was, so nothing under
+    // the click moves until the answer comes
+    if (health.get(name) && !health.get(name).h && !box.hidden) return;
+    box.hidden = !(toolsOpen.has(name) && list.length);
+    if (box.hidden) return box.replaceChildren();
+    const ul = el("ul", "lib-toollist");
+    const off = toolsOffOf(name);
+    for (const tl of list) {
+      const li = el("li", "lib-tool" + (off.includes(tl.name) ? " off" : ""));
+      const txt = el("div", "lib-tooltxt");
+      txt.append(el("span", "lib-toolname mono", tl.name));
+      if (tl.description) txt.append(el("span", "lib-tooldesc", tl.description));
+      li.append(txt, toolSwitch(name, tl.name, !off.includes(tl.name)));
+      ul.append(li);
+    }
+    const parts = [ul];
+    // the agents given it that can't leave out a single tool get them all,
+    // which is said here rather than shown as off for them too
+    const cant = (lib.servers.find((s) => s.name === name)?.agents || []).map(agentOf).filter((a) => a && a.mcp && !a.toolsOff);
+    if (cant.length) parts.push(el("p", "lib-toolcant", t("{agents} can't turn off single tools: they get every tool of the server.", { agents: cant.map((a) => a.name).join(", ") })));
+    const foot = el("div", "lib-toolfoot");
+    const h = health.get(name).h;
+    if (h.tools > list.length) foot.append(el("span", "note", t("{n} more not shown", { n: h.tools - list.length })));
+    foot.append(el("span", "grow"), button(t("Check again"), "", () => recheck(name)));
+    parts.push(foot);
+    box.replaceChildren(...parts);
+  }
+  // Each tool has a switch (nf1qaz2w on Discord): one turned off is left
+  // out by the agents given the server that can leave out a single tool.
+  // A click flips its own switch at once and nothing else on the page, so
+  // the list doesn't move under it; quick clicks are sent as one.
+  const toolsSending = new Map(); // server → { want: the tools off, as last clicked }
+  const toolsOffOf = (name) => toolsSending.get(name)?.want || lib.servers.find((s) => s.name === name)?.disabledTools || [];
+  function toolSwitch(name, tool, on) {
+    const s = toggle(on, t("{tool} on", { tool }), () => {});
+    s.dataset.tool = tool;
+    s.onclick = (e) => {
+      e.stopPropagation();
+      const now = s.getAttribute("aria-checked") !== "true";
+      s.classList.toggle("on", now);
+      s.setAttribute("aria-checked", String(now));
+      s.closest("li")?.classList.toggle("off", !now);
+      const cur = toolsOffOf(name);
+      setToolsOff(name, now ? cur.filter((x) => x !== tool) : [...new Set([...cur, tool])].sort());
+    };
+    return s;
+  }
+  async function setToolsOff(name, want) {
+    const w = toolsSending.get(name);
+    if (w) { w.want = want; return; }
+    const me = { want };
+    toolsSending.set(name, me);
+    let sent = null, v = null;
+    try {
+      while (!sent || sent.join("\n") !== me.want.join("\n")) {
+        sent = me.want;
+        v = await api("library/servers/tools", { name, names: sent });
+      }
+      toolsSending.delete(name);
+      take(v);
+      report(v, t("Tools of {name} saved", { name }));
+    } catch (e) {
+      toolsSending.delete(name);
+      status(e.message, "err");
+      // the switches go back to what the library has
+      for (const box of page.querySelectorAll(`.lib-tools[data-server="${CSS.escape(name)}"]`)) {
+        const off = toolsOffOf(name);
+        for (const s of box.querySelectorAll(".lib-switch[data-tool]")) {
+          const on = !off.includes(s.dataset.tool);
+          s.classList.toggle("on", on);
+          s.setAttribute("aria-checked", String(on));
+          s.closest("li")?.classList.toggle("off", !on);
+        }
+      }
+    }
   }
   async function checkHealth(list, fresh) {
     if (!list.length) return;
@@ -1426,8 +1558,18 @@
     const boxes = typeof x === "string" ? page.querySelectorAll(`.lib-health[data-server="${CSS.escape(x)}"]`) : [x];
     for (const b of boxes) {
       const e = health.get(b.dataset.server);
-      b.hidden = !e;
-      if (!e) continue;
+      b.removeAttribute("aria-expanded");
+      if (!e) {
+        // one in no use waits for a click (#1597); one in use is about
+        // to be checked
+        const s = lib.servers.find((x) => x.name === b.dataset.server);
+        b.hidden = !s || inUse(s);
+        b.className = "lib-health idle";
+        b.replaceChildren(el("span", "", t("not checked")));
+        b.title = t("No agent has it, so it isn't checked on its own") + "\n" + t("Click to check it");
+        continue;
+      }
+      b.hidden = false;
       if (!e.h) {
         b.className = "lib-health checking";
         b.replaceChildren(el("span", "", t("checking…")));
@@ -1437,8 +1579,15 @@
       const [text, tip] = healthWords(e.h, lib.servers.find((s) => s.name === b.dataset.server));
       b.className = "lib-health " + (e.h.state === "ok" ? "ok" : e.h.state === "auth" ? "auth" : "err");
       b.replaceChildren(el("span", "", text));
-      b.title = tip + "\n" + t("Click to check again");
+      if (toolList(b.dataset.server).length) {
+        const open = toolsOpen.has(b.dataset.server);
+        b.classList.add("has-list");
+        b.setAttribute("aria-expanded", String(open));
+        b.title = tip + "\n" + (open ? t("Click to hide them") : t("Click to see them"));
+      } else b.title = tip + "\n" + t("Click to check again");
     }
+    const name = typeof x === "string" ? x : x.dataset.server;
+    for (const box of page.querySelectorAll(`.lib-tools[data-server="${CSS.escape(name)}"]`)) paintTools(box);
   }
 
   // magpie's sign-in to a remote server (#615): signed in once here, and
@@ -1540,8 +1689,30 @@
     if (f.others?.length) row.append(tag(t("differs in {agents}", { agents: f.others.map(nameOf).join(", ") }), "warn", t("{agents} has another server by this name; bringing this one in leaves that one as it is", { agents: f.others.map(nameOf).join(", ") })));
     const b = button(t("Bring in"), "action", () => change("servers/import", { name: s.name }, t("{name} is in the library now", { name: s.name })));
     b.title = t("Keeps it in the library: {agents} go on having it, and you can give it to the others", { agents: s.agents.map(nameOf).join(", ") });
-    row.append(b);
+    // gone from the agents' own MCP settings without bringing it in first
+    // (#1618), as a skill of their own is (#1303)
+    const rm = button("", "lib-icon danger", () => confirmRemoveFoundServer(f));
+    rm.append(svg(GLYPH.trash, 13, 1.4));
+    rm.title = t("Remove");
+    row.append(b, rm);
     return row;
+  }
+
+  function confirmRemoveFoundServer(f) {
+    const s = f.server;
+    const ed = el("div", "editor lib-editor");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.trash), el("b", "", t("Remove {name}?", { name: s.name })));
+    ed.append(head);
+    const agents = s.agents.map(nameOf).filter(Boolean);
+    ed.append(el("p", "lib-confirm", t("It is taken out of the MCP settings of {agents}. Each file is copied to magpie's backups before it changes.", { agents: agents.join(", ") })));
+    if (f.others?.length) ed.append(el("p", "lib-confirm", t("{agents} has another server by this name; that one stays.", { agents: f.others.map(nameOf).join(", ") })));
+    const bar = el("div", "bar");
+    const go = button(t("Remove"), "primary danger-fill", async () => { if (await change("servers/remove-found", { name: s.name }, t("{name} removed", { name: s.name }))) closeLibModal(true); });
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
+    ed.append(bar);
+    modal = { save: () => go.click() };
+    openLib(ed);
   }
 
   // A command line split the way a shell would, quotes and all.
@@ -1659,7 +1830,7 @@
     ed.append(err);
 
     function drawAgents() {
-      agentsBox.replaceChildren(agentChips(all, d.agents, (next) => { d.agents = next; drawAgents(); }, { names: true, blocked: sseBlocked(d) }));
+      agentsBox.replaceChildren(agentChips(all, d.agents, (next) => { d.agents = next; drawAgents(); }, { names: true, blocked: sseBlocked(d), all: true }));
     }
     function draw() {
       slot.replaceChildren();
@@ -1777,7 +1948,7 @@
     }
     ed.append(list);
     const agentsBox = el("div");
-    const drawAgents = () => agentsBox.replaceChildren(agentChips(all, who, (n) => { who = n; drawAgents(); }, { names: true }));
+    const drawAgents = () => agentsBox.replaceChildren(agentChips(all, who, (n) => { who = n; drawAgents(); }, { names: true, all: true }));
     drawAgents();
     ed.append(...field(t("Agents"), agentsBox));
     const err = el("div", "editor-error");
@@ -3464,7 +3635,7 @@
     box.append(list);
     const foot = el("div", "lib-probefoot");
     const agentsBox = el("div");
-    const drawAgents = () => agentsBox.replaceChildren(agentChips(skillAgents(), p.agents, (n) => { p.agents = n; drawAgents(); }, { names: false }));
+    const drawAgents = () => agentsBox.replaceChildren(agentChips(skillAgents(), p.agents, (n) => { p.agents = n; drawAgents(); }, { names: false, all: true }));
     drawAgents();
     foot.append(el("span", "note", t("for")), agentsBox, el("span", "grow"));
     foot.append(button(t("Cancel"), "", () => { probe = null; render(); }));
@@ -3679,6 +3850,8 @@
       if (seq !== m.seq) return;
       m.items = r.items || [];
       m.error = r.error || "";
+      // the source that didn't answer when the rest did (#1589)
+      m.failed = r.failed ? { source: r.failed, cause: r.cause || "" } : null;
       // a search that is an address nothing listed is at: the server
       // there, to add by hand
       m.custom = r.custom || null;
@@ -3686,6 +3859,7 @@
       if (seq !== m.seq) return;
       m.items = m.items || [];
       m.custom = null;
+      m.failed = null;
       m.error = e.message;
     }
     m.loading = false;
@@ -3775,7 +3949,13 @@
       }
       return;
     }
-    if (m.error) grid.append(el("div", "mk-msg err", m.error));
+    // one source not answering while the others did is a short list, not
+    // a failed search: it says which one, over what the rest found (#1589)
+    if (m.error && m.failed && m.items.length) {
+      grid.append(el("div", "mk-msg mk-partial", kind === "mcp"
+        ? t("The MCP Registry didn't answer ({error}), so these are only magpie's featured servers that match.", { error: m.failed.cause })
+        : t("skills.sh's search didn't answer ({error}), so these are only the matches among magpie's picks and the most installed skills.", { error: m.failed.cause })));
+    } else if (m.error) grid.append(el("div", "mk-msg err", m.error));
     if (kind === "mcp" && q && m.custom) grid.append(customAt(q, m.custom, m.items.length));
     else if (!m.items.length && !m.error) {
       grid.append(el("div", "mk-msg", q ? t("Nothing matches “{q}”.", { q }) : t("Nothing to show.")));
@@ -3916,7 +4096,7 @@
       ed.append(...field(t(i.label) + (i.required ? "" : " " + t("(optional)")), f, hint));
     }
     const agentsBox = el("div");
-    const drawAgents = () => agentsBox.replaceChildren(agentChips(all, agents, (n) => { agents = n; drawAgents(); }, { names: true, blocked: sseBlocked(x) }));
+    const drawAgents = () => agentsBox.replaceChildren(agentChips(all, agents, (n) => { agents = n; drawAgents(); }, { names: true, blocked: sseBlocked(x), all: true }));
     drawAgents();
     ed.append(...field(t("Agents"), agentsBox));
     const err = el("div", "editor-error");
@@ -4011,7 +4191,7 @@
     src.append(el("span", "", t("From")), extLink("https://github.com/" + x.source, "github.com/" + x.source));
     ed.append(src);
     const agentsBox = el("div");
-    const drawAgents = () => agentsBox.replaceChildren(agentChips(all, agents, (n) => { agents = n; drawAgents(); }, { names: true }));
+    const drawAgents = () => agentsBox.replaceChildren(agentChips(all, agents, (n) => { agents = n; drawAgents(); }, { names: true, all: true }));
     drawAgents();
     if (!x.have) ed.append(...field(t("Agents"), agentsBox));
     const bar = el("div", "bar");

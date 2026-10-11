@@ -128,3 +128,70 @@ func TestOmpRoleThinking(t *testing.T) {
 		t.Fatal("magpie's provider stayed with no role on it")
 	}
 }
+
+// #1397 (KKKKKKKEM, after v0.1.1164): commit and tiny were still missing.
+// Every one of omp's chat roles, as CHAT_MODEL_ROLE_IDS in its pi-tui
+// model-browser.ts lists them (18.6.1 to 18.8.8), is a field of the row
+// with a thinking level of its own but the default one; a role the user had
+// set off magpie comes back when magpie's is reset.
+func TestOmpEveryChatRole(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("PATH", t.TempDir())
+	for _, k := range []string{"PI_CODING_AGENT_DIR", "PI_CONFIG_DIR", "OMP_PROFILE", "PI_PROFILE"} {
+		t.Setenv(k, "")
+	}
+	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro", "flash"}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".omp", "agent")
+	configPath := filepath.Join(dir, "config.yml")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(configPath, []byte("modelRoles:\n  tiny: openai/gpt-6-mini\n"), 0o644)
+	a := omp(home)
+	role := func(name string) string { v, _ := edit.GetYAML(configPath, "modelRoles."+name); return v }
+
+	// omp's name for the role → magpie's field key
+	chat := map[string]string{
+		"default": "model", "smol": "small", "slow": "slow", "vision": "vision", "plan": "plan",
+		"commit": "commit", "tiny": "tiny", "memory": "memory", "task": "subagent", "advisor": "advisor",
+	}
+	for name, key := range chat {
+		f := a.Field(key)
+		if f == nil || f.Quiet == (name == "default") {
+			t.Fatalf("omp's %s role: %+v", name, f)
+		}
+		if err := a.Apply(key, "magpie/deepseek/pro"); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := role(name); got != "magpie/deepseek/pro" {
+			t.Fatalf("modelRoles.%s: %q", name, got)
+		}
+		if name == "default" {
+			continue
+		}
+		if err := a.Apply(key+"_thinking", "high"); err != nil {
+			t.Fatalf("%s thinking: %v", name, err)
+		}
+		if got := role(name); got != "magpie/deepseek/pro:high" {
+			t.Fatalf("modelRoles.%s at high: %q", name, got)
+		}
+	}
+	for _, k := range []string{"commit", "tiny", "memory"} {
+		if f := a.Field(k); f.Label != k {
+			t.Fatalf("%s is labelled %q", k, f.Label)
+		}
+		if err := a.Apply(k, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := role("tiny"); got != "openai/gpt-6-mini" {
+		t.Fatalf("the user's own tiny role not put back: %q", got)
+	}
+	if got := role("commit") + role("memory"); got != "" {
+		t.Fatalf("commit and memory reset: %q", got)
+	}
+}

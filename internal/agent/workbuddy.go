@@ -68,6 +68,8 @@ func workbuddyBuild(id, name, dir string, aliases []string) *Agent {
 			}
 			return write(true)
 		},
+		// its picker lists the models picked for it (#1508)
+		ListsModels: true,
 		Fields: []Field{{
 			Key: "provider", Label: "provider",
 			Get: func() string {
@@ -164,7 +166,7 @@ func buddyWriteAt(path, agent string, on bool, where place) error {
 	}
 	// the keys magpie's models are asked with: the gateway's, or that of a
 	// magpie on another machine the user pointed them at
-	keys := map[string]bool{gateway.TokenFor(agent): true}
+	keys := map[string]bool{gateway.TokenFor(agent): true, agentKey(agent): true}
 	if away {
 		keys[agentKeyAt(agent, where.gw())] = true
 	}
@@ -286,7 +288,7 @@ func buddyModel(agent, id, name string, context, output int, images bool, effort
 	}
 	e := map[string]any{
 		"id": id, "name": name, "vendor": magpieID,
-		"apiKey": gateway.TokenFor(agent), "url": gatewayV1() + "/chat/completions",
+		"apiKey": agentKey(agent), "url": gatewayV1() + "/chat/completions",
 		"maxInputTokens":   context,
 		"supportsToolCall": true, "supportsImages": images, "supportsReasoning": false,
 	}

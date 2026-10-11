@@ -523,6 +523,8 @@
       out.push(p.group
         ? t("{model} is paused by rule {n} of {group} ({when}), so it is left out until that ends.", { model: p.member, n: p.rule, group: r.group?.subs?.find((s) => s.id === p.group)?.name || p.group, when })
         : t("{model} is paused by rule {n} ({when}), so it is left out until that ends.", { model: p.member, n: p.rule, when }));
+      // a pause by folder (#1606) says the folder it read, or that none was said
+      if (p.byFolder) out[out.length - 1] += " " + (p.folder ? t("The agent works in {folder}.", { folder: p.folder }) : t("The agent didn't say which folder it works in."));
     }
     const smart = (x) => !x.routing && (x.kind === "account" || x.known);
     const someKnown = r.order.some((x) => x.known);
@@ -590,21 +592,23 @@
     if (!r.rule || r.rule.bare) return null;
     const x = { ...r.rule, use: useName(r, r.rule.use) };
     const when = (x.when || []).map(condText).join(", ");
+    // the folder the agent said it works in, when a rule asks for one
+    const dir = x.folder ? " " + t("The agent works in {folder}.", { folder: x.folder }) : "";
     if (x.use && !x.unready) {
       const held = t("Rule {n} ({when}) sent turn {turn} to {use} as it began; the turn stays with whoever took it then.", { n: x.n, when, turn: x.turn, use: x.use });
       if (x.compact) return lead ? t("The agent is compacting the conversation, so rule {n} sends the summary to {use}; the conversation stays on the model it was on.", { n: x.n, use: x.use }) + (x.small?.length ? " " + t("Passed over, as the conversation is longer than they take: {models}.", { models: x.small.map((id) => useName(r, id)).join(", ") }) : "") : null;
       if (x.held) return lead || affWhy(r, true) ? held : null;
       if (x.grown) return lead ? t("Within turn {turn} the conversation grew to about {tokens} tokens, more than the model it was on takes, so rule {n} ({when}) moves it to {use}.", { turn: x.turn, tokens: tokens(x.tokens), n: x.n, when, use: x.use }) : null;
       if (!lead) return null;
-      if (x.then?.length) return t("Turn {turn} begins and rule {n} matches — {when} — so {use} goes first; if it fails, {then}, which the rules after it that match too name, then the group's others.", { turn: x.turn, n: x.n, when, use: x.use, then: x.then.map((id) => useName(r, id)).join(", ") });
-      return t("Turn {turn} begins and rule {n} matches — {when} — so {use} goes first; the group's others stay behind it if it fails.", { turn: x.turn, n: x.n, when, use: x.use });
+      if (x.then?.length) return t("Turn {turn} begins and rule {n} matches — {when} — so {use} goes first; if it fails, {then}, which the rules after it that match too name, then the group's others.", { turn: x.turn, n: x.n, when, use: x.use, then: x.then.map((id) => useName(r, id)).join(", ") }) + dir;
+      return t("Turn {turn} begins and rule {n} matches — {when} — so {use} goes first; the group's others stay behind it if it fails.", { turn: x.turn, n: x.n, when, use: x.use }) + dir;
     }
     if (x.use && x.instead) return lead ? t("Rule {n} matches, but {use} has no account or key that can take this request, so a later matching rule puts {instead} first.", { n: x.n, use: x.use, instead: useName(r, x.instead) }) : null;
     if (lead) return null;
     if (x.use) return t("Rule {n} matches, but {use} has no account or key that can take this request, so the group's order stands.", { n: x.n, use: x.use });
     if (x.waits) return t("This turn began before magpie saw it, so the rules wait for the next one.");
     if (x.held) return null;
-    return t("No rule matches turn {turn} (about {n} tokens{img}).", { turn: x.turn, n: tokens(x.tokens), img: x.images ? t(", with an image") : "" });
+    return t("No rule matches turn {turn} (about {n} tokens{img}).", { turn: x.turn, n: tokens(x.tokens), img: x.images ? t(", with an image") : "" }) + dir;
   }
   // treeText is a group's models, those of a group in it in brackets after
   // its name: a/m, Fast [b/m, c/m]
@@ -678,6 +682,8 @@
     if (c === "compacting") return t("compacting");
     if ((m = /^effort ≥ (\w+)$/.exec(c))) return t("reasoning ≥ {level}", { level: m[1] });
     if ((m = /^agent (.+)$/.exec(c))) return m[1].split("|").map(agentName).join(" / ");
+    if ((m = /^not folder (.+)$/.exec(c))) return t("not in {folders}", { folders: m[1].split("|").join(" / ") });
+    if ((m = /^folder (.+)$/.exec(c))) return t("in {folders}", { folders: m[1].split("|").join(" / ") });
     if ((m = /^time (all day|(\d\d:\d\d)–(\d\d:\d\d))(?: (.+))?$/.exec(c))) {
       // the days as the gateway writes them: Mon–Fri, Sat,Sun, Mon,Wed–Fri
       const days = [];
@@ -1809,6 +1815,8 @@
       : t("{agent} requested a subagent on {model}.", { agent, model: r.model });
     if (purposeOf(r.kind) === "kind:ambient_suggestions") return t("{agent} drafted the suggested prompts on its home page by itself, in the background, searching the project's files and connected apps, and checked them for safety. Not a turn of the conversation; Codex's Settings › Configuration › Suggested prompts turns it off.", { agent });
     if (r.kind === "luna_reserve") return t("{agent} sent this turn on Luna Reserve, which it turns to once the plan's own allowance is used up; it picks the model itself.", { agent });
+    // the agent called magpie's web search MCP server itself, for no model
+    if (r.kind === "web_search" && r.for?.mcp) return t("{agent} called magpie's web_search MCP tool: {searcher} searched for it. Not a turn of the conversation.", { agent: agentName(r.for.agent), searcher: r.model });
     if (r.kind === "web_search") return r.for
       ? t("magpie ran this web search for {agent}'s {model}, which can't search the web by itself: {searcher} searched, and {model} goes on answering once it has what was found. Not a turn of the conversation.", { agent: agentName(r.for.agent), model: r.for.model, searcher: r.model })
       : t("magpie ran this web search for a model that can't search the web by itself: {searcher} searched, and that model goes on answering once it has what was found. Not a turn of the conversation.", { searcher: r.model });
@@ -3025,9 +3033,10 @@
     pace: "Weekly pace: the account with the most of its week left per hour until it renews goes first, so less of each member's week is lost at its reset — an account with five hours and no week (Claude Enterprise) by what its five hours have left per hour until they renew, so almost always first; a key by the tokens magpie sent it lately.",
     manual: "Manual: every request goes to the model you pick on the group's card, over its own accounts or keys; the others, and the rules, wait until you pick another — none takes over when it fails.",
   };
-  // a group in the group is routed by its own routing, whatever this one's
-  // (planLevel, #576)
-  const GROUP_NEST = "A group among the models keeps its own routing: this group only picks between it and the others, weighing it by the account or key it would try first, then tries it whole in its own order.";
+  // a group in the group, and a provider set to route other than Smart, is
+  // routed by its own routing, whatever this one's (planLevel, #576,
+  // ownRouting)
+  const GROUP_NEST = "A group among the models, and a model whose provider routes its accounts or keys other than Smart, keeps its own routing: this group only picks between it and the others, weighing it by the account or key it would try first, then tries it whole in its own order.";
   const EFFORTS = ["low", "medium", "high", "xhigh", "max"]; // provider.Efforts
   // what a rule matches, in words
   function ruleText(r) {
@@ -3039,6 +3048,8 @@
     if (r.intent) bits.push(t("asks for “{intent}”", { intent: r.intent }));
     if (r.compact) bits.push(t("compacting"));
     if (r.time) bits.push(timeText(r.time));
+    if (r.folders?.length) bits.push(t("in {folders}", { folders: r.folders.join(" / ") }));
+    if (r.exceptFolders?.length) bits.push(t("not in {folders}", { folders: r.exceptFolders.join(" / ") }));
     return bits.join(" · ");
   }
   const slug = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -3048,10 +3059,30 @@
   function poolOf(id) {
     try { return groups?.pools?.find((p) => p.provider === id) || null; } catch { return null; }
   }
+  // groupsFrom: /api/groups as the page draws it (#1585, dbydd). A group of
+  // patterns that match nothing now — a plugin behind on updates lists none
+  // of its models — came with its members as null, and that one group threw
+  // out every group's card while each still routed. Every list is a list
+  // here, and an entry that isn't a group at all is left out.
+  function groupsFrom(x) {
+    x = x && typeof x === "object" ? x : {};
+    const objs = (v) => Array.isArray(v) ? v.filter((o) => o && typeof o === "object") : [];
+    const ids = (v) => Array.isArray(v) ? v.filter((s) => typeof s === "string") : [];
+    // the lists Go leaves out when empty stay out; null or a non-list is none
+    const opt = (v, f) => v === undefined ? v : f(v);
+    const group = (g) => ({ ...g, id: String(g.id ?? ""), name: typeof g.name === "string" && g.name ? g.name : String(g.id ?? ""),
+      members: ids(g.members), memberInfo: objs(g.memberInfo), holds: ids(g.holds), offers: ids(g.offers), shared: ids(g.shared), patterns: objs(g.patterns),
+      match: opt(g.match, ids), matched: opt(g.matched, ids), off: opt(g.off, ids), fast: opt(g.fast, ids), levels: opt(g.levels, ids),
+      rules: opt(g.rules, (rs) => objs(rs).map((r) => ({ ...r, agents: opt(r.agents, ids), folders: opt(r.folders, ids), exceptFolders: opt(r.exceptFolders, ids) }))) });
+    const refs = (v) => objs(v).filter((m) => typeof m.id === "string");
+    return { ...x, groups: objs(x.groups).filter((g) => typeof g.id === "string" && g.id).map(group),
+      models: refs(x.models), deciders: refs(x.deciders), pools: objs(x.pools),
+      templates: objs(x.templates).filter((tp) => tp.group && typeof tp.group === "object").map((tp) => ({ ...tp, group: group(tp.group) })) };
+  }
   // quiet: the window focused again; the same groups aren't drawn again
   async function loadGroups(quiet) {
     let next;
-    try { next = await api("groups"); } catch { return; }
+    try { next = groupsFrom(await api("groups")); } catch { return; }
     if (quiet === true && groups && JSON.stringify(next) === JSON.stringify(groups)) return;
     groups = next;
     if (headOf) header(...headOf);
@@ -3071,7 +3102,7 @@
     if (action === "delete" && !await confirmRemoval(groups?.groups.find((g) => g.id === body.id)?.name || body.id,
       "This routing group will no longer be available to agents.")) return;
     try {
-      groups = await api("groups/" + action, body);
+      groups = groupsFrom(await api("groups/" + action, body));
       gEdit = null;
       renderGroups();
       if (ok) status(ok, "ok");
@@ -3088,7 +3119,11 @@
     const m = /^(.+):(none|minimal|low|medium|high|xhigh|max)$/i.exec(id);
     return m ? [m[1], m[2].toLowerCase()] : [id, ""];
   }
-  const modelOf = (id) => groups?.models.find((m) => m.id === id) || groups?.models.find((m) => m.id === splitMember(id)[0]);
+  // a decision model (Jev) is a member of a group of decision models only,
+  // asked at /v1/systemone (provider/decide_group.go): it is in
+  // groups.deciders, not groups.models
+  const deciderOf = (id) => groups?.deciders?.find((m) => m.id === splitMember(id)[0]);
+  const modelOf = (id) => groups?.models.find((m) => m.id === id) || groups?.models.find((m) => m.id === splitMember(id)[0]) || deciderOf(id);
   // a group's patterns (#766, provider.IsPattern): a glob, * any run of
   // characters over the provider/model id in any case, or re:<regexp> over
   // the whole id. The group keeps them, and the models they match now
@@ -3123,7 +3158,7 @@
   // there, rather than leaving the slot empty.
   const openGroupEditor = async (g) => {
     if (groupDirty() && !(await confirmDiscard())) return false;
-    gEdit = { id: g.id, draft: { name: g.name, members: [...g.members], match: [...(g.match || [])], matched: [...(g.matched || [])], fast: [...(g.fast || [])], off: [...(g.off || [])], routing: g.routing || "", pick: g.pick || "", affinity: g.affinity || "", sink: !!g.sink, firstToken: g.firstToken || 0, patience: patienceOf(g.patience), context: g.context || 0, classifier: g.classifier || "", effort: g.effort || "", levels: [...(g.levels || [])], rules: (g.rules || []).map((r) => ({ ...r, intent: r.intent || "", agents: [...(r.agents || [])], time: r.time ? { ...r.time, days: [...(r.time.days || [])] } : null })) } };
+    gEdit = { id: g.id, draft: { name: g.name, members: [...g.members], match: [...(g.match || [])], matched: [...(g.matched || [])], fast: [...(g.fast || [])], off: [...(g.off || [])], routing: g.routing || "", pick: g.pick || "", affinity: g.affinity || "", sink: !!g.sink, firstToken: g.firstToken || 0, patience: patienceOf(g.patience), context: g.context || 0, classifier: g.classifier || "", effort: g.effort || "", levels: [...(g.levels || [])], rules: (g.rules || []).map((r) => ({ ...r, intent: r.intent || "", agents: [...(r.agents || [])], folders: [...(r.folders || [])], exceptFolders: [...(r.exceptFolders || [])], time: r.time ? { ...r.time, days: [...(r.time.days || [])] } : null })) } };
     renderGroups();
     return true;
   };
@@ -3164,11 +3199,36 @@
   gQ.autocomplete = "off";
   gQ.oninput = () => renderGroups();
   gQ.onkeydown = (e) => { if (e.key === "Escape" && gQ.value) { e.stopPropagation(); gQ.value = ""; renderGroups(); } };
+  // gImport: Import a group's box (laincatx on X): the text pasted, kept
+  // in the page across redraws as gQ is, and what the import added and
+  // left out once it has; null while closed
+  let gImport = null;
+  const gImportText = el("textarea", "rt-gimport-text");
+  gImportText.spellcheck = false;
+  gImportText.rows = 4;
+  gImportText.onkeydown = (e) => { if (e.key === "Escape") { e.stopPropagation(); closeImport(); } };
   // groupMatches: every word of the filter in the group's name, id, or a
   // member's id or label (its provider and model names)
   function groupMatches(g, words) {
+    try { return hayMatches(g, words); } catch { return true; } // a group that can't be read is shown, flagged
+  }
+  function hayMatches(g, words) {
     const hay = [g.name, g.id, "group/" + g.id, ...g.members.flatMap((id) => [id, memberLabel(g, id)]), ...(g.patterns || []).map((p) => p.pattern)].join("\n").toLowerCase();
     return words.every((w) => hay.includes(w));
+  }
+  // rowOrFlag: a group's row, or when drawing it fails, a row that says so
+  // with its name, while every other group is drawn as ever (#1585)
+  function rowOrFlag(g, draw) {
+    try { return draw(); } catch (e) {
+      console.error("routing group", g.id, e);
+      const row = el("div", "rt-group off rt-gbad");
+      row.dataset.id = g.id;
+      const main = el("div", "main"), nm = el("div", "nm");
+      nm.append(el("b", "", String(g.name || g.id)), el("code", "mdl", "group/" + g.id));
+      main.append(nm, el("div", "mem", t("This group can't be shown: {error}", { error: e?.message || String(e) })));
+      row.append(el("span", "ics"), main);
+      return row;
+    }
   }
   function drawGroups() {
     const all = groups.groups.filter((g) => !g.hidden), hidden = groups.groups.filter((g) => g.hidden);
@@ -3193,6 +3253,12 @@
     const own = all.some((g) => !g.auto), tpls = groups.templates || [];
     if (!gSel) {
       if (own && tpls.length) head.push(templateButton(tpls));
+      const imp = el("button", "text rt-gimportbtn", t("Import"));
+      imp.type = "button";
+      imp.title = t("Add a routing group someone shared from their magpie");
+      imp.setAttribute("aria-expanded", gImport ? "true" : "false");
+      imp.onclick = () => gImport ? closeImport() : openImport();
+      head.push(imp);
       // several removed at once: pick them, then Remove
       if (all.length > 1) {
         const pick = el("button", "text rt-gselect", t("Select"));
@@ -3213,8 +3279,9 @@
     const rows = [];
     if (!gSel && !own && !words.length && tpls.length) rows.push(templateCards(tpls));
     if (gSel) rows.push(selectBar(shown));
+    if (gImport && !gSel) rows.push(importBox());
     if (gEdit && !gEdit.id) rows.push(groupEditor(null));
-    for (const g of shown) rows.push(gSel ? pickedRow(g) : gEdit?.id === g.id ? groupEditor(g) : groupRow(g));
+    for (const g of shown) rows.push(rowOrFlag(g, () => gSel ? pickedRow(g) : gEdit?.id === g.id ? groupEditor(g) : groupRow(g)));
     if (!rows.length && all.length) rows.push(el("div", "none rt-gnone", t("No group or model matches “{q}”", { q: gQ.value.trim() })));
     if (!rows.length) rows.push(el("div", "none rt-gnone", groups.found === false
       ? t("No group yet. New group makes one of any models you like.")
@@ -3240,8 +3307,77 @@
       h.append(b);
       rows.push(h);
     }
-    gList.replaceChildren(...rows);
+    // the import box's text stays in the page as the list is drawn again
+    replaceKeeping(gList, rows);
     renderPools();
+  }
+  // Copy to share (laincatx on X): the group as text, its models, routing
+  // and rules and no key (provider.ShareGroup), for anyone to paste into
+  // their magpie's Import
+  async function shareGroup(g) {
+    try {
+      const st = await api("groups/share", { id: g.id });
+      await copy(st.shared, g.name, null, t("{name} copied: paste it into Import on another magpie's Routing page", { name: g.name }));
+    } catch (e) { status(e.message, "err"); }
+  }
+  async function openImport() {
+    if (groupDirty() && !(await confirmDiscard())) return;
+    gEdit = null; gSel = null;
+    gImport = {};
+    gImportText.value = "";
+    renderGroups();
+    gImportText.focus({ preventScroll: true });
+  }
+  function closeImport() {
+    gImport = null;
+    gImportText.value = "";
+    renderGroups();
+  }
+  // importBox: paste a shared group, Import adds it; then what was added,
+  // and what of it this magpie has none of, until Done
+  let gImportBox = null;
+  function importBox() {
+    gImportBox ||= el("div", "rt-gimport");
+    const box = gImportBox, res = gImport.res;
+    const parts = [];
+    if (!res) {
+      gImportText.placeholder = t("Paste a group copied with Copy to share");
+      gImportText.setAttribute("aria-label", t("A routing group shared from magpie"));
+      const go = el("button", "text primary rt-gimport-go", t("Import"));
+      go.type = "button";
+      go.onclick = async () => {
+        const text = gImportText.value;
+        if (!text.trim()) { gImportText.focus({ preventScroll: true }); return; }
+        go.disabled = true;
+        try {
+          groups = groupsFrom(await api("groups/import", { text }));
+          gImport = { res: groups.imported };
+          gImportText.value = "";
+          status(t("Added {name}", { name: groups.imported.name }), "ok");
+          renderGroups();
+          load(); // the gateway's model list, the agents' pickers
+        } catch (e) { go.disabled = false; status(e.message, "err"); }
+      };
+      const no = el("button", "text", t("Cancel"));
+      no.type = "button";
+      no.onclick = closeImport;
+      const acts = el("div", "acts");
+      acts.append(go, no);
+      parts.push(el("div", "rt-gtpl-head", t("Paste a routing group someone shared from their magpie: its models, routing and rules come with it, never a key")), gImportText, acts);
+    } else {
+      parts.push(el("div", "rt-gimport-done", t("Added {name}", { name: res.name })));
+      if (res.missing?.length) parts.push(el("div", "rt-gimport-missing", t("Not in your magpie, left out: {models}", { models: res.missing.join(", ") })));
+      if (res.instead?.length) parts.push(el("div", "rt-gimport-note", t("The same model from your own provider: {models}", { models: res.instead.join(", ") })));
+      if (res.rules) parts.push(el("div", "rt-gimport-note", t(res.rules === 1 ? "1 rule left out with them" : "{n} rules left out with them", { n: res.rules })));
+      const done = el("button", "text", t("Done"));
+      done.type = "button";
+      done.onclick = closeImport;
+      const acts = el("div", "acts");
+      acts.append(done);
+      parts.push(acts);
+    }
+    replaceKeeping(box, parts);
+    return box;
   }
   // a template's name and what it does, in the user's language
   // (provider.TemplateNames)
@@ -3266,7 +3402,7 @@
     if (groupDirty() && !(await confirmDiscard())) return;
     const g = tp.group;
     gSel = null;
-    gEdit = { id: "", draft: { name: tplName(tp), slug: g.id, members: [...g.members], match: [], matched: [], fast: [], off: [], routing: g.routing || "", affinity: "", rules: (g.rules || []).map((r) => ({ ...r, intent: r.intent || "", agents: [...(r.agents || [])], time: null })), classifier: g.classifier || "", effort: "", levels: [] } };
+    gEdit = { id: "", draft: { name: tplName(tp), slug: g.id, members: [...g.members], match: [], matched: [], fast: [], off: [], routing: g.routing || "", affinity: "", rules: (g.rules || []).map((r) => ({ ...r, intent: r.intent || "", agents: [...(r.agents || [])], folders: [], exceptFolders: [], time: null })), classifier: g.classifier || "", effort: "", levels: [] } };
     renderGroups();
     const ed = gList.querySelector(".rt-gedit");
     ed?.scrollIntoView({ block: "nearest" });
@@ -3354,7 +3490,7 @@
       if (!await confirmRemoval(shown.filter((g) => ids.includes(g.id)).map((g) => g.name).join(t(", ")), "These routing groups will no longer be available to agents.")) return;
       rm.disabled = true;
       try {
-        groups = await api("groups/delete", { ids });
+        groups = groupsFrom(await api("groups/delete", { ids }));
         gSel = null;
         renderGroups();
         status(ids.length === 1 ? t("{name} removed", { name: ids[0] }) : t("{n} groups removed", { n: ids.length }), "ok");
@@ -3421,7 +3557,7 @@
     s.classList.toggle("on", on);
     s.setAttribute("aria-checked", String(on));
     try {
-      groups = await api("groups/found", { on });
+      groups = groupsFrom(await api("groups/found", { on }));
       gEdit = null;
       renderGroups();
       saidMoved(on ? t("Found groups are on") : t("Found groups are off: only yours are listed and served"), groups.moved);
@@ -3543,6 +3679,9 @@
       // change without touching the one agents use (lc on Discord)
       { name: "Duplicate", icon: COPY_ICON, sep: true, tip: t("A copy of {name} with its models, routing and rules, listed after it", { name: g.name }),
         run: async () => { if (!groupDirty() || await confirmDiscard()) groupAction("copy", { id: g.id, name: t("{name} copy", { name: g.name }) }, t("Duplicated {name}", { name: g.name })); } },
+      // the group as text for someone else's magpie (laincatx on X)
+      { name: "Copy to share", icon: OUT, tip: t("{name} as text to paste into another magpie: its models, routing and rules, no key", { name: g.name }),
+        run: () => shareGroup(g) },
     ]);
   }
   // nextTo: where a group moved one up (-1) or down goes, among them all:
@@ -3572,7 +3711,7 @@
     const seq = ++groupArrangeSeq;
     let next;
     try {
-      next = await api("groups/arrange", { order });
+      next = groupsFrom(await api("groups/arrange", { order }));
       status(t("Group order saved"), "ok");
     } catch (e) {
       next = prev;
@@ -3779,7 +3918,8 @@
         // the reasoning the model is sent at in this group: the group's
         // (blank), or one of its own whatever the agent asks. A group in
         // it reasons as it says.
-        if (!s) {
+        // a decision model reasons at no level of the group's or its own
+        if (!s && !deciderOf(id)) {
           const [base, fixed] = splitMember(id);
           const fx = el("button", "rt-cond rt-fixed" + (fixed ? " on" : ""), fixed ? fixedWords(fixed) : t("Group's reasoning"));
           fx.title = fixed ? t("Sent at {level} reasoning whatever the agent asks, at the model's nearest level", { level: fixed }) : t("Reasons as the group's effort says");
@@ -3807,11 +3947,15 @@
             const fb = el("button", "rt-cond rt-fixed rt-fast" + (on ? " on" : ""), t(on ? "Fast" : "Standard speed"));
             fb.type = "button";
             fb.setAttribute("aria-pressed", String(on));
-            fb.title = on ? t("Sent in its vendor's fast mode whatever the agent asks: quicker, at a higher price") : t("Sent at its vendor's usual speed; click to send it in fast mode");
+            // on a provider the user added (provider.OwnFast, #1615) it is
+            // only asked for: magpie can't know the provider serves it
+            fb.title = m.ownFast
+              ? (on ? t("Asked for OpenAI's fast mode (service_tier \"priority\") whatever the agent asks: quicker, at a higher price, where your provider serves it. One that turns it away is asked without it") : t("Sent as the agent asks; click to ask your provider for OpenAI's fast mode (service_tier \"priority\")"))
+              : (on ? t("Sent in its vendor's fast mode whatever the agent asks: quicker, at a higher price") : t("Sent at its vendor's usual speed; click to send it in fast mode"));
             fb.onclick = () => { d.fast = on ? d.fast.filter((x) => x !== id) : [...d.fast, id]; draw(); };
             row.append(fb);
           }
-        } else {
+        } else if (s) {
           // a group in the group takes no reasoning of its own: its models
           // reason as it says (provider.SaveGroup refuses "group/x:high", and
           // the gateway has nowhere to put one). So the slot a model's own
@@ -3858,10 +4002,15 @@
     addBtn.onclick = (ev) => {
       // a group in it may be any other, but never one it is in already:
       // that would put it in itself
-      const subs = groups.groups.filter((x) => !x.hidden && x.id !== g?.id && !(g && x.holds?.includes(g.id)))
+      // a group is of decision models only, or of models that hold
+      // conversations (provider.cleanDecisionGroup): one holding either
+      // is offered more of the same, an empty one both. A group of
+      // decision models is never in another: it holds no conversation
+      const decides = d.members.some((m) => !subOf(m) && deciderOf(m)), chats = d.members.some((m) => subOf(m) || !deciderOf(m));
+      const subs = decides ? [] : groups.groups.filter((x) => !x.hidden && !x.decides && x.id !== g?.id && !(g && x.holds?.includes(g.id)))
         .map((x) => ({ value: "group/" + x.id, label: x.name, note: noted("group/" + x.id, "group/" + x.id), icons: groupIcons(x), group: ROUTING_GROUPS, ref: "group/" + x.id }));
-      const options = [...subs, ...groups.models
-        .map((x) => ({ value: x.id, label: x.name || x.id, note: noted(x.providerName, x.id), icon: x.icon, group: x.providerName, ref: x.id, context: x.context }))];
+      const ref = (x) => ({ value: x.id, label: x.name || x.id, note: noted(x.providerName, x.id), icon: x.icon, group: x.providerName, ref: x.id, context: x.context });
+      const options = [...subs, ...(decides ? [] : groups.models.map(ref)), ...(chats ? [] : (groups.deciders || []).map(ref))];
       // the member a model is in the group as: itself, or with its
       // reasoning fixed (deepseek/x:max), which is ticked as it and taken
       // out by it rather than added twice (#907)
@@ -4123,11 +4272,30 @@
           drawTime(); warn();
         });
         drawTime();
-        // a pause holds by hours, days and agents only: the others are
-        // about a request, and a pause keeps the model out of every one
+        // folders: the project the agent works in, as it tells its model
+        // (Cario0x on X), typed comma separated; a folder inside one counts
+        const fd = el("span", "rt-cond fd" + (r.folders?.length ? " on" : ""));
+        fd.onclick = () => fi.focus();
+        const fi = input((r.folders || []).join(", "), "~/work/acme, ~/oss");
+        fd.title = t("The agent works in one of these folders or a folder inside one, as it tells the model (Claude Code, Codex, OpenCode, Pi); an agent that doesn't say isn't matched");
+        fi.oninput = () => { r.folders = fi.value.split(",").map((x) => x.trim()).filter(Boolean); fd.classList.toggle("on", r.folders.length > 0); };
+        fi.onkeydown = (e) => e.stopPropagation();
+        fd.append(el("span", "", t("in folder")), fi);
+        // outside folders (#1606, Ti800): a model kept for the task in one
+        // folder is paused for every other; an agent that doesn't say its
+        // folder isn't known to be in one, so it counts as outside
+        const xf = el("span", "rt-cond xf" + (r.exceptFolders?.length ? " on" : ""));
+        xf.onclick = () => xi.focus();
+        const xi = input((r.exceptFolders || []).join(", "), "~/big-task");
+        xf.title = t("The agent works in none of these folders, nor a folder inside one, as it tells the model; an agent that doesn't say counts as outside them");
+        xi.oninput = () => { r.exceptFolders = xi.value.split(",").map((x) => x.trim()).filter(Boolean); xf.classList.toggle("on", r.exceptFolders.length > 0); };
+        xi.onkeydown = (e) => e.stopPropagation();
+        xf.append(el("span", "", t("not in folder")), xi);
+        // a pause holds by hours, days, agents and folders only: the others
+        // are about a request, and a pause keeps the model out of every one
         const byRequest = [tk, im, ef, it, cp];
         for (const c of byRequest) c.hidden = !!r.pause;
-        when.append(tk, im, ef, ag, it, cp, tm, dayBtn);
+        when.append(tk, im, ef, ag, it, cp, fd, xf, tm, dayBtn);
         // the member it sends to
         const use = el("div", "rt-use");
         const ub = el("button", "rt-cond on");
@@ -4175,7 +4343,7 @@
       focusIntent = null;
     };
     let focusIntent = null;
-    const newRule = () => ({ use: d.members[d.members.length - 1], pause: false, tokens: 0, images: false, effort: "", agents: [], intent: "", compact: false, time: null });
+    const newRule = () => ({ use: d.members[d.members.length - 1], pause: false, tokens: 0, images: false, effort: "", agents: [], intent: "", compact: false, folders: [], exceptFolders: [], time: null });
     rAdd.onclick = () => { d.rules.push(newRule()); drawRules(); };
     const addIntentRule = () => {
       asking = newRule();
@@ -4321,10 +4489,13 @@
           ? t("Rule {n}: its hours are the whole day — pick days, or other hours", { n: badTime + 1 })
           : t("Rule {n}: the hours are two times like 09:00 and 18:00", { n: badTime + 1 }), "warn");
       }
-      const bare = d.rules.findIndex((r) => !r.pause && !r.tokens && !r.images && !r.effort && !r.agents.length && !r.intent && !r.compact && !r.time);
+      // a folder is a whole path (provider.cleanFolder)
+      const badDir = d.rules.findIndex((r) => [...(r.folders || []), ...(r.exceptFolders || [])].some((f) => !/^(~$|~[\\/]|\/|\\\\|[A-Za-z]:([\\/]|$))/.test(f)));
+      if (badDir >= 0) return status(t("Rule {n}: a folder is a whole path, like ~/work or /Users/me/work", { n: badDir + 1 }), "warn");
+      const bare = d.rules.findIndex((r) => !r.pause && !r.tokens && !r.images && !r.effort && !r.agents.length && !r.intent && !r.compact && !r.time && !r.folders?.length && !r.exceptFolders?.length);
       if (bare >= 0) return status(t("Rule {n} needs a condition", { n: bare + 1 }), "warn");
-      const bareP = d.rules.findIndex((r) => r.pause && !r.time && !r.agents.length);
-      if (bareP >= 0) return status(t("Rule {n}: a pause needs hours, days or agents", { n: bareP + 1 }), "warn");
+      const bareP = d.rules.findIndex((r) => r.pause && !r.time && !r.agents.length && !r.folders?.length && !r.exceptFolders?.length);
+      if (bareP >= 0) return status(t("Rule {n}: a pause needs hours, days, agents or folders", { n: bareP + 1 }), "warn");
       if (d.rules.some((r) => r.intent) && !d.classifier) return status(t("Choose the model that tells which intent a message is"), "warn");
       if (d.effort === "auto" && !d.classifier) return status(t("Choose the model that rates how hard a turn is"), "warn");
       if (own && !d.levels.length) return status(t("Pick a level to offer, or leave them to its models"), "warn");
@@ -4357,7 +4528,7 @@
         : t(p.kind === "account" ? "{n} accounts" : "{n} keys", { n: p.who.length })));
       const ctl = el("div", "ctl");
       const set = async (what, body, ok) => {
-        try { await api("provider/" + what, body); status(ok, "ok"); groups = await api("groups"); load(); } catch (e) { status(e.message, "err"); }
+        try { await api("provider/" + what, body); status(ok, "ok"); groups = groupsFrom(await api("groups")); load(); } catch (e) { status(e.message, "err"); }
       };
       const lab = (s, c) => { const w = el("span", "lab"); w.append(el("small", "", s), c); return w; };
       // by weight is a key's share (#841), set beside each key in the provider's editor

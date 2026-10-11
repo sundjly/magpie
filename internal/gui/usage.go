@@ -31,7 +31,7 @@ type (
 )
 
 var (
-	usageState   = usageapi.State
+	usageState   = usageapi.Page
 	ledgerPage   = usageapi.LedgerPage
 	periodOf     = usageapi.PeriodOf
 	ledgerFilter = usageapi.FilterOf
@@ -173,11 +173,15 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 	// apart from the local log.
 	// ?asked=1 is the user opening or refreshing the page: Claude Code's
 	// own /usage is run at once (provider.AskClaudeUsage).
+	// Only then are they read while the user has allowances read only
+	// when asked (#1518).
 	mux.HandleFunc("GET /api/usage/quotas", func(rw http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		if r.URL.Query().Get("asked") != "" {
 			provider.AskClaudeUsage()
+			ctx = provider.Asked(ctx)
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		defer cancel()
 		// a WorkBuddy (China) account's card says how its daily check-in
 		// went (#694)

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // cliIdentity is who an agent's CLI says is signed in (`cursor-agent about`,
@@ -46,6 +48,23 @@ type keptIdentity struct {
 
 var identityFile sync.Mutex
 
+// testSandbox is testenv.Marker, which provider can't import: set in a test
+// binary testenv isolated.
+const testSandbox = "MAGPIE_TEST_SANDBOX"
+
+// keepInSandbox has the answers kept on disk in a test binary too, for the
+// tests of that file itself.
+var keepInSandbox = false
+
+// keepsIdentities says whether the answers are kept on disk: always, except
+// in a test binary testenv isolated. There an ask runs behind the look that
+// started it, and one still going when its test ended (a stand-in CLI slow
+// under load) wrote cli-identity.json into the config folder of whichever
+// test was running then, as that was being removed, failing its TempDir
+// cleanup: internal/gateway's (#1524), then internal/agent's (#1538), and
+// any package whose tests read the accounts could.
+func keepsIdentities() bool { return keepInSandbox || os.Getenv(testSandbox) == "" }
+
 func identityPath() string { return filepath.Join(filepath.Dir(Path()), "cli-identity.json") }
 
 func readIdentities() map[string]keptIdentity {
@@ -57,6 +76,9 @@ func readIdentities() map[string]keptIdentity {
 }
 
 func (c *cliIdentity) keep() {
+	if !keepsIdentities() {
+		return
+	}
 	identityFile.Lock()
 	defer identityFile.Unlock()
 	m := readIdentities()
@@ -73,6 +95,9 @@ func (c *cliIdentity) keep() {
 }
 
 func (c *cliIdentity) get() (user, plan string, ok bool) {
+	if settings.AccountDiscoveryOff() {
+		return "", "", false
+	}
 	c.Lock()
 	defer c.Unlock()
 	if c.at.IsZero() && !c.read {

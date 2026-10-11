@@ -694,8 +694,8 @@ func groupEntries(entries []Entry) []Entry {
 			continue
 		}
 		ms := membersIn(entries, all, g)
-		if len(ms) == 0 {
-			continue
+		if len(ms) == 0 || DecisionGroup(ms) {
+			continue // a decision group answers System One, no agent's conversation
 		}
 		e := Entry{ID: GroupPrefix + g.ID, Model: ms[0].Model, Name: g.Name, Provider: ms[0].Provider, Group: g.ID, Named: !g.Auto}
 		var fixed []string // the efforts members are fixed at
@@ -930,10 +930,10 @@ func SaveGroup(g Group) error {
 	if err := groupsInGroup(g, groupsIn(entries)); err != nil {
 		return err
 	}
-	for _, m := range g.Members {
-		if IsDecider(m) {
-			return fmt.Errorf("%s decides a group's model and effort; it holds no conversation, so it can only be the group's classifier", m)
-		}
+	// decision models make a group of their own, asked at /v1/systemone,
+	// never one with models that hold conversations (decide_group.go)
+	if err := cleanDecisionGroup(&g, groupsIn(entries)); err != nil {
+		return err
 	}
 	if g.Routing != Ordered && g.Routing != Rotate && g.Routing != LeastUsed && g.Routing != Pace && g.Routing != Manual {
 		g.Routing = ""

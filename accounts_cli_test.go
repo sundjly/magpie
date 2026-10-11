@@ -18,7 +18,7 @@ import (
 // fake /usage and an on-disk snapshot in a temporary home.
 func TestAccountsCachedReading(t *testing.T) {
 	if mode := os.Getenv("MAGPIE_TEST_ACCOUNTS_READING"); mode != "" {
-		provider.UsageClaudeVia(func(context.Context) (string, error) {
+		provider.UsageClaudeVia(func(context.Context, string) (string, error) {
 			if strings.HasPrefix(mode, "fresh") {
 				return "Current session: 25% used", nil
 			}
@@ -138,6 +138,10 @@ func TestQuotaCell(t *testing.T) {
 	pooled := quotaCell(quotaSpan{Name: "Gemini · 7 days", Pool: "Gemini", Used: 80}, now)
 	if !strings.HasPrefix(pooled, "Gemini 7d 80%") {
 		t.Fatalf("pooled: %q", pooled)
+	}
+	// a window with no cap says so, not 0% (#1547)
+	if got := quotaCell(quotaSpan{Name: "Limit", Unlimited: true}, now); got != "Limit unlimited" {
+		t.Fatalf("unlimited: %q", got)
 	}
 }
 

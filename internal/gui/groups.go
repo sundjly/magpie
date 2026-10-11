@@ -29,6 +29,12 @@ type groupsJSON struct {
 	// Templates: groups for common needs made of the user's own models,
 	// which the page adds in a click (provider.Templates)
 	Templates []provider.Template `json:"templates"`
+	// Shared: share's answer, the group as text to paste into another
+	// magpie (provider.ShareGroup)
+	Shared string `json:"shared,omitempty"`
+	// Imported: import's answer, the group added and what of the text
+	// this magpie has none of (provider.ImportGroup)
+	Imported *provider.Imported `json:"imported,omitempty"`
 }
 
 type groupJSON struct {
@@ -47,6 +53,9 @@ type groupJSON struct {
 	// Patterns: its patterns, each with how many models it matches now
 	// (#766), so one that matches nothing is said on its card
 	Patterns []provider.PatternHit `json:"patterns"`
+	// Decides: it is a group of decision models, asked at /v1/systemone
+	// and by a group's classifier, never by an agent
+	Decides bool `json:"decides,omitempty"`
 }
 
 type memberJSON struct {
@@ -69,6 +78,9 @@ type memberJSON struct {
 	// model has one (provider.CanFast)
 	Fast    bool `json:"fast,omitempty"`
 	CanFast bool `json:"canFast,omitempty"`
+	// OwnFast: that fast mode is asked of a provider the user added by its
+	// address, which may or may not serve it (provider.OwnFast, #1615)
+	OwnFast bool `json:"ownFast,omitempty"`
 	// Efforts: the reasoning levels this member is offered. A model's own,
 	// or — a member that is itself a group — the levels it passes on to
 	// agents, which are the ones every model in it has (provider.groupEntries).
@@ -99,6 +111,9 @@ type modelRef struct {
 	// CanFast: a group's member of it may be sent in its vendor's fast
 	// mode (provider.CanFast)
 	CanFast bool `json:"canFast,omitempty"`
+	// OwnFast: asked of a provider the user added by its address, which may
+	// or may not serve it (provider.OwnFast, #1615)
+	OwnFast bool `json:"ownFast,omitempty"`
 	// Images: agents are told it takes images (provider.Entry.Images); a
 	// group's editor says of each member what it says of it (#756).
 	// ImagesUnknown: nothing was read of it either way (imagesUnknown),
@@ -177,18 +192,30 @@ func keyPools(p provider.Provider) []poolJSON {
 
 func groupsState() groupsJSON {
 	out := groupsJSON{Groups: []groupJSON{}, Models: []modelRef{}, Pools: []poolJSON{}, Deciders: []modelRef{}, Found: provider.AutoGroupsOn(), Templates: provider.Templates()}
+	for i := range out.Templates {
+		if out.Templates[i].Group.Members == nil {
+			out.Templates[i].Group.Members = []string{} // one that can't be made has none
+		}
+	}
 	for _, e := range provider.Deciders() {
 		out.Deciders = append(out.Deciders, modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon})
 	}
 	served := provider.Served()
 	for _, e := range served {
 		if e.Group == "" {
-			out.Models = append(out.Models, modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon, Context: e.Context, Efforts: e.Efforts, CanFast: provider.CanFast(e.Provider, e.Model), Images: seesImages(e), ImagesUnknown: imagesUnknown(e)})
+			out.Models = append(out.Models, modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon, Context: e.Context, Efforts: e.Efforts, CanFast: provider.CanFast(e.Provider, e.Model), OwnFast: provider.OwnFast(e.Provider, e.Model), Images: seesImages(e), ImagesUnknown: imagesUnknown(e)})
 		}
 	}
 	for _, g := range provider.Groups() {
 		gj := groupJSON{Group: g, Info: []memberJSON{}, Holds: []string{}, Offers: []string{}, Shared: []string{}, Patterns: []provider.PatternHit{}}
+		if gj.Members == nil {
+			// a group of patterns that match nothing now — a plugin's
+			// models not listed — has none, said as [] rather than null,
+			// which the Routing page couldn't draw (#1585)
+			gj.Members = []string{}
+		}
 		gj.Patterns = append(gj.Patterns, provider.PatternHits(g)...)
+		gj.Decides = g.Decides()
 		for _, e := range served {
 			if e.ID == provider.GroupPrefix+g.ID {
 				gj.Offers, gj.Shared = append(gj.Offers, e.Efforts...), append(gj.Shared, e.Shared...)
@@ -233,6 +260,7 @@ func groupsState() groupsJSON {
 				_, who := onOf(p)
 				m.Ready, m.Provider, m.Name, m.Icon, m.Model, m.On = true, p.ID, p.Name, p.Icon, model, max(len(who), 1)
 				m.CanFast = provider.CanFast(p, model)
+				m.OwnFast = m.CanFast && provider.OwnFast(p, model)
 				m.Fast = m.CanFast && g.IsFast(id)
 				for _, e := range served {
 					if e.Group == "" && e.Provider.ID == p.ID && e.Model == model {
@@ -296,6 +324,8 @@ func groupRoutes(mux *http.ServeMux) {
 			// template: which one, saved under the group's name
 			// (provider.AddTemplate)
 			Kind string `json:"kind"`
+			// import: a group shared as text (provider.ShareGroup)
+			Text string `json:"text"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			fail(rw, err)
@@ -304,6 +334,8 @@ func groupRoutes(mux *http.ServeMux) {
 		in := body.Group
 		var err error
 		var moved []agent.Move
+		var shared string
+		var imported *provider.Imported
 		switch r.PathValue("action") {
 		case "found":
 			// off, an agent set to a found group is moved to its model
@@ -335,6 +367,14 @@ func groupRoutes(mux *http.ServeMux) {
 		case "copy":
 			// a group as it is, under name (provider.CopyGroup)
 			_, err = provider.CopyGroup(in.ID, in.Name)
+		case "share":
+			// the group as text for another magpie: no key goes with it
+			shared, err = provider.ShareGroup(in.ID)
+		case "import":
+			var res provider.Imported
+			if res, err = provider.ImportGroup(body.Text); err == nil {
+				imported = &res
+			}
 		case "template":
 			_, err = provider.AddTemplate(body.Kind, in.Name)
 		case "switch":
@@ -351,7 +391,7 @@ func groupRoutes(mux *http.ServeMux) {
 			return
 		}
 		st := groupsState()
-		st.Moved = moved
+		st.Moved, st.Shared, st.Imported = moved, shared, imported
 		writeJSON(rw, st)
 	})
 }

@@ -359,6 +359,18 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		role("plan", "plan", "plan", true),
 		role("vision", "vision", "vision", true),
 		role("advisor", "advisor", "advisor", true),
+		// the rest of omp's chat roles (CHAT_MODEL_ROLE_IDS in pi-tui's
+		// model-browser.ts, 18.6 to 18.8.8; #1397 named commit and tiny):
+		// commit writes commit messages and falls to smol when unset
+		// (commit/model-selection.ts), tiny names sessions and classifies
+		// and takes smol's model, memory takes tiny's, else smol's
+		// (ROLE_CONFIGURED_FALLBACK). omp's other roles (KIND_ROLE_IDS)
+		// are for kinds of model other than the chat models magpie writes
+		// for omp: image making, web search, speech, dictation, and the
+		// judge its find tool turns on for a TypeSafe jev model
+		role("commit", "commit", "commit", true),
+		role("tiny", "tiny", "tiny", true),
+		role("memory", "memory", "memory", true),
 	}
 	// each role but the default one has a thinking level of its own, the
 	// ":level" omp reads off the end of the role's model
@@ -453,7 +465,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		},
 		Notice: func() string {
 			if Running(`(^|/)omp( |$)`, `@oh-my-pi/pi-coding-agent`) {
-				return "omp reads its settings at start-up — restart open omp sessions to use this."
+				return noticeOmp.String()
 			}
 			return ""
 		},
@@ -515,8 +527,19 @@ type ompProviderEntry struct {
 	// and only a later one with its own (omp/18.4.4), so its requests went
 	// to "Bun" in usage and past omp's own rules and stand-ins
 	Headers map[string]string `yaml:"headers,omitempty"`
-	Models  []ompModel        `yaml:"models"`
+	// Compat names the header omp sends its session in. omp names the
+	// conversation on Anthropic's Messages API (X-Claude-Code-Session-Id),
+	// and on Chat and Responses only to OpenAI itself, so a turn of omp's on
+	// Chat or Responses reached the gateway with no session: its usage had
+	// none and "Record gateway conversations" kept none of it (akic404 on
+	// Discord). promptCacheSessionHeader has omp send its session id in it.
+	Compat map[string]string `yaml:"compat,omitempty"`
+	Models []ompModel        `yaml:"models"`
 }
+
+// ompSessionSince is the first omp whose compat takes
+// promptCacheSessionHeader (pi-catalog 16.0.6).
+const ompSessionSince = "16.0.6"
 
 // ompMaxSince is the first omp whose models.yml takes max as a thinking
 // effort (pi-ai 16.4.0); 16.3.5's schema stops at xhigh and turns the whole
@@ -597,6 +620,9 @@ func ompProviderAt(gw, version string) ompProviderEntry {
 	}
 	e := ompProviderEntry{BaseURL: gw + "/v1", API: "openai-completions", Auth: "none",
 		Headers: map[string]string{"User-Agent": "omp"}, Models: ms}
+	if version != "" && !Newer(ompSessionSince, version) {
+		e.Compat = map[string]string{"promptCacheSessionHeader": "x-session-affinity"}
+	}
 	// whqtian on Discord: a WSL omp under NAT asks Windows' address, where
 	// the gateway turns a request without a named key away
 	if key := keyAt(gw); key != gateway.Token {
@@ -672,3 +698,8 @@ func ompOwnOptions(modelsFile, cur string) []Option {
 	sort.SliceStable(out, func(i, j int) bool { return first[out[i].Group] < first[out[j].Group] })
 	return out
 }
+
+// what omp says after a change (notice.go)
+var (
+	noticeOmp = newNotice("omp reads its settings at start-up — restart open omp sessions to use this.")
+)

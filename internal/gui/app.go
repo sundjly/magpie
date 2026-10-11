@@ -19,6 +19,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/library"
@@ -81,6 +82,13 @@ type host struct {
 	glides      atomic.Int64 // the newest panel glide; older ones stop
 	barTray     atomic.Int64 // the newest setTrayInBar; older ones stop
 	query       string       // what the windows' URLs carry (a forced theme)
+
+	// niri places the panel as it opens (#1670): niriWatch starts its
+	// watch once, and iconX is where the tray icon was just clicked
+	// across its bar
+	niri      omarchy.NiriPanel
+	niriWatch sync.Once
+	iconX     atomic.Pointer[int]
 
 	// closing is set while a full-screen main window, closed, leaves full
 	// screen; it is hidden once it has
@@ -158,8 +166,8 @@ func (h *host) ChooseFolder(title string) (string, error) {
 	return d.PromptForSingleSelection()
 }
 
-// panelTitle names the panel for Hyprland's rule, which places it (the
-// main window is "magpie")
+// panelTitle names the panel for Hyprland's rule, which places it, and
+// for niri, which finds it by it (the main window is "magpie")
 const panelTitle = "magpie panel"
 
 // FitPanel grows or shrinks the panel to its content and keeps it anchored
@@ -180,12 +188,12 @@ func (h *host) fitPanel(height int, g Glide) {
 	if h.panel == nil { // let go: made again at this height
 		return
 	}
-	if h.panel.IsVisible() && h.glidePanel(height, g) {
+	if windowOpen(h.panel) && h.glidePanel(height, g) {
 		return
 	}
 	h.glides.Add(1)
 	h.panel.SetSize(h.panelW(), height)
-	if h.panel.IsVisible() {
+	if windowOpen(h.panel) {
 		_ = h.tray.PositionWindow(h.panel, 6)
 	}
 }
@@ -254,7 +262,7 @@ func (h *host) zoomWindows() {
 	}
 	setPageZoom(h.panel, z)
 	h.panel.SetSize(w, ht)
-	if h.panel.IsVisible() {
+	if windowOpen(h.panel) {
 		_ = h.tray.PositionWindow(h.panel, 6)
 	}
 }
@@ -337,8 +345,17 @@ func Run(version string, showMain bool, link string) error {
 		// way out, so the next launch is the new one.
 		// Quitting doesn't come back to main on a Mac (NSApp terminate:
 		// exits), so the CLIs still being asked something end here.
+		// Account failover magpie wrote into Codex goes with the gateway
+		// this process serves: Codex left pointed at it would retry till
+		// magpie is open again (Leon920717 on X). The next start writes it
+		// again (Sync).
 		OnShutdown: func() {
 			proc.EndProbes()
+			if served.Load() != nil {
+				if err := agent.EndCodexFailover(); err != nil {
+					log.Println("codex failover:", err)
+				}
+			}
 			updates.install(false)
 		},
 		// Wails exits on some webview errors; say why before it does.
@@ -472,6 +489,9 @@ func Run(version string, showMain bool, link string) error {
 		if settings.Load().Tray == "window" {
 			h.ShowMain("")
 			return
+		}
+		if x, ok := trayClick(h.tray); ok {
+			h.iconX.Store(&x)
 		}
 		h.togglePanel()
 	})
@@ -668,6 +688,26 @@ func (h *host) togglePanelNow() {
 			return
 		}
 		h.placePanel()
+	}
+	// niri places it as it opens (see omarchy.NiriPanel), by the click
+	// that opened it, if a click did
+	if x := h.iconX.Swap(nil); omarchy.Niri() && !h.panel.IsVisible() {
+		h.niriWatch.Do(func() { go h.niri.Watch(panelTitle) })
+		h.niri.Opening(x)
+	}
+	if runtime.GOOS == "darwin" {
+		// Wails' ToggleWindow goes by IsVisible, which on the Mac is the
+		// window's occlusion: under a window over the whole screen (a
+		// remote-desktop server's, above every app's) the open panel read
+		// as closed, and the icon showed it again instead of closing it
+		// (#1661). Open is windowOpen: shown, covered or not.
+		if windowOpen(h.panel) {
+			h.panel.Hide()
+			return
+		}
+		_ = h.tray.PositionWindow(h.panel, 6)
+		h.panel.Show().Focus()
+		return
 	}
 	h.tray.ToggleWindow()
 }

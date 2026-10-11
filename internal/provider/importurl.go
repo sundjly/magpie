@@ -130,6 +130,13 @@ func ParseImport(link string) (Provider, error) {
 	if p.ID == "magpie" {
 		return Provider{}, errors.New(`"magpie" is what agents call the gateway itself; the link needs another id`)
 	}
+	if subscriptionID(p.ID) {
+		// named as a subscription is (claude, kiro): a provider of its own
+		// beside it, never in its place, where the subscription's sign-in
+		// would be lost, or Kiro's take the link's key to its own host
+		// (#1487)
+		p.ID = freeID(p.ID)
+	}
 	if len(p.Name) > 80 {
 		p.Name = p.Name[:80]
 	}

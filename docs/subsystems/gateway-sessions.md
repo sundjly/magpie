@@ -9,6 +9,12 @@ origins can read this header through CORS. magpie never makes up an id for a
 request without one, so such a request has no session and its text is not
 recorded: text kept under an id nothing lists couldn't be opened. Prompt text,
 caller keys and network addresses are never used to guess conversation ownership.
+So the configs magpie writes have each agent name its session: Pi's provider
+block sets `compat.sendSessionAffinityHeaders` (`x-session-affinity` on Chat and
+Messages; Responses sends `session_id` anyway), and omp 16.0.6 and later gets
+`compat.promptCacheSessionHeader: x-session-affinity`. A user's own
+`sendSessionAffinityHeaders` is kept (`piBlockKept`). Verification:
+`TestPiNamesItsSessionToTheGateway`, `TestOmpNamesItsSessionToTheGateway`.
 Older ledger records without `Session` remain excluded. The projection is
 computed from the usage ledger and is not persisted. Window projections and
 routing summaries reuse versioned log snapshots; appends and rewrites invalidate
@@ -127,6 +133,14 @@ has an explicit empty state and all gateway transcripts identify their source.
 The page invalidates pending transcript reads on reload or clear. A completed
 read updates the current open transcript after redraw, and an older response
 cannot replace content fetched after clearing the store.
+
+`GET /api/sessions/markdown` and `POST /api/sessions/export` take the same
+choice: a native session is written from its file (`sessions.WriteMarkdown`),
+and otherwise a known gateway session from what its transcript reads
+(`sessions.WriteGatewayMarkdown`, "Recorded by: magpie's gateway", with a note
+when turns or a part's end weren't kept). A magpie that others reach as a
+remote magpie has no file of their agents' sessions, so this is the only way
+it can export them. Verification: `TestGatewaySessionExportsMarkdown`.
 
 Verification: `TestGatewayConversation*` (`TestGatewayConversationNeedsTheClientsSession`
 and `TestGatewayConversationClientRequestPrefixedSession` for the two rules above), `TestGatewaySessionHistoryAndCalendar`,

@@ -167,6 +167,7 @@ func moveAccountSettings(id string, moves map[string]string) error {
 			moved = moveKey(p.AccountCaps, from, to) || moved
 			moved = moveKey(p.AccountWindowCaps, from, to) || moved
 			moved = moveKey(p.AccountConcurrency, from, to) || moved
+			moved = moveKey(p.AccountNames, from, to) || moved
 		}
 	}
 	if !moved {
@@ -359,7 +360,12 @@ func copilotUser(ctx context.Context, token, host string) (user, plan string, er
 		Login string `json:"login"`
 	}
 	if _, err := get(gitHubUserURL(host), &gh); err != nil || gh.Login == "" {
-		return "", "", errors.New("GitHub didn't say whose account this is")
+		msg := "GitHub didn't say whose account this is"
+		if err != nil {
+			// why, for a sign-in that ends here (#723)
+			msg += ": " + err.Error()
+		}
+		return "", "", errors.New(msg)
 	}
 	var cp copilotEntitlement
 	if code, err := get(copilotUserURL(host), &cp); err != nil {

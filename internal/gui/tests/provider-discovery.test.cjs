@@ -289,7 +289,7 @@ for (const engine of engines) {
       assert.equal(control.reads, 0);
       if (await page.locator("#addSheet").isHidden()) await page.locator("#addProvider").click();
       await page.locator("#addSheet").getByRole("button", { name: "Import…", exact: true }).click();
-      const picker = page.locator("#modal .importapps"), box = picker.locator(".approw input");
+      const picker = page.locator("#modal .importapps"), box = picker.locator(".approw input[type=\"checkbox\"]");
       await box.waitFor();
       assert.equal(await box.isChecked(), false);
       assert.equal(await box.isDisabled(), false, "manual import still allows selecting the configuration");

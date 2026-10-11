@@ -230,6 +230,11 @@ func memberResolver(keep []string) func(string) (string, error) {
 		if slices.Contains(ids, id) || slices.Contains(keep, id) {
 			return id, nil
 		}
+		if provider.IsDecider(id) {
+			// a decision model, for a group of decision models alone,
+			// asked at /v1/systemone (SaveGroup refuses a mixed one)
+			return id, nil
+		}
 		for _, x := range ids { // a provider/model id in another case
 			if strings.EqualFold(x, id) {
 				return x, nil

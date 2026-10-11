@@ -35,6 +35,25 @@ func TestSearchCLI(t *testing.T) {
 		as[2] != (provider.SearchAPI{Vendor: "brave", Key: "b-1", URL: "https://brave2.example.com"}) {
 		t.Fatalf("%+v", as)
 	}
+	// a new key alone keeps the base URL the user set (#1580); url= with
+	// nothing puts the vendor's own back
+	if err := searchCmd([]string{"add", "brave", "b-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if as := provider.SearchAPIs(); as[2] != (provider.SearchAPI{Vendor: "brave", Key: "b-2", URL: "https://brave2.example.com"}) {
+		t.Fatalf("a new key took the base URL away: %+v", as[2])
+	}
+	if err := searchCmd([]string{"add", "brave", "url="}); err != nil {
+		t.Fatal(err)
+	}
+	if as := provider.SearchAPIs(); as[2] != (provider.SearchAPI{Vendor: "brave", Key: "b-2"}) || as[2].Base() != "https://api.search.brave.com" {
+		t.Fatalf("url= kept the base URL: %+v", as[2])
+	}
+	for _, bad := range []string{"url=ftp://x.example.com", "url=https://x.example.com/?k=1", "url=https://x.example.com/#a", "url=x.example.com"} {
+		if err := searchCmd([]string{"add", "tavily", "tvly-2", bad}); err == nil {
+			t.Errorf("%s taken", bad)
+		}
+	}
 	if err := searchCmd(nil); err != nil {
 		t.Fatal(err)
 	}
@@ -46,5 +65,18 @@ func TestSearchCLI(t *testing.T) {
 	}
 	if as := provider.SearchAPIs(); len(as) != 2 || as[0].Vendor != "searxng" {
 		t.Fatalf("after rm %+v", as)
+	}
+}
+
+// magpie search add you, with no key, adds You.com's free search (#1626).
+func TestSearchCLIYouWithoutKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := searchCmd([]string{"add", "you"}); err != nil {
+		t.Fatal(err)
+	}
+	if as := provider.SearchAPIs(); len(as) != 1 || as[0] != (provider.SearchAPI{Vendor: "you"}) {
+		t.Fatalf("%+v", as)
 	}
 }

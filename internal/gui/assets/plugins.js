@@ -16,6 +16,7 @@
   let tagged = null;     // /api/plugins/github: repositories their authors tagged magpie-plugin, as listings
   let topic = "magpie-plugin";
   const npm = {};        // /api/plugins/npm: package → what npm says of it
+  const heads = {};      // /api/plugins/git: a git plugin's spec → the commit its repository is at
   let failed = "";       // why what's installed couldn't be loaded
   let failedList = "";   // ...and the plugins suggested
   let tab = "discover";
@@ -69,6 +70,12 @@
   };
   // npm has the versions of a package: not a folder's, nor a git one's
   const onNPM = (spec) => !isPath(spec) && !isGit(spec);
+  // a git one is out of date when its repository is at another commit than
+  // the one installed, whatever version its package.json says (ARNO on
+  // Discord: github:yuweihao17/codearts showed Update all the time, and
+  // still did right after updating); an abbreviated sha names the full one
+  const sameCommit = (a, b) => !!a && !!b && (a.length > b.length ? a.startsWith(b) : b.startsWith(a));
+  const gitBehind = (e) => isGit(e.spec) && !!e.commit && !!e.head && !sameCommit(e.commit, e.head);
   // the providers a plugin signs in to, as the add sheet knows them
   const subsOf = (pkg) => (providers?.plugins || []).filter((x) => name(x.spec) === pkg);
   // whether version a comes after b, in semver's order, the same as
@@ -128,6 +135,7 @@
   function merge() {
     for (const l of listings || []) if (npm[l.package]) l.npm = npm[l.package];
     for (const e of mine?.plugins || []) if (onNPM(e.spec) && npm[name(e.spec)]?.version) e.latest = npm[name(e.spec)].version;
+    for (const e of mine?.plugins || []) if (isGit(e.spec) && heads[e.spec]) e.head = heads[e.spec];
   }
   async function loadMine() {
     try {
@@ -180,6 +188,18 @@
     drawBody();
   }
 
+  // the commit each git plugin's repository is at now: drawn when it
+  // comes, never waited on (only: when one, just added, isn't known yet)
+  async function askGit(only) {
+    if (!(mine?.plugins || []).some((e) => isGit(e.spec) && (!only || !heads[e.spec]))) return;
+    try {
+      const r = await api("plugins/git");
+      Object.assign(heads, r.heads || {});
+    } catch { return; }
+    merge();
+    drawBody();
+  }
+
   async function load() {
     if (!mine && !listings) draw();
     const parts = [
@@ -190,6 +210,7 @@
     ];
     await Promise.all(parts);
     askNPM();
+    askGit();
   }
   window.loadPlugins = load;
   // pluginQuery: Discover, looking for q (the add sheet found nothing by it)
@@ -215,6 +236,7 @@
     draw();
     window.renderPluginDot?.();
     askNPM(true);
+    askGit(true);
   }
 
   async function act(pkg, op, body, done) {
@@ -246,8 +268,10 @@
       const by = {};
       for (const c of r.plugins || []) {
         by[c.spec] = c;
-        // npm's answer now is the one the rows read
+        // npm's answer now is the one the rows read, and a git one's
+        // repository's
         if (c.latest) npm[c.package] = { ...(npm[c.package] || {}), version: c.latest };
+        if (c.head) heads[c.spec] = c.head;
       }
       checked = { at: r.at, by };
       merge();
@@ -270,8 +294,10 @@
     draw();
     window.renderPluginDot?.();
   }
-  // why npm said nothing of a plugin, in the page's words
+  // why npm said nothing of a plugin, in the page's words; a git one's
+  // repository, in its own
   function whyText(c) {
+    if (isGit(c.spec || "")) return t("Couldn't ask {repo} for its newest commit: {error}", { repo: c.spec, error: c.error || "" });
     switch (c.why) {
       case "offline": return t("npm couldn't be reached — check your connection or proxy");
       case "limited": return t("npm is turning requests away for now (too many); try again in a few minutes");
@@ -327,6 +353,32 @@
     const subs = subsOf(pkg);
     status(subs.length ? t("{name} is installed — sign in to use it", { name: nm }) : t("{name} is installed", { name: nm }), "ok");
   });
+
+  // A plugin's Update, wherever it is offered: npm has a newer version, or
+  // a git one's repository a newer commit. Makes b that button and says
+  // whether there is one.
+  function updateButton(b, e) {
+    if (!e || e.off) return false;
+    const npm = e.latest && e.version && newer(e.latest, e.version);
+    if (!npm && !gitBehind(e)) return false;
+    const pkg = name(e.spec);
+    const l = (listings || []).find((x) => x.package === pkg);
+    b.classList.add("pm-act", "pm-up");
+    b.type = "button";
+    b.textContent = busy.get(pkg) === "upgrade" || busy.get(e.spec) === "upgrade" ? t("Updating…") : t("Update");
+    b.disabled = busy.size > 0 || checking;
+    if (npm) {
+      b.title = t("Update to {v}", { v: "v" + e.latest });
+      // the community's would come by itself: Update brings it now
+      if (pkg.startsWith("@magpie-community/") && !/@(?!latest$)[^@/]+$/.test(e.spec.slice(pkg.length))) b.title += "\n" + t("magpie updates it by itself within the hour; Update does it now");
+    } else b.title = t("Fetches it from {repo} again", { repo: e.spec }) + "\n" + t("{have} installed, {repo} is at {head}", { have: e.commit, repo: e.spec, head: e.head });
+    b.onclick = (ev) => {
+      ev.stopPropagation();
+      act(pkg, "upgrade", { spec: e.spec }, () => status(npm ? t("{name} updated to v{v}", { name: l?.name || pkg, v: e.latest }) : t("{name} is up to date", { name: e.package || e.spec }), "ok"));
+    };
+    b.onkeydown = (ev) => ev.stopPropagation();
+    return true;
+  }
 
   // the one button a plugin shows: what to do with it next
   function actionFor(pkg, nm, listed) {
@@ -385,6 +437,11 @@
       b.onclick = (ev) => { ev.stopPropagation(); pluginSignIn(out.id); };
       return b;
     }
+    // an update out: the one button says so in place of Signed in or
+    // Installed, the size of Install in a colour of its own, as an app
+    // store's Update takes Open's place (#1587). Sign in, not done yet,
+    // comes first; the Installed row offers its Update then
+    if (updateButton(b, e)) return b;
     if (on) {
       b.classList.add("done");
       b.append(glyph(CHECK, 11, 2), el("span", "", t("Signed in")));
@@ -419,7 +476,8 @@
     } else by.append(el("span", "", l.npm?.publisher || l.package));
     who.append(by);
     if (l.github) c.classList.add("gh");
-    top.append(logo(l.icon, false, kindOf(l)), who, actionFor(l.package, l.name, l));
+    const go = actionFor(l.package, l.name, l);
+    top.append(logo(l.icon || l.npm?.icon, false, kindOf(l)), who, go);
     const sum = el("p", "pm-sum", summary(l));
     const meta = el("div", "pm-meta");
     meta.append(kindChip(kindOf(l)));
@@ -430,20 +488,11 @@
       d.title = t("{n} downloads on npm last week", { n: l.npm.weekly.toLocaleString() });
       meta.append(d);
     }
-    if (l.npm?.version) meta.append(el("span", "pm-ver", "v" + (e?.version || l.npm.version)));
-    if (e && e.latest && e.version && newer(e.latest, e.version)) {
-      // the chip says there is an update, so it is the one that brings it
-      // (Discord: 显示更新但是好像没有更新按钮)
-      const b = busy.get(l.package) || busy.get(e.spec);
-      const up = el("button", "pm-chip up", b === "upgrade" ? t("Updating…") : t("Update to {v}", { v: "v" + e.latest }));
-      up.type = "button";
-      up.disabled = busy.size > 0 || checking || !!e.off;
-      up.onclick = (ev) => {
-        ev.stopPropagation();
-        act(l.package, "upgrade", { spec: e.spec }, () => status(t("{name} updated to v{v}", { name: l.name, v: e.latest }), "ok"));
-      };
-      up.onkeydown = (ev) => ev.stopPropagation();
-      meta.append(up);
+    if (l.npm?.version) {
+      // an update out, and the card's button is its Update: the version it
+      // goes to beside the one installed (#1587)
+      const up = go.classList.contains("pm-up") && e.latest && e.version && newer(e.latest, e.version);
+      meta.append(el("span", "pm-ver", "v" + (e?.version || l.npm.version) + (up ? " → v" + e.latest : "")));
     }
     if (e?.error && !e.off) meta.append(el("span", "pm-chip bad", t("Didn't load")));
     else if (e?.off) meta.append(el("span", "pm-chip", t("Off")));
@@ -750,10 +799,11 @@
     fill();
     body.append(list);
     const foot = el("div", "pm-foot");
-    const outdated = es.filter((e) => e.latest && e.version && newer(e.latest, e.version));
+    const outdated = es.filter((e) => (e.latest && e.version && newer(e.latest, e.version)) || (gitBehind(e) && !e.off));
     foot.append(el("span", "", mine.bun ? t("Plugins run on Bun {v}", { v: mine.bunVersion }) : ""), el("span", "grow"));
-    // only npm has versions to ask for: a folder's or a git one's has none
-    if (es.some((e) => onNPM(e.spec))) {
+    // npm has versions to ask for, and a git one's repository commits; a
+    // folder has none
+    if (es.some((e) => onNPM(e.spec) || isGit(e.spec))) {
       const c = el("button", "text pm-check" + (checking ? " busy" : ""));
       if (checking) c.append(el("span", "spin"));
       c.append(el("span", "", checking ? t("Checking…") : t("Check for updates")));
@@ -763,7 +813,8 @@
       foot.append(c);
     }
     if (outdated.length) {
-      const up = el("button", "text", busy.has("*") ? t("Updating…") : t("Update all ({n})", { n: outdated.length }));
+      const up = el("button", "pm-act pm-up", busy.has("*") ? t("Updating…") : t("Update all ({n})", { n: outdated.length }));
+      up.type = "button";
       up.disabled = busy.size > 0 || checking;
       up.onclick = () => act("*", "update", {}, () => status(t("Plugins updated"), "ok"));
       foot.append(up);
@@ -786,8 +837,18 @@
     const nm = el("div", "name");
     nm.append(el("span", "", shownName(e)));
     if (e.version) nm.append(el("span", "pm-ver", "v" + e.version));
+    // a git one's commit says which of its repository's it is
+    if (isGit(e.spec) && e.commit) {
+      const c = el("span", "pm-ver", e.commit);
+      c.title = t("The commit of {repo} installed", { repo: e.spec });
+      nm.append(c);
+    }
     const ck = checked?.by[e.spec];
-    if (e.latest && e.version && newer(e.latest, e.version)) {
+    if (gitBehind(e)) {
+      const c = el("span", "pm-chip up", t("New commits"));
+      c.title = t("{have} installed, {repo} is at {head}", { have: e.commit, repo: e.spec, head: e.head });
+      nm.append(c);
+    } else if (e.latest && e.version && newer(e.latest, e.version)) {
       const c = el("span", "pm-chip up", t("v{v} out", { v: e.latest }));
       c.title = t("v{have} installed, v{v} on npm", { have: e.version, v: e.latest });
       nm.append(c);
@@ -804,7 +865,7 @@
       nm.append(c);
     } else if ((ck?.status === "current" || ck?.status === "update") && e.version) {
       const c = el("span", "pm-chip soft", t("Up to date"));
-      c.title = t("v{v} is the newest on npm", { v: e.version }) + "\n" + t("Last checked {time}", { time: checkedAt() });
+      c.title = (isGit(e.spec) ? t("{head} is the newest commit of {repo}", { head: ck.head || e.head || "", repo: e.spec }) : t("v{v} is the newest on npm", { v: e.version })) + "\n" + t("Last checked {time}", { time: checkedAt() });
       nm.append(c);
     }
     // the built-in subscriptions moved onto it: taking it away moves them
@@ -864,25 +925,14 @@
     if (mw && !e.off && !ask) who.append(mwLine(mw));
     if (ag && !e.off && !ask) who.append(agentLine(ag));
     if (mw && !e.off && !ask && editing?.pkg === pkg) who.append(optionsEditor(e));
-    r.append(logo(l?.icon || subs[0]?.icon || ag?.icon, false, e.middlewareOnly ? "mw" : e.inMagpieOnly && e.isAgent && !e.isMiddleware ? "ag" : ""), who);
+    r.append(logo(l?.icon || l?.npm?.icon || subs[0]?.icon || ag?.icon, false, e.middlewareOnly ? "mw" : e.inMagpieOnly && e.isAgent && !e.isMiddleware ? "ag" : ""), who);
     const val = el("div", "val");
     const b = busy.get(pkg) || busy.get(e.spec);
-    if (e.latest && e.version && newer(e.latest, e.version) && !e.off) {
-      const up = el("button", "text", b === "upgrade" ? t("Updating…") : t("Update"));
-      up.disabled = busy.size > 0 || checking;
-      // the community's would come by itself: Update brings it now
-      if (pkg.startsWith("@magpie-community/") && !/@(?!latest$)[^@/]+$/.test(e.spec.slice(pkg.length))) up.title = t("magpie updates it by itself within the hour; Update does it now");
-      up.onclick = () => act(pkg, "upgrade", { spec: e.spec }, () => status(t("{name} updated to v{v}", { name: l?.name || pkg, v: e.latest }), "ok"));
-      val.append(up);
-    } else if (isGit(e.spec) && !e.off) {
-      // npm has no newer version of a git one to offer: Update fetches
-      // its repository again
-      const up = el("button", "text", b === "upgrade" ? t("Updating…") : t("Update"));
-      up.title = t("Fetches it from {repo} again", { repo: e.spec });
-      up.disabled = busy.size > 0;
-      up.onclick = () => act(pkg, "upgrade", { spec: e.spec }, () => status(t("{name} is up to date", { name: e.package || e.spec }), "ok"));
-      val.append(up);
-    }
+    // npm's newer version, or a git one's repository at a newer commit
+    // than the one installed (Update shown all the time before, and still
+    // there right after an update): the same Update as a card's (#1587)
+    const up = el("button");
+    if (updateButton(up, e)) val.append(up);
     const here = !e.off && !e.error && !subs.some((x) => x.signedIn) && cands[0];
     if (here && !ask) {
       const mv = el("button", "text primary", b === "move" ? t("Moving…") : t("Move {name} here", { name: here.name }));
@@ -1064,7 +1114,7 @@
     const local = isPath(l.package) || isGit(l.package);
     const ed = el("div", "editor pm-detail");
     const hd = el("div", "ehead pm-dhead");
-    hd.append(logo(l.icon, true, kindOf(l)));
+    hd.append(logo(l.icon || l.npm?.icon, true, kindOf(l)));
     const who = el("div", "pm-who");
     const nm = el("div", "pm-name");
     nm.append(el("b", "", l.name));

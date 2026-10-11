@@ -144,3 +144,46 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert.deepEqual(errors, []);
   });
 }
+
+// each curve draws itself once: the routing history answering after the
+// advice, and a setting put in, redraw the pane, and what was on it already
+// holds still
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: the advice's curves play their entrance once`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+    await ctx.addInitScript(() => {
+      try { localStorage.setItem("magpie.usageTab", "context"); } catch {}
+      window.drawn = 0;
+      document.addEventListener("animationstart", (e) => { if (e.animationName === "ctx-draw") window.drawn++; }, true);
+    });
+    const page = await ctx.newPage();
+    page.setDefaultTimeout(5000);
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    const posts = [];
+    const base = serve("en", posts);
+    let tuned;
+    const answered = new Promise((res) => { tuned = res; });
+    await page.route("**/*", async (r) => {
+      const p = new URL(r.request().url()).pathname;
+      // the history comes after the advice is drawn
+      if (p === "/api/context") await answered.then(() => new Promise((res) => setTimeout(res, 300)));
+      await base(r);
+      if (p === "/api/tune") tuned();
+    });
+    await page.goto("http://magpie.test/?view=usage");
+    await page.locator(".ctx-tune-chart svg").first().waitFor();
+    const charts = await page.locator(".ctx-tune-chart svg").count();
+    assert.ok(charts > 0);
+    await page.locator(".ctx-none").waitFor(); // the history has answered and the pane is redrawn
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.drawn), charts, "after the history answered");
+    await page.locator(".ctx-tune-row button.primary").first().evaluate((b) => b.click());
+    await page.locator(".ctx-tune-row.done").first().waitFor();
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.drawn), charts, "after a setting was put in");
+    assert.deepEqual(errors, []);
+  });
+}
