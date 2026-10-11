@@ -219,7 +219,7 @@ func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (ou
 	var unlisted []candidate
 	for i, k := range keys {
 		q := p.WithKey(k)
-		if len(q.Speaks()) == 0 {
+		if len(q.Speaks()) == 0 && !q.DecidesModel(model) {
 			continue // made for a protocol this provider has no endpoint for
 		}
 		rest := p.ID
@@ -742,11 +742,25 @@ var retiredWords = regexp.MustCompile(`(?i)"ModelDeprecated"|model_deprecated|mo
 func modelRetired(status int, body []byte) bool {
 	switch status {
 	case 400, 404, 410, 422:
+	case 401:
+		// OpenCode Zen's word for a model it serves no more, said with
+		// its sign-in status: the key is good (a bad one is AuthError)
+		return zenModelGone.Match(body)
 	default:
 		return false
 	}
 	return retiredWords.Match(body) && !quotaWords.Match(body)
 }
+
+// zenModelGone is OpenCode Zen's 401 for a model it no longer serves,
+// as it answered glm-5-free and kimi-k2.5-free on 2026-10-10 once they
+// left its free list: {"type":"error","error":{"type":"ModelError",
+// "message":"Model glm-5-free is not supported"}}. Read in the vendor's
+// body, or in the message magpie put it into ("OpenCode Zen Free: Model
+// glm-5-free is not supported"). Not its "is not supported for format
+// anthropic", a model served on another API (wrongEndpoint), and not its
+// AuthError "Invalid API key." for a key it doesn't take.
+var zenModelGone = regexp.MustCompile(`(^|[\s:"])Model [^"\s]+ is not supported("|\s*$)`)
 
 // refusedWords are how a vendor says it won't take requests from this
 // client at all — WorkBuddy's "Illegal API invocation from an unapproved
@@ -1438,7 +1452,7 @@ func (h *holdWriter) scan() {
 		h.flow()
 		return
 	}
-	if (h.thinking || h.buffered || waiting || h.keptQuiet()) && time.Since(h.since) >= keepHeldAfter {
+	if (h.thinking || h.buffered || waiting || h.keptQuiet()) && (time.Since(h.since) >= keepHeldAfter || h.alive != nil && h.alive.sent) {
 		h.keepAlive()
 	}
 }
@@ -1784,7 +1798,10 @@ func (h *holdWriter) watch() func() {
 					h.mu.Unlock()
 					return
 				}
-				if time.Since(began) >= keepHeldAfter {
+				// an agent already kept alive (keepQueued, an earlier try)
+				// goes on hearing one every keepaliveEvery: waiting
+				// keepHeldAfter again left it up to twice that with none
+				if time.Since(began) >= keepHeldAfter || h.alive != nil && h.alive.sent {
 					h.keepQuiet()
 				}
 				h.mu.Unlock()

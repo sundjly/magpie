@@ -172,6 +172,9 @@ func pluginCatalog(pp plugin.Provider) []catalog.Model {
 			APIs: []string{string(pluginProtocol(pp.ID, m))}, Images: m.Image,
 			Context: m.Input, Output: m.Output, Free: m.Free,
 			Rate: m.Rate, RateWas: m.RateWas,
+			// a decision model the plugin marked counts only where it
+			// serves a decision API (pp.Decide)
+			Decides: pp.Decide && m.Decides,
 		}
 		if c.Context == 0 {
 			c.Context = m.Context
@@ -342,6 +345,13 @@ func pluginProvider(pp plugin.Provider, l pluginLogin) Provider {
 		case CodeAssist:
 			a.codeAssist = pluginBase + pp.ID
 		}
+	}
+	if pp.Decide {
+		// its decision API is the provider's own base, asked at
+		// /systemone through the plugin's fetch: pluginFetch sends nowhere
+		// but the loader's host, so an address of the plugin's own
+		// couldn't be reached (#1514)
+		p.Decide = pluginBase + pp.ID + "/v1"
 	}
 	return p
 }

@@ -19,8 +19,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // QuotaWindow is one rolling allowance reported by a subscription provider.
@@ -135,6 +137,21 @@ type SubscriptionQuota struct {
 	// From is the remote magpie a card is that one's (remote_quotas.go),
 	// by its name here; "" for this computer's own.
 	From string `json:"from,omitempty"`
+	// LastServedAt is when the account, plan or key last answered a
+	// request through this computer's gateway, nil when it hasn't in the
+	// last 30 days (served.go); set by Quotas, never cached.
+	LastServedAt *time.Time `json:"lastServedAt,omitempty"`
+	// Alias is the account's name of the user's own (AccountNames), else
+	// Seat; Seat is the name of the key plan this account's card stands
+	// in for (seatCards, #1515): the same GLM seat added both as a key
+	// and as a signed-in account. Both "" when none; set as cards are
+	// handed out, never cached.
+	Alias string `json:"alias,omitempty"`
+	Seat  string `json:"seat,omitempty"`
+	// GatewayKey is set on the card of a gateway key a remote magpie gave
+	// this computer (#1547, remote_key_limits.go): the limit that magpie
+	// holds the key to, beside the windows that show it.
+	GatewayKey *GatewayKeyLimit `json:"gatewayKey,omitempty"`
 	// In-process read order, separate from the vendor's ReadAt and never
 	// persisted: restarting starts a new sequence.
 	readSeq uint64
@@ -176,16 +193,29 @@ var subscriptionTimeout = 20 * time.Second
 // cached it comes back at once, and a stale copy is refreshed in the
 // background; only the very first call waits, for as long as ctx allows.
 func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
+	if settings.AccountDiscoveryOff() {
+		return nil
+	}
 	c := &subscriptionUsageCache
 	c.Lock()
 	have, fresh := c.data != nil, time.Since(c.at) < time.Minute
-	if c.asked {
+	held := heldRead(ctx)
+	if held && have {
+		// allowances read only when asked (#1518): the cards stand as
+		// they were last read till the user asks again
+		fresh = true
+	}
+	if c.asked && !held {
 		have, c.asked = false, false
 	}
 	if !fresh && c.pending == nil {
 		done := make(chan struct{})
 		c.pending = done
-		readCtx, seq := quotaReading(context.Background())
+		bg := context.Background()
+		if wasAsked(ctx) {
+			bg = Asked(bg)
+		}
+		readCtx, seq := quotaReading(bg)
 		go func() {
 			start := time.Now()
 			out := fetchSubscriptionUsage(readCtx)
@@ -305,6 +335,9 @@ func chosenWindows(ws []QuotaWindow, chosen map[string]bool, base func(string) s
 
 // fetchSubscriptionUsage asks every signed-in vendor at once.
 func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
+	if settings.AccountDiscoveryOff() {
+		return nil
+	}
 	ctx, _ = quotaReading(ctx)
 	// read for every card's caller alike, or for the one card ctx reads
 	// again (RefreshUsage), as long as a refresh of them all would be
@@ -374,7 +407,7 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 			if ls := accountsOf("codex"); len(ls) > 1 {
 				fetches = append(fetches, perLogin(via("codex"), ls, accountCard("codex"))...)
 			} else {
-				auth := filepath.Join(home, ".codex", "auth.json")
+				auth := filepath.Join(appdir.CodexHomeIn(home), "auth.json")
 				fetches = append(fetches, withUser(ctx, p.Account.User, func() SubscriptionQuota { return codexSubscriptionUsage(viaLogin("codex", p.Account.User), auth) }))
 			}
 		}
@@ -691,7 +724,8 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 	c.Unlock()
 	due := e.tried.IsZero() || asked > e.tried.UnixNano() ||
 		active && now.Sub(e.tried) >= e.wait && (e.heard.After(e.tried) || claudeUsedSince(e.tried))
-	read := active && due && now.Sub(e.tried) >= claudeAskFloor
+	// nor, with allowances read only when asked, one nobody asked for
+	read := active && due && now.Sub(e.tried) >= claudeAskFloor && !holding(ctx)
 	c.Lock()
 	// one reading an ask or a wait, its first caller's; the others keep
 	// to it
@@ -795,13 +829,17 @@ func claudeScopeModel(name string) string {
 
 func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "codex", Name: "Codex", Icon: "codex-color", Windows: []QuotaWindow{}}
+	if holding(ctx) {
+		q.Error = errNotAsked.Error()
+		return q
+	}
 	token, accountID, err := codexToken(ctx, path)
 	if err != nil {
 		q.Error = err.Error()
 		return q
 	}
 	q.Plan, q.Windows, q.Resets, q.Balance, q.Held, err = codexWindows(ctx, token, accountID)
-	if b, rerr := os.ReadFile(path); rerr == nil {
+	if b, rerr := readAccountFile(path); rerr == nil {
 		q.Until = codexUntil(b, time.Now())
 	}
 	if err != nil {

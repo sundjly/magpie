@@ -292,6 +292,11 @@ type mdModel struct {
 		Output []string `json:"output"`
 	} `json:"modalities"`
 	Cost *Price `json:"cost"`
+	// Canonical is the model models.dev says this entry is, as
+	// "maker/model": DeepSeek lists V4.1 Flash as deepseek-flash, its
+	// canonical deepseek/deepseek-v4.1-flash, the id everyone else serves
+	// it under (#1520)
+	Canonical string `json:"canonical_model_id"`
 	// Provider, on a model its vendor serves another way than the rest,
 	// names the SDK that talks to it ("@ai-sdk/openai": the Responses API)
 	Provider *struct {
@@ -553,7 +558,9 @@ func PriceOf(providerID, modelID string) (Price, bool) {
 // PricedBy is the list price the first of providers (models.dev ids)
 // pricing a model of this id gives it: by its own key first, then by its
 // id without a path or case ("openai/GPT-6-Sol" is gpt-6-sol), a Bedrock
-// profile's geography, a "(variant)" or a ":tag".
+// profile's geography, a "(variant)" or a ":tag"; then with a dot taken
+// for a dash, then as the model an entry names as its canonical_model_id
+// (DeepSeek's deepseek-flash is deepseek-v4.1-flash).
 func PricedBy(providers []string, id string) (Price, bool) {
 	all := load()
 	for _, pid := range providers {
@@ -596,10 +603,56 @@ func PricedBy(providers []string, id string) (Price, bool) {
 			return *all[pid].Models[keys[0]].Cost, true
 		}
 	}
+	// and by what models.dev says an entry is (canonical_model_id): DeepSeek
+	// sells V4.1 Flash as deepseek-flash, whose canonical is
+	// deepseek/deepseek-v4.1-flash, the id WorkBuddy and the relays serve it
+	// under, and lists no deepseek-v4.1-flash of its own (#1520). Only where
+	// nothing above priced it, so an id a vendor lists keeps its own price.
+	if pr, ok := canonicallyPriced(all, providers, b); ok {
+		return pr, true
+	}
 	// and a relay's rename of a model none of them lists as given
 	// (claude-deepseek-v4.1-flash[1M] is deepseek-v4.1-flash, #1383)
 	if r, _, ok := renamed(b); ok {
 		return PricedBy(providers, r)
+	}
+	return Price{}, false
+}
+
+// canonicallyPriced is the list price the first of providers gives the
+// model whose canonical_model_id is b (a bare id), by that id, then with a
+// dot and a dash taken for the same. Only a vendor's own model counts — an
+// entry whose canonical names the provider listing it as its maker
+// (deepseek's deepseek-flash, deepseek/deepseek-v4.1-flash) — and only at
+// a price: a reseller's entry under a canonical is often a variant of the
+// model, sold at a price of its own (OpenCode's mimo-v2.6-flash-free at $0,
+// Baseten's -Fast at twice the price), and a model a relay doesn't list by
+// its id is priced at its maker's, as it was. A vendor listing several
+// entries under one canonical at different prices names none of them:
+// which one was called isn't known.
+func canonicallyPriced(all map[string]mdProvider, providers []string, b string) (Price, bool) {
+	for _, same := range []func(c string) bool{
+		func(c string) bool { return bareID(c) == b },
+		func(c string) bool { return dashed(bareID(c)) == dashed(b) },
+	} {
+		for _, pid := range providers {
+			var got *Price
+			agree := true
+			for _, m := range all[pid].Models {
+				maker, _, ok := strings.Cut(m.Canonical, "/")
+				if !ok || !strings.EqualFold(maker, pid) || m.Cost == nil || m.Cost.Same(Price{}) || !same(m.Canonical) {
+					continue
+				}
+				if got != nil && !got.Same(*m.Cost) {
+					agree = false
+					break
+				}
+				got = m.Cost
+			}
+			if got != nil && agree {
+				return *got, true
+			}
+		}
 	}
 	return Price{}, false
 }
@@ -1088,13 +1141,7 @@ func Providers() []string {
 }
 
 // CodexHome is where Codex CLI keeps its state: $CODEX_HOME, else ~/.codex.
-func CodexHome() string {
-	if dir := appdir.Getenv("CODEX_HOME"); dir != "" {
-		return dir
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".codex")
-}
+func CodexHome() string { return appdir.CodexHome() }
 
 // CodexModelsCache is the model list Codex CLI keeps, under CodexHome.
 func CodexModelsCache() string { return filepath.Join(CodexHome(), "models_cache.json") }

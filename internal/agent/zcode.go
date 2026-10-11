@@ -65,9 +65,11 @@ func zcode(home string) *Agent {
 		ID: "zcode", Name: "ZCode", Icon: "zcode", Aliases: []string{"z-code"},
 		UA:  []string{"zcode"},
 		Dir: dir, Path: path,
+		// its picker lists the models picked for it, in both files (#1508)
+		ListsModels: true,
 		Notice: func() string {
 			if Running(`ZCode\.app/`, `(^|/)ZCode( |$)`) {
-				return "ZCode reads its providers at start-up — restart ZCode to see magpie's models in its picker."
+				return noticeZcode.String()
 			}
 			return ""
 		},
@@ -504,3 +506,8 @@ func zcodeNonNil(l []any) []any {
 	}
 	return l
 }
+
+// what zcode says after a change (notice.go)
+var (
+	noticeZcode = newNotice("ZCode reads its providers at start-up — restart ZCode to see magpie's models in its picker.")
+)

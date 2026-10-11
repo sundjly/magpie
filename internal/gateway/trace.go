@@ -359,6 +359,9 @@ type trace struct {
 	routes []*Route
 	wake   chan struct{}
 	totals Totals
+	// bodies are the last requests' masked bodies, for their prompts'
+	// text (PromptText): in memory only, never in the history
+	bodies []keptBody
 }
 
 // Totals count the requests routed since the gateway started.

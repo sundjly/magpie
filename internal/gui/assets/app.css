@@ -422,6 +422,8 @@ body.window .row.agent .who .ag-cli { flex: 0 1 auto; overflow: hidden; }
    and gone where the pill keeps only its arrow */
 .ag-app { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 @container (max-width: 250px) { body.window .row.agent .ag-app { display: none; } }
+.ag-offpath { flex: 0 1 auto; min-width: 0; }
+@container (max-width: 250px) { body.window .row.agent .ag-offpath { display: none; } }
 .ag-cli { display: inline-flex; align-items: center; gap: 6px; flex: none; min-width: 0; }
 .ag-cli:empty { display: none; }
 .ag-missing { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default; }
@@ -579,7 +581,10 @@ body.window .field.solo { grid-column: auto; }
 /* the tabs sit on the head's middle line with the refresh beside them, not
    at its top as .segs elsewhere do */
 .usage-head > .segs { align-self: center; }
-.subscription-usage { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 7px; margin-bottom: 8px; flex: none; }
+.subscription-usage { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); align-items: start; gap: 7px; margin-bottom: 8px; flex: none; }
+/* packed into columns (packUsage): each card as tall as itself, placed on
+   rows a pixel high, the gap between cards in its place on them (#860) */
+.subscription-usage.packed { grid-auto-rows: 1px; row-gap: 0; }
 .subscription-card { padding: 10px 12px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); min-width: 0; }
 .subscription-head { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; }
 .subscription-head .ic { width: 17px; height: 17px; }
@@ -592,6 +597,11 @@ body.window .field.solo { grid-column: auto; }
 .subscription-card.several .credit-days:not([hidden]) + .subscription-account,
 .subscription-card.several .quota-curve:not([hidden]) + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
 .subscription-account .user { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* an account the user named (#1515): the name, then the account and the
+   key plan it stands in for, muted, giving their room up first */
+.subscription-account .quota-alias { flex: 0 1 auto; color: var(--fg); font-weight: 500; }
+.quota-of, .quota-seat { min-width: 0; flex: 0 3 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+.subscription-head .quota-alias, .subscription-head .quota-seat { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--fg-2); }
 /* an account of several in brief (ARNO): its windows' names, figures and
    bars, closer to the next (its line where a full one's is, so a fold keeps it in place); its fold at the row's end */
 .subscription-card.several .subscription-account.brief:not(:nth-child(2)) { padding-top: 7px; }
@@ -678,6 +688,10 @@ body.window .field.solo { grid-column: auto; }
 .quota-resets { display: flex; align-items: center; gap: 8px; margin-top: 9px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
 .quota-resets .text { margin-left: auto; flex: none; font-size: 11px; padding: 2px 7px; }
 .subscription-card.several .quota-resets:not([hidden]) + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
+/* a remote magpie's gateway key (#1547): its cycle, calls, used up */
+.quota-keyline { margin-top: 7px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.quota-keyline.spent { color: var(--red); }
+.subscription-card.several .quota-keyline + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
 .reset-ask .reset-idle { color: var(--amber); }
 /* a WorkBuddy account's daily check-in on its Usage card (#694) */
 .wb-checkin { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -744,9 +758,10 @@ body.window .field.solo { grid-column: auto; }
 #view-usage.loading .opt { cursor: default; }
 .usage-cost { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
 .usage-cost b { font-size: 15px; font-weight: 600; color: var(--fg); }
-/* a tab with no sum leaves the refresh at the content's right edge */
+/* a tab with no sum leaves the refresh at the content's right edge (a
+   class app.js sets, not :has(), which Safari before 15.4 can't parse) */
 .usage-cost:empty { display: none; }
-.usage-head:has(> .usage-cost:empty) .usage-refresh { margin-right: 0; }
+.usage-head.no-sum .usage-refresh { margin-right: 0; }
 /* a narrow window, three tabs and the periods beside it: the words after the
    sum give way, never the page sideways */
 .usage-cost span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -812,6 +827,11 @@ body.window .field.solo { grid-column: auto; }
 .led-strip .v.cost { color: var(--green); }
 .led-strip .sub { display: block; margin-top: 3px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .led-strip .sub b { font-weight: 600; color: var(--fg-2); }
+/* a count on the Requests card that lists its requests */
+.led-strip .sub.jumps { white-space: normal; overflow: visible; }
+.led-strip .led-jump { text-align: start; font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.led-strip .led-jump.bad { color: var(--red); }
+.led-strip .led-jump:hover, .led-strip .led-jump.on { text-decoration-style: solid; }
 .led-strip .meter { height: 5px; margin-top: 8px; border-radius: 3px; background: var(--pill); overflow: hidden; }
 .led-strip .meter i { display: block; height: 100%; border-radius: 3px; background: var(--green); }
 .led-trend { padding: 10px 14px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
@@ -2083,6 +2103,10 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .acc .acct-models .hint { font-size: 11px; color: var(--muted); line-height: 1.4; flex: 1 1 220px; }
 .acc .acct-models .acm-foot .grow { flex: 0 0 0; }
 .acc .n, .acc .rename { flex: 0 1 auto; }
+/* an account's name of the user's own, the account beside it (#1515) */
+.acc .acct-who { display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 0 1 auto; overflow: hidden; }
+.acc .acct-user, .acc .acct-seat { color: var(--muted); font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acc .acct-who .n { flex: 0 1 auto; }
 .acc .plan { flex: none; }
 /* a key's row (#841): what shows only on hover takes no room till then,
    so a key's weight never squeezes its name away; the room it takes on
@@ -2123,7 +2147,12 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 #gatewayKeys .klf-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-2); }
 #gatewayKeys .klf-err { color: var(--red); }
 #gatewayKeys .klf .klf-period { width: 100%; max-width: none; height: 28px; justify-content: space-between; color: var(--fg); }
-@media (max-width: 520px) { #gatewayKeys .klf { grid-template-columns: 1fr; } }
+#gatewayKeys .klf.with-days { grid-template-columns: minmax(0, 1fr) minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1fr); }
+#gatewayKeys .klf-days[hidden] { display: none; }
+#gatewayKeys .klf-used { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#gatewayKeys .klf-used .key-limit { flex: 1 1 auto; }
+#gatewayKeys .klf-used .klf-reset { flex: none; }
+@media (max-width: 520px) { #gatewayKeys .klf, #gatewayKeys .klf.with-days { grid-template-columns: 1fr; } #gatewayKeys .klf-used { flex-wrap: wrap; } }
 /* the models a key may use (#882): a long model's id is cut, and the
    badge gives way first on a narrow window */
 #gatewayKeys .amodels.key-models { display: inline-block; flex: 0 1 auto; min-width: 24px; max-width: 180px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; }
@@ -2141,6 +2170,33 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .proto-menu .pm-words { display: grid; gap: 1px; min-width: 0; }
 .proto-menu .pm-name { font-size: 12.5px; font-weight: 500; line-height: 16px; }
 .proto-menu .pm-note { font-size: 11px; color: var(--muted); line-height: 15px; }
+/* Usage's days of the reader's own (#1492): the periods' last opt, and the
+   menu it opens, a few spans and a month of days */
+.range-opt { display: inline-flex; align-items: center; gap: 5px; }
+.range-opt svg { flex: none; }
+.pop.proto-menu.range-menu { width: 252px; max-height: none; display: block; padding: 4px 6px 8px; }
+.range-menu .rm-quick { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 2px 6px; border-bottom: 1px solid var(--line-2); }
+.range-menu .rm-span { height: 22px; padding: 0 8px; border-radius: 6px; background: var(--pill); color: var(--fg-2); font-size: 11.5px; }
+/* :focus-visible in rules of its own: Safari before 15.4 drops a list
+   holding it whole, hover included */
+.range-menu .rm-span:hover { color: var(--fg); }
+.range-menu .rm-span:focus-visible { color: var(--fg); }
+.range-menu .rm-span.on { color: var(--fg); background: color-mix(in srgb, var(--accent) 18%, var(--pill)); }
+.range-menu .rm-nav { display: flex; align-items: center; justify-content: space-between; padding: 6px 2px 4px; }
+.range-menu .rm-month { font-size: 12.5px; font-weight: 600; }
+.range-menu .rm-step { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--muted); }
+.range-menu .rm-step:hover:not(:disabled) { background: var(--pill); color: var(--fg); }
+.range-menu .rm-step:disabled { opacity: .35; }
+.range-menu .rm-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px 0; }
+.range-menu .rm-wd { height: 20px; display: grid; place-items: center; font-size: 10.5px; color: var(--faint); }
+.range-menu .rm-day { height: 28px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--fg); border-radius: 7px; outline: none; }
+.range-menu .rm-day:hover:not(:disabled) { background: var(--pill); }
+.range-menu .rm-day:focus-visible { background: var(--pill); }
+.range-menu .rm-day.today { font-weight: 650; color: var(--accent); }
+.range-menu .rm-day.in { background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 0; }
+.range-menu .rm-day.end { background: var(--accent); color: var(--accent-fg, #fff); }
+.range-menu .rm-day:disabled { color: var(--faint); opacity: .5; }
+@media (max-width: 640px) { .range-opt:not(.on) > span { display: none; } }
 /* a subscription's allowance, under its name */
 .accts .acc.with-aq { flex-wrap: wrap; row-gap: 3px; padding-top: 7px; padding-bottom: 8px; }
 .acc .aq { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding-left: 25px; font-size: 10.5px; color: var(--muted); min-height: 14px; }
@@ -2488,6 +2544,10 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .eps .detect-acts .text { margin: 0; }
 .detect-acts .pick-api.on { background: var(--pill); }
 .detect-acts .hint { font-size: 11.5px; color: var(--faint); }
+/* what is missing or went wrong, said under the buttons (#1545) */
+.detect-out .detect-say { font-size: 11.5px; overflow-wrap: anywhere; }
+.detect-out .detect-say.warn { color: var(--amber); }
+.detect-out .detect-say.err { color: var(--red); }
 .detect-row .detect-each { flex: none; }
 .add-models .detect-row input { flex: 1; min-width: 0; }
 .add-models-list { max-height: 260px; overflow-y: auto; }
@@ -2572,7 +2632,10 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .mname .mwho { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 0; }
 .mname .mwho input { flex: 1; min-width: 0; max-width: 220px; height: 25px; }
 .mname .mwho code { font-size: 11px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; user-select: text; -webkit-user-select: text; cursor: text; }
-.mname .mapi { flex: none; height: 24px; font-size: 11px; }
+/* a model's API choice: Auto and up to four APIs, which wrap to a second
+   row in a phone-wide editor (Kayphoon: a Gemini URL's beside the others),
+   the box growing with them rather than the last one hanging out of it */
+.mname .mapi { flex: none; min-height: 24px; font-size: 11px; }
 .mname .msame { display: flex; align-items: center; gap: 6px; flex: 0 1 230px; min-width: 0; font-size: 11.5px; color: var(--muted); }
 .mname .msame span { flex: none; }
 .mname .msame input { flex: 1; min-width: 0; height: 25px; font-size: 11.5px; }
@@ -2666,6 +2729,11 @@ input.words.search-key, input.words.search-url { flex: 1 1 120px; width: auto; m
 .search-api .sub.revealed { font-family: var(--code-font, var(--code)); overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
 :where(html[data-fonts]) .search-api .sub.revealed { font-style: var(--code-style, inherit); font-weight: var(--code-weight, inherit); font-stretch: var(--code-stretch, 100%); }
 .prefs .val.rule-add .segs { margin-left: 0; }
+/* a rule open to edit (nf1qaz2w on Discord): laid out as the add row; a
+   narrow window puts the match, Save and Cancel on a line of their own under
+   the name and Prefix or Regex, the match keeping room to type in */
+.prefs .row.rule-editing .val.rule-add { flex-wrap: wrap; row-gap: 6px; }
+.prefs .row.rule-editing .rule-tail { display: flex; align-items: center; gap: 6px; flex: 1 1 240px; min-width: 0; }
 .row.pref .sub.err { color: var(--red); white-space: normal; }
 .warm-at { display: flex; align-items: center; gap: 8px; margin-left: auto; flex: none; }
 .warm-at input.at { width: auto; height: 27px; padding: 0 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; outline: none; transition: border-color .12s, box-shadow .12s; }
@@ -2902,6 +2970,33 @@ body.panel .modal { padding: 16px 12px; }
   body.web .pop { max-width: calc(100vw - 16px); max-height: calc(100% - 16px); }
   body.web .pop .picker-body { min-height: 0; }
   body.web .pop #list li { min-height: 44px; }
+  /* A row's trailing pills go to a second line on a phone rather than
+     squeeze its name to a letter or push its switch out of the card
+     (zaidu259434 on X): the empty ::after is the line break. */
+  body.web :is(.row.provider, .row.model, .row.gw, .call)::after { content: ""; order: 1; flex-basis: 100%; }
+  body.web :is(.row.provider, .row.model) { flex-wrap: wrap; row-gap: 3px; }
+  body.web :is(.row.provider, .row.model) > .who { flex: 1 1 0; }
+  body.web .row.provider > .key { order: 2; margin-left: 37px; }
+  body.web .row.provider.off > .key { margin-left: 27px; }
+  body.web .row.provider > .uses { order: 3; }
+  body.web .row.model > .minfo { order: 2; margin-left: 0; flex-wrap: wrap; }
+  body.web .row.gw { flex-wrap: wrap; }
+  body.web .row.gw > .who { flex: 1 1 0; min-width: 0; }
+  body.web .row.gw .sub { white-space: normal; }
+  body.web .row.gw > .url { order: 2; margin-left: 17px; max-width: calc(100% - 17px); }
+  body.web .call { flex-wrap: wrap; height: auto; min-height: 24px; padding: 3px 6px; }
+  body.web .call > .m { order: 2; margin-left: 20px; min-width: 0; }
+  body.web .call > .p { order: 3; }
+  body.web .call > .st { max-width: none; }
+  /* a key's or account's own buttons follow its name on a line of their own */
+  body.web .acc { flex-wrap: wrap; row-gap: 4px; }
+  body.web .acc > .grow { flex: 1 0 100%; height: 0; margin: -2px 0; }
+  body.web .acc > .grow + * { margin-left: auto; }
+  /* nothing hovers on a phone: what a row shows on hover is shown, and a
+     key's row gives it back the room it folds away till a hover (#841) */
+  body.web .acc :is(.text.quiet, .proto, .amodels, .alane) { opacity: 1; }
+  body.web .accts.keys .acc > :is(.amodels, .proto, .alane, .text.quiet) { max-width: none !important; padding: 0 7px !important; flex-shrink: 0 !important; }
+  body.web .accts.keys .acc > .alane:not(.set) { margin-left: 0 !important; }
 }
 
 /* Import from other apps: a checklist per app */
@@ -2942,6 +3037,7 @@ body.panel .modal { padding: 16px 12px; }
 .editor.importapps .approw .name .from { font-size: 11px; color: var(--muted); }
 .editor.importapps .approw .sub { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
 .editor.importapps .approw .segs { margin-top: 3px; max-width: 100%; overflow-x: auto; }
+.editor.importapps .approw input.appname[type="text"] { margin: 3px 0 0; flex: none; width: 100%; max-width: 280px; box-sizing: border-box; font-size: 12.5px; padding: 4px 8px; border-radius: 6px; }
 .editor.importapps .approw .segs .opt { white-space: nowrap; flex: none; }
 .editor.importapps .apptag { flex: none; font-size: 11px; color: var(--fg-2); background: var(--pill); border-radius: 5px; padding: 1px 6px; margin-top: 1px; }
 .editor.importapps .bar .note { font-size: 12px; color: var(--muted); }

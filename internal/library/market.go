@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/iconproxy"
 )
 
 // The market is where the page finds MCP servers and skills to add in one
@@ -1112,8 +1113,10 @@ func offered(u string) bool {
 	return false
 }
 
+// fetchImage downloads an icon through usemagpie.ai's icon proxy, so the
+// host a server's author picked never sees the user's IP.
 func fetchImage(u string) ([]byte, string, error) {
-	b, err := get(u, "image/*", 1<<20)
+	b, err := get(iconproxy.URL(u), "image/*", 1<<20)
 	if err != nil {
 		return nil, "", err
 	}

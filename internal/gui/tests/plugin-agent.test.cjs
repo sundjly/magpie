@@ -3,7 +3,9 @@
 // Agent chip, not Provider, and says which agent it adds to the Agents
 // page (or why it didn't load, in red); one switched off is an Agent still;
 // one that is middleware too wears both chips. Discover lists the market's
-// agent plugins in their own section with the Agent chip. Every language,
+// agent plugins in their own section with the Agent chip, wearing the
+// picture its package gives (npm's magpie.icon, kept by magpie as a file)
+// when the market gives it none. Every language,
 // both engines, at a narrow width too; the API is faked here.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -20,8 +22,10 @@ const state = { bun: true, bunVersion: "1.3.0", plugins: [
   { spec: OFF, off: true, providers: [], moved: [], isAgent: true, inMagpieOnly: true },
   { spec: BOTH, providers: [], moved: [], isAgent: true, inMagpieOnly: true, isMiddleware: true, agent: { id: "jot", name: "Jot" }, middleware: { hooks: ["onRequest"], calls: 0, avgMicros: 0, failures: 0 } },
 ] };
+// a 1x1 picture
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
 const listings = [
-  { package: "@magpie-community/agent-aider", name: "Aider", kind: "agent", community: true, summary: { en: "Aider through magpie" }, npm: { version: "0.1.0" } },
+  { package: "@magpie-community/agent-aider", name: "Aider", kind: "agent", community: true, summary: { en: "Aider through magpie" }, npm: { version: "0.1.0", icon: "file:aiderpic.png" } },
   { package: "@magpie-community/middleware-block-patterns", name: "Block patterns", kind: "middleware", community: true, summary: { en: "Blocks patterns" }, npm: { version: "0.1.0" } },
 ];
 
@@ -38,6 +42,7 @@ function server(lang) {
     if (url.pathname === "/api/plugins") return json(state);
     if (url.pathname === "/api/plugins/listings") return json({ listings });
     if (url.pathname === "/api/plugins/market") return json({ listings, state });
+    if (url.pathname === "/api/icons/aiderpic.png") return route.fulfill({ contentType: "image/png", body: PNG });
     if (url.pathname.startsWith("/api/")) return json({});
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
     const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
@@ -77,6 +82,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.ok((await card.innerText()).includes("Aider"));
         assert.deepEqual(await kinds(card), [w.agent]);
         assert.ok(await card.locator(".pm-chip.kind.ag").count());
+        // yetone: 这里的 agent plugin 为什么没有 logo
+        assert.equal(await card.locator(".pm-logo img").getAttribute("src"), "/api/icons/aiderpic.png");
+        assert.equal(await card.locator(".pm-logo svg").count(), 0);
 
         await view.locator(".lib-tabs .opt", { hasText: w.installed }).click();
         const row = (name) => view.locator(".pm-row").filter({ has: page.locator(".name", { hasText: name }) });

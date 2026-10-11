@@ -525,41 +525,175 @@ function tunnel(p, host, port) {
 
 // ---- auth.json ---------------------------------------------------------------
 
-function readAuth() {
-  let text
+// A crash can leave plugin-auth.json at its full length with every byte
+// zero (#1505). Such a file is unknown, never "no sign-ins": it is read
+// from its last good generation, plugin-auth.json.bak, which each write
+// keeps first; a write over one that doesn't read copies it aside
+// (plugin-auth.json.bad-<time>) first, and never writes none over it. As
+// internal/lastgood does for magpie's own files.
+
+// parseAuth is the sign-ins in text, null when it isn't one JSON object.
+function parseAuth(text) {
+  try {
+    const v = JSON.parse(text)
+    return v && typeof v === "object" && !Array.isArray(v) ? v : null
+  } catch {
+    return null
+  }
+}
+
+function readFileSteady(p) {
   for (let i = 0; ; i++) {
     try {
-      text = fs.readFileSync(authPath, "utf8")
-      break
+      return fs.readFileSync(p)
     } catch (e) {
-      if (e?.code === "ENOENT") return {}
+      if (e?.code === "ENOENT") return null
       // Windows refuses a file being renamed over for a moment: read as
       // none, the next setAuth would write the others' accounts away
       if (i >= 50) throw e
       pause(10)
     }
   }
+}
+
+// describeBad says what is wrong with a file that doesn't read.
+function describeBad(buf) {
+  if (buf.length > 0 && buf.every((b) => b === 0)) return `${buf.length} bytes, every one zero`
+  if (buf.toString("utf8").trim() === "") return "it is empty"
+  return "it doesn't parse"
+}
+
+let authRecovered = false
+let authUnread = false
+
+// readAuthState is the sign-ins and whether they are known: a file not
+// there is none, known; one that doesn't read is its .bak's, known, or
+// none, unknown.
+function readAuthState() {
+  const buf = readFileSteady(authPath)
+  if (buf === null) return { all: {}, known: true }
+  const v = parseAuth(buf.toString("utf8"))
+  if (v) return { all: v, known: true }
+  const why = describeBad(buf)
+  let bak = null
   try {
-    const v = JSON.parse(text)
-    return v && typeof v === "object" ? v : {}
-  } catch {
-    return {}
+    bak = parseAuth(fs.readFileSync(authPath + ".bak", "utf8"))
+  } catch {}
+  if (bak) {
+    if (!authRecovered) {
+      authRecovered = true
+      toErr(`plugin-auth.json can't be read (${why}); the sign-ins in plugin-auth.json.bak are used`)
+      send({ event: "recovered", said: why })
+    }
+    return { all: bak, known: true }
   }
+  if (!authUnread) {
+    authUnread = true
+    toErr(`plugin-auth.json can't be read (${why}) and has no good backup`)
+  }
+  return { all: {}, known: false }
+}
+
+function readAuth() {
+  return readAuthState().all
+}
+
+// writeDurable replaces p with data through a temp file flushed to the
+// disk before it is renamed over p: a rename reaches the disk on its own
+// schedule, the data behind it later, and a machine that went down between
+// the two left plugin-auth.json all zero (#1505). A write or flush that
+// fails leaves p as it was.
+function writeDurable(p, data) {
+  const tmp = p + ".tmp-" + process.pid
+  try {
+    const f = fs.openSync(tmp, "w", 0o600)
+    try {
+      for (let off = 0; off < data.length; ) off += fs.writeSync(f, data, off, data.length - off)
+      fs.fsyncSync(f)
+    } finally {
+      fs.closeSync(f)
+    }
+    // and a file held open by a reader refuses to be renamed over
+    for (let i = 0; ; i++) {
+      try {
+        return fs.renameSync(tmp, p)
+      } catch (e) {
+        if (i >= 50 || !["EPERM", "EACCES", "EBUSY"].includes(e?.code)) throw e
+        pause(10)
+      }
+    }
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmp)
+    } catch {}
+    throw e
+  }
+}
+
+// badStamp is the time a bad file is kept under, as Go's lastgood names it.
+function badStamp(d = new Date()) {
+  const p = (n) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+// keepBad copies buf, a plugin-auth.json that doesn't read, aside: two
+// within one second are both kept (-2, …), the same bytes kept already
+// not again.
+function keepBad(buf) {
+  const stamp = authPath + ".bad-" + badStamp()
+  for (let i = 1; i < 1000; i++) {
+    const name = i > 1 ? `${stamp}-${i}` : stamp
+    let f
+    try {
+      f = fs.openSync(name, "wx", 0o600)
+    } catch (e) {
+      if (e?.code !== "EEXIST") throw e
+      let old = null
+      try {
+        old = fs.readFileSync(name)
+      } catch {}
+      if (old && old.equals(buf)) return name
+      continue
+    }
+    try {
+      for (let off = 0; off < buf.length; ) off += fs.writeSync(f, buf, off, buf.length - off)
+      fs.fsyncSync(f)
+    } catch (e) {
+      fs.closeSync(f)
+      try {
+        fs.unlinkSync(name)
+      } catch {}
+      throw e
+    }
+    fs.closeSync(f)
+    toErr(`plugin-auth.json can't be read (${describeBad(buf)}); it is kept as ${path.basename(name)}`)
+    return name
+  }
+  throw new Error("plugin-auth.json can't be read and there is no free name to keep it under")
+}
+
+// keepAuth is called before plugin-auth.json is replaced: the file there
+// now becomes plugin-auth.json.bak when it reads, or is copied aside when
+// it doesn't. A failure stops the write.
+function keepAuth() {
+  const buf = readFileSteady(authPath)
+  if (buf === null) return
+  if (!parseAuth(buf.toString("utf8"))) {
+    keepBad(buf)
+    return
+  }
+  const bak = authPath + ".bak"
+  let old = null
+  try {
+    old = fs.readFileSync(bak)
+  } catch {}
+  if (!old || !old.equals(buf)) writeDurable(bak, buf)
 }
 
 function writeAuth(all) {
   fs.mkdirSync(path.dirname(authPath), { recursive: true })
-  const tmp = authPath + ".tmp-" + process.pid
-  fs.writeFileSync(tmp, JSON.stringify(all, null, 2) + "\n", { mode: 0o600 })
-  // and a file held open by a reader refuses to be renamed over
-  for (let i = 0; ; i++) {
-    try {
-      return fs.renameSync(tmp, authPath)
-    } catch (e) {
-      if (i >= 50 || !["EPERM", "EACCES", "EBUSY"].includes(e?.code)) throw e
-      pause(10)
-    }
-  }
+  keepAuth()
+  writeDurable(authPath, Buffer.from(JSON.stringify(all, null, 2) + "\n"))
 }
 
 function pause(ms) {
@@ -606,9 +740,11 @@ function lockAuth() {
 function changeAuth(change) {
   const unlock = lockAuth()
   try {
-    const all = readAuth()
+    const { all, known } = readAuthState()
     const out = change(all)
-    if (out !== false) writeAuth(all)
+    // sign-ins that don't read are never written over with none: a
+    // sign-out of one of them waits for the file to be put right
+    if (out !== false && (known || Object.keys(all).length > 0)) writeAuth(all)
     return out
   } finally {
     unlock()
@@ -1019,6 +1155,9 @@ async function info(id, key, strict) {
     options: { ...(cfg?.options ?? {}) },
     npm: cfg?.npm ?? md?.npm,
     api: cfg?.api ?? md?.api,
+    // magpie's own field: the plugin serves a decision API (System One)
+    // for this provider, asked at its base /systemone through its fetch
+    decide: cfg?.decide === true,
     models: {},
   }
   if (md) for (const m of Object.values(md.models ?? {})) out.models[m.id] = fromModelsDev(md, m)
@@ -1043,6 +1182,8 @@ async function info(id, key, strict) {
         ...(m.modalities?.input ? { input: Object.fromEntries(["text", "image", "audio", "video", "pdf"].map((k) => [k, m.modalities.input.includes(k)])) } : {}),
       },
       variants: m.variants ?? was?.variants ?? {},
+      // magpie's own mark: a decision model, answering System One
+      ...(typeof m.decides === "boolean" ? { decides: m.decides } : was?.decides !== undefined ? { decides: was.decides } : {}),
     }
   }
   const server = auths().get(id)?.spec
@@ -1171,6 +1312,7 @@ async function providers({ proxies } = {}) {
       icon: iconOf(a),
       usage: typeof a.auth.usage === "function",
       checkin: typeof a.auth.checkin === "function",
+      decide: p.decide === true,
       maxConcurrency: concurrencyOf(a),
       signedIn: keys.length > 0,
       authType: first?.type ?? "",
@@ -1210,6 +1352,9 @@ async function providers({ proxies } = {}) {
           rateWas: rateOf(m.rateWas),
           // run fast when the request's service_tier is priority (Cursor's)
           fast: m.fast === true,
+          // a decision model (System One's), hidden from agents and
+          // offered as a routing group's classifier
+          decides: m.decides === true,
         })),
     })
   }

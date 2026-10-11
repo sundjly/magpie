@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -65,6 +66,9 @@ type CallFor struct {
 	// model that described is the one magpie picks in its place
 	// (VisionMissing), and the Routing view names both.
 	Missing string `json:"missing,omitempty"`
+	// MCP, on a web search, is that the agent called magpie's web search
+	// MCP server (SearchMCPPath) itself, for no model of magpie's.
+	MCP bool `json:"mcp,omitempty"`
 }
 
 func searchFor(ctx context.Context) *CallFor {
@@ -411,6 +415,12 @@ const searchSystem = "You are a web search tool. Search the web for what is aske
 // first (#928): the providers then search only when none of them answers.
 // With provider search off, only the search APIs are asked.
 func (s *Server) webSearch(ctx context.Context, query string) (string, []Hit, error) {
+	// a search is magpie's own request, not the turn's provider's: the
+	// search APIs go through the global proxy and each searcher through
+	// its own (Provider.Via), never through the proxy the turn's provider
+	// is set to (#1522: Codex asked while a "direct" provider served the
+	// turn dialed chatgpt.com directly)
+	ctx = netproxy.With(ctx, "")
 	if settings.Load().Searcher == "off" {
 		if len(provider.SearchAPIs()) == 0 {
 			return "", nil, errNoSearcher

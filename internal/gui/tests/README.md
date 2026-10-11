@@ -45,6 +45,13 @@ literal custom names and narrow layouts in Chinese and English on both engines.
 Sharing off keeps the original API-key field and hides the gateway-key picker;
 sharing on names the arbitrary local option separately from the Magpie key.
 
+`connect-address-kept.test.cjs` checks that the address and gateway key
+picked in Connect, and the address picked under Share on local network, are
+kept across a reload (a restart or an update opens the page again; coeo91 on
+Discord). With no local network address yet, this computer's is shown, and
+the pick comes back once the address does. It runs on both engines, at 1100
+and 420 wide, in every language.
+
 `gateway-takeover.test.cjs` checks the Gateway card's button: with an older
 magpie serving the gateway it reads "Quit magpie {v} and take over" and posts
 `/api/gateway/take-over`; once this magpie serves it is "Restart gateway" and
@@ -546,6 +553,14 @@ what the provider editor's routing option says (the words already spoken in
 each language), with the story telling whose share went first, while keys
 under Smart keep Smart's chip and the keys' own mode line. It runs in
 English, Chinese, Japanese and German on Chromium and WebKit.
+
+`routing-mode-goes.test.cjs` checks where the stage's routing chip leads
+(xczzhh on X: it always said Smart and nothing changed it). With one key
+on, the chip and the Accounts and keys heading name no routing and the mode
+paragraph says how to get one. With a provider over two keys, the chip and
+the heading are a way to its row under Several accounts or keys: a click
+or Enter brings it into view, marks it and focuses its routing. It runs in
+every language on Chromium and WebKit, at 1100px and 420px.
 
 `balance-fix.test.cjs` opens a custom provider whose balance token sits
 beside new-api's `/api/usage/token` (and a new one with a token and no
@@ -1059,6 +1074,15 @@ request is asked for by its session and the span it took, a call of a session fi
 at its own time; a request the files can't tell says why (no session, an agent whose
 files aren't read, no such call); a row opened again, or the list read anew, asks no
 more; the details fit the table's box at 560; in English and Chinese.
+
+`usage-ledger-abort.test.cjs` narrows the Requests tab three times while
+each read is still on its way (Vantiboo1ean, ~750k requests): the reads of the
+page and of the heatmap no longer wanted are cancelled, not left holding the
+browser's connections; Refresh pressed while the page is read sends no second
+read and turns until that one answers; the newest answer is drawn and a
+cancelled read is never said as an error; a refresh afterwards reads afresh.
+Chromium and WebKit, at 1180 and 560. `MAGPIE_ASSETS` points it at an older
+assets directory to see it fail there.
 
 `shared-skills.test.cjs` opens the Library's Skills tab with skills found in
 the user-wide `~/.agents/skills` (#227): one row for a skill there that
@@ -1755,6 +1779,14 @@ about the gateway: loopback, open to the network (listening beyond loopback
 with nothing shared), and a network address that needs an enabled gateway
 key. English and Chinese, Chromium and WebKit, with `/api/plugins` faked.
 
+`public-url-default.test.cjs` checks that Connect starts at MAGPIE_PUBLIC_URL,
+labelled Public address, with the snippets on it, until an address is
+picked, and that a pick (this computer's) is kept after a reload (#1551).
+About shows the public URL beside the local one; magpie web shows it as the
+gateway's address and the MCP server's, the app keeps those local. Without
+MAGPIE_PUBLIC_URL Connect starts at this computer's. Every language,
+Chromium and WebKit, at 1100 and 420 wide.
+
 `provider-picks-stay.test.cjs` checks that the models picked in one
 provider's editor never go to another's (#464): a Refresh or a Forget whose
 list comes back after the editor was left for another provider's leaves that
@@ -2208,4 +2240,23 @@ zh, zh-TW, ja and de. English and Chinese, Chromium and WebKit.
 ```sh
 node --test internal/gui/tests/volc-access-key.test.cjs
 go test -tags nogui ./internal/gui -run TestProviderSaveKeepsVolcengineSecret
+```
+
+## Tencent Cloud SecretId and SecretKey
+
+`tencent-access-key.test.cjs` covers #1574: Token Plan 企业版's usage is told
+only to the account's SecretId and SecretKey, so a Tencent Cloud provider's
+editor asks for them, named so, with Tencent's hint, at the two Enterprise
+plan regions alone (the preset's `accessKeyRegions`). At the personal plan
+or pay as you go they are hidden and come back when an Enterprise region is
+picked; a SecretId with no SecretKey is refused only where they are shown.
+The saved SecretKey is never in the page; Save, a new SecretKey and Remove
+post as Ark's do. Saved at Enterprise, saved at the personal plan, and being
+added; 420px wide with no sideways scroll; every string in zh, zh-TW, ja
+and de. English and Chinese, Chromium and WebKit.
+`TestProviderListTellsTencentAccessKey` checks what the listing tells.
+
+```sh
+node --test internal/gui/tests/tencent-access-key.test.cjs
+go test -tags nogui ./internal/gui -run TestProviderListTellsTencentAccessKey
 ```

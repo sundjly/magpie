@@ -24,6 +24,35 @@ in for no agent. It doesn't update itself (the bridge sets
 `DISABLE_AUTOUPDATER`); installing again takes the newest and removes the
 older one.
 
+A run is started with `--dangerously-skip-permissions` (`claudeCLIArgs`):
+its only tools are magpie's MCP ones, answered by the client, and
+Anthropic's web search. Claude Code run as root refuses that flag ("cannot
+be used with root/sudo privileges") unless `IS_SANDBOX` is `1` or
+`CLAUDE_CODE_BUBBLEWRAP` is set, so a run as root, magpie's own euid 0 or
+a WSL distro whose default user is root (the probe's `uid`,
+`wslrun.Tool.Root`), is given `IS_SANDBOX=1` (`claudeCLI.asRoot`;
+FrierenF on Discord). A run as anyone else has its env as before. Only the
+bridge's run gets it; the warm-up and `/usage` runs don't skip
+permissions.
+
+The run's MCP server is magpie itself (`magpie claude-mcp-helper`,
+`internal/claudebridge`), which hands each tool call back to the gateway
+at `POST /_magpie/claude-mcp/<token>` (`mcpCall`), where the call is
+registered in `b.calls` for the turn with its results to find. The token
+is `randomToken` (24 bytes from `crypto/rand`), one per run. The callback
+URL is written to `callback` in the run's own temp folder (0600) and the
+helper is given that file's path, so the token is never on Claude Code's
+command line. The helper calls the address the gateway listens on
+(`callbackBaseURL`: `MAGPIE_ADDR`, `0.0.0.0`/`::` as `127.0.0.1`), which,
+pinned to one interface's address, isn't loopback, and it sends no
+gateway key. `lanGuard` therefore lets in exactly that path, by POST, with
+the token of a run now live (`ownCallback`: `addCallback` when the run is
+registered, `dropCallback` in `removeRun`, compared in constant time).
+Every other request, and this path with a wrong, spent or encoded token,
+is judged as any other. Without it the call was refused 401, never
+reached the run, and every turn with tool results found no run waiting and
+started a new Claude Code told the whole conversation (#1546).
+
 ## Why turns go on in one run
 
 A run started anew is told the whole conversation in one user message

@@ -112,10 +112,12 @@ type Agent struct {
 	// UA is what the agent's User-Agent begins with, lower-case: how the
 	// gateway tells its requests from others'
 	UA []string
-	// ListsModels: the agent's own model menu is the gateway's /v1/models
-	// as asked with its key, so the models picked on the Agents page for it
-	// (settings.HiddenModels) are its menu, though no field of its picks
-	// among the catalog (Cursor Private Inference)
+	// ListsModels: the agent's own model menu is magpie's models as picked
+	// on the Agents page for it (settings.HiddenModels, PickedModels),
+	// though no field of its picks among the catalog: the gateway's
+	// /v1/models as asked with its key (Cursor Private Inference), or the
+	// list magpie writes into its files, magpieModels(id), where its only
+	// field puts magpie in its picker (ZCode, Pencil: #1508)
 	ListsModels bool
 	// Sync, for an agent that reads magpie's models from a file of its own
 	// rather than asking the gateway, rewrites that list as the catalog is
@@ -127,6 +129,10 @@ type Agent struct {
 	// kept: the endpoint, provider and model the user had. Disconnect runs
 	// it before the fields' defaults.
 	Unwire func() error
+	// Restore, for an agent whose files magpie copied aside before its
+	// first write (beforeMagpie), puts them back as they were where what
+	// Disconnect left says the same. Disconnect runs it last.
+	Restore func() error
 	// Join, for an agent that can have magpie's models in its own list
 	// while it stays on the model it was on (Codex signed in with ChatGPT),
 	// connects it so, its model left as its own last pick; false where it
@@ -271,12 +277,29 @@ func (a *Agent) Detected() bool {
 	if a.Dir != "" && !a.dirShared && agentDir(a.Dir) {
 		return true
 	}
-	if a.Bin != "" {
-		if _, err := exec.LookPath(a.Bin); err == nil {
-			return true
-		}
+	if a.Bin != "" && binAt(a.Bin) != "" {
+		return true
 	}
 	return false
+}
+
+// binAt is where the agent's command name is, as magpie runs it: on
+// magpie's own PATH, else, on Windows, where a terminal opened now finds it
+// or a user's tools are installed (proc.FindTool: the registry's PATH now,
+// ~/.local/bin, npm's, bun's, Volta's, pnpm's). Windows has no login shell
+// to lend magpie its PATH (proc.UserPath does nothing there), so a magpie
+// started before Claude Code's installer put claude.exe in ~/.local/bin
+// and added that to the user's PATH, or a self-update restarting with the
+// PATH it had then, never listed it, while the sign-in, which asked
+// FindTool, found it (#839, #1482). "" when it is in none.
+func binAt(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	if runtime.GOOS == "windows" {
+		return proc.FindTool(name)
+	}
+	return ""
 }
 
 // agentDir reports whether p is a folder an agent itself made. Skill
@@ -291,12 +314,19 @@ func agentDir(p string) bool {
 		return true
 	}
 	for _, e := range es {
-		if n := e.Name(); n != "skills" && n != ".DS_Store" {
+		if n := e.Name(); n != "skills" && n != ".DS_Store" && !(e.IsDir() && leftover[strings.ToLower(n)]) {
 			return true
 		}
 	}
 	return false
 }
+
+// leftover are the folders an agent writes as it runs, not as it is set
+// up, and that stay behind when it is uninstalled: ~/.codebuddy holding
+// only logs/ and diagnostics/, ~/.qwen's debug/ (#1495, v5tech). A folder
+// holding only these (and skills) is no sign the agent is here. A file of
+// the same name, or anything else beside them, still is.
+var leftover = map[string]bool{"logs": true, "log": true, "debug": true, "diagnostics": true, "cache": true}
 
 // Taken reports whether something that isn't a folder is where the folder
 // p, or one it is in, would be: nothing can be written under it.

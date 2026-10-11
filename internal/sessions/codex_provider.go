@@ -20,6 +20,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 // Codex lists, in its history and its resume picker, only the sessions made
@@ -448,6 +449,11 @@ func rewriteCodexProvider(path, to string) (bool, error) {
 		}
 	}
 	if err := tmp.Chmod(fi.Mode().Perm()); err != nil {
+		return false, err
+	}
+	// the user's session on the disk before it is renamed over the old
+	// one: a machine that goes down between can leave it all zero (#1505)
+	if err := steady.Sync(tmp); err != nil {
 		return false, err
 	}
 	if err := tmp.Close(); err != nil {

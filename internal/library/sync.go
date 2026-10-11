@@ -256,24 +256,40 @@ type View struct {
 	// updates since magpie started, or not for a while: the page checks
 	// them as it shows them (#1449)
 	CheckDue bool `json:"checkDue,omitempty"`
+	// Partial is a glance (Glance): FoundSkills and each skill's Behind
+	// aren't read yet
+	Partial bool `json:"partial,omitempty"`
 }
 
 // Read is the whole page: the library, and what's found in the agents.
 // problems are those of the last change, for the page to keep showing.
-func Read(problems []Problem) (*View, error) {
+func Read(problems []Problem) (*View, error) { return readView(problems, false) }
+
+// Glance is the page but for what takes reading the agents' skill folders
+// through: the skills the agents have of their own, and which copies are
+// out of date (Partial). The page shows it at once, and Read's after it
+// (0day404, #541): on a machine with many big skills in many agents, that
+// part can take minutes the first time.
+func Glance(problems []Problem) (*View, error) { return readView(problems, true) }
+
+func readView(problems []Problem, glance bool) (*View, error) {
 	iv, err := ReadInstructions()
 	if err != nil {
 		return nil, err
 	}
 	mu.Lock()
-	defer mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			mu.Unlock()
+		}
+	}()
 	l, err := load()
 	if err != nil {
 		return nil, err
 	}
-	v := &View{Agents: []AgentView{}, Servers: []ServerView{}, Skills: []SkillView{}, Instructions: iv, Dir: Dir(), Backups: BackupDir(), CopySkills: l.CopySkills}
+	v := &View{Agents: []AgentView{}, Servers: []ServerView{}, Skills: []SkillView{}, FoundSkills: []FoundSkill{}, Instructions: iv, Dir: Dir(), Backups: BackupDir(), CopySkills: l.CopySkills, Partial: glance}
 	targets := Targets()
-	behind := l.behind(targets)
 	for _, t := range targets {
 		av := AgentView{ID: t.Agent.ID, Name: t.Agent.Name, Icon: t.Agent.Icon, Instructions: t.Instructions, Skills: t.Skills,
 			SkillsAlso: t.SkillsAlso, Note: t.Note, MCPVia: t.MCPVia, ProjectSkills: ProjectSkillsDir(t.Agent.ID), ProjectMCP: ProjectMCPFile(t.Agent.ID),
@@ -363,7 +379,6 @@ func Read(problems []Problem) (*View, error) {
 			sv.Missing = true
 		}
 		sv.Check = lastCheck(s.Name)
-		sv.Behind = behind[s.Name]
 		sv.Edited, _ = l.editState(s, targets)
 		v.Skills = append(v.Skills, sv)
 	}
@@ -371,11 +386,23 @@ func Read(problems []Problem) (*View, error) {
 	for i := range v.FoundServers {
 		v.FoundServers[i].Icon = serverIcon(l, v.FoundServers[i].Server)
 	}
-	v.FoundSkills = foundSkills(l)
 	v.NewSkills = newSkills(l)
 	v.Projects = projectViews(l, problems)
 	v.SkillGroups = l.skillGroups()
 	v.CheckDue = checkDue(l)
+	if glance {
+		return v, nil
+	}
+	// the agents' skill folders are read through without the lock, so a
+	// change made meanwhile doesn't wait on them: what they show is read
+	// from the library as it was loaded
+	mu.Unlock()
+	locked = false
+	behind := l.behind(targets)
+	for i := range v.Skills {
+		v.Skills[i].Behind = behind[v.Skills[i].Name]
+	}
+	v.FoundSkills = foundSkills(l)
 	return v, nil
 }
 

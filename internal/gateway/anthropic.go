@@ -674,7 +674,10 @@ func buildAnthropic(r *Request, model string) []byte {
 			case Image:
 				rest = append(rest, imageBlock(p))
 			case ToolCall:
-				rest = append(rest, aBlock{Type: "tool_use", ID: p.ID, Name: p.Name, Input: argsOf(p)})
+				// Anthropic takes a tool_use id only of [A-Za-z0-9_-]:
+				// another vendor's call (Devin's "Bash:0#…") goes as
+				// anthropicOutID makes it, its result named the same
+				rest = append(rest, aBlock{Type: "tool_use", ID: anthropicOutID(p.ID), Name: p.Name, Input: argsOf(p)})
 			case ToolResult:
 				c, _ := json.Marshal(p.Text)
 				if len(p.Images) > 0 {
@@ -688,7 +691,7 @@ func buildAnthropic(r *Request, model string) []byte {
 					}
 					c, _ = json.Marshal(blocks)
 				}
-				results = append(results, aBlock{Type: "tool_result", ToolUseID: p.CallID, Content: c, IsError: p.IsError})
+				results = append(results, aBlock{Type: "tool_result", ToolUseID: anthropicOutID(p.CallID), Content: c, IsError: p.IsError})
 			case Thinking:
 				if p.sealedBy(sealAnthropic) {
 					rest = append(rest, aBlock{Type: "redacted_thinking", sealed: p.Sealed})

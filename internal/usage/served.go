@@ -3,6 +3,7 @@ package usage
 import (
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -51,10 +52,30 @@ func bareModel(m string) string {
 // Cursor's) asked it to pick, so whichever answers wasn't swapped in, nor
 // is the member another magpie's routing group sent it to (GroupRouted),
 // nor a vendor's own name for the deployment serving the model
-// (ServingName).
+// (ServingName), nor the model a relay sold under a name of its own
+// (RelayRenamed).
 func Swapped(sent, served string) bool {
 	a, b := bareModel(sent), bareModel(served)
-	return a != "" && b != "" && squash(a) != squash(b) && a != "auto" && squash(bareModel(provider.EffortFamily(a))) != squash(b) && !GroupRouted(sent, served) && !ServingName(sent, served)
+	return a != "" && b != "" && squash(a) != squash(b) && a != "auto" && squash(bareModel(provider.EffortFamily(a))) != squash(b) && !GroupRouted(sent, served) && !ServingName(sent, served) && !RelayRenamed(sent, served)
+}
+
+// RelayRenamed reports whether sent is served's own name with a relay's
+// word in front of it: a relay that sells kimi-k3 as moonshot-kimi-k3 is
+// answered as kimi-k3 (#1498, liuweifeng), one that sells
+// deepseek-v4.1-flash as claude-deepseek-v4.1-flash (#1383) as
+// deepseek-v4.1-flash. What is left must name a version, so a bare word
+// (flash, mini) is never taken for the model sent.
+func RelayRenamed(sent, served string) bool {
+	a, b := bareModel(sent), squash(bareModel(served))
+	if b == "" || !strings.ContainsAny(b, "0123456789") || !strings.ContainsFunc(b, unicode.IsLetter) {
+		return false
+	}
+	for i := 1; i < len(a); i++ {
+		if a[i-1] == '-' && squash(a[i:]) == b {
+			return true
+		}
+	}
+	return false
 }
 
 // ServingName reports whether served is the vendor's own name for the

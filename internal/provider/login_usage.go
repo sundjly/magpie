@@ -7,10 +7,11 @@ package provider
 import (
 	"context"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/settings"
 )
 
 var loginUsageCache struct {
@@ -75,6 +76,9 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 // one taken from the cache is up to a minute old already, and Allowances
 // counts its own minute from then, not from when it asked (#1295).
 func loginUsageAt(ctx context.Context, agent string) (map[string]SubscriptionQuota, time.Time) {
+	if settings.AccountDiscoveryOff() {
+		return nil, time.Time{}
+	}
 	asked := time.Now()
 	if out, ok := loginUsageStandIn(ctx, agent); ok {
 		return out, asked
@@ -151,10 +155,23 @@ var noteHistoryWrite = noteQuotaHistory
 func loginReading(ctx context.Context, l Login) loginUsageEntry {
 	key := l.Agent + "/" + strings.ToLower(l.User)
 	c := &loginUsageCache
+	// with allowances read only when asked, one nobody asked for is what
+	// was read last, however old, unless the vendor just turned the
+	// account away for its quota (StaleAllowance), which is read (#1518)
+	stale := false
+	if holding(ctx) {
+		if stale = isStaleRead(key); stale {
+			ctx = unheld(ctx)
+		}
+	}
+	held := holding(ctx)
 	c.Lock()
 	e, ok := c.m[key]
-	if ok && time.Since(e.at) < time.Minute {
+	if ok && (held || time.Since(e.at) < time.Minute) {
 		c.Unlock()
+		if held {
+			e.at = time.Now() // as good as it gets until asked: Allowances keeps it its minute
+		}
 		return e
 	}
 	entry := func(read SubscriptionQuota) loginUsageEntry {
@@ -165,7 +182,16 @@ func loginReading(ctx context.Context, l Login) loginUsageEntry {
 		return loginUsageEntry{time.Now(), q, read}
 	}
 	r := c.pending[key]
+	if r == nil && held {
+		// nothing read since magpie started: the reading kept on disk,
+		// as of when it was made
+		c.Unlock()
+		return entry(keepLast(SubscriptionQuota{Provider: loginProvider(l), Plan: l.Plan, Windows: []QuotaWindow{}, Error: errNotAsked.Error()}, l.User))
+	}
 	if r == nil {
+		if stale {
+			takeStaleRead(key)
+		}
 		r = &loginRead{done: make(chan struct{})}
 		if c.pending == nil {
 			c.pending = map[string]*loginRead{}
@@ -391,7 +417,7 @@ func CodexUsedUp(ctx context.Context) bool {
 // file Codex is signed in with, or the one kept for it.
 func codexLoginAuth(l Login) []byte {
 	if l.Active {
-		b, _ := os.ReadFile(codexAuthPath())
+		b, _ := readAccountFile(codexAuthPath())
 		return b
 	}
 	loginsMu.Lock()

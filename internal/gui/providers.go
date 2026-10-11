@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,6 +100,12 @@ type providerJSON struct {
 	// one for that window apart, by the account and then the window's
 	// capId (provider.AccountWindowCaps); 100 is none on that window
 	AccountWindowCaps map[string]map[string]int `json:"accountWindowCaps,omitempty"`
+	// the names the user gave its accounts, by the account in lower
+	// case (provider.AccountNames, #1515), and the name of the key plan
+	// each account was found to stand in for (provider.SeatNameOf): the
+	// name an account has until the user gives it one
+	AccountNames map[string]string `json:"accountNames,omitempty"`
+	AccountSeats map[string]string `json:"accountSeats,omitempty"`
 	// where a custom provider's balance is asked (see provider.Balance)
 	BalanceURL  string `json:"balanceURL,omitempty"`
 	BalancePath string `json:"balancePath,omitempty"`
@@ -115,10 +122,15 @@ type providerJSON struct {
 	// a Zhipu or Z.ai key's team, for a team's GLM Coding Plan (#236):
 	// set, if empty, for those providers alone, which the editor asks it of
 	ZhipuTeam *provider.ZhipuTeam `json:"zhipuTeam,omitempty"`
-	// a Volcengine account's access key, which its plan's windows are
-	// read with (provider.TakesVolcAccessKey): whether the provider takes
-	// one, its ID, and whether a Secret is saved; never the Secret itself
+	// a Volcengine account's access key or a Tencent Cloud account's
+	// SecretId and SecretKey, which its plan's windows are read with
+	// (provider.AccessKeyVendor): whether the provider takes one, whose,
+	// its ID, and whether a Secret is saved; never the Secret itself
 	AccessKey *accessKeyJSON `json:"accessKey,omitempty"`
+	// a Google Vertex AI provider's project, location and Google
+	// credentials, which it is asked with in place of a key: set for it
+	// alone, which the editor asks them of
+	Vertex *provider.Vertex `json:"vertex,omitempty"`
 	// ModelTest is why its models can't each be sent a test request, ""
 	// when they can (provider.ModelTest): the editor says so on a chip's
 	// right-click rather than offer no menu
@@ -208,11 +220,34 @@ type moveJSON struct {
 
 // stepPlanJSON: whether a StepFun provider's platform sign-in is kept, and
 // where and how the user gets one
-// accessKeyJSON is a provider's Volcengine access key as the editor sees
-// it: the ID, and whether a Secret is saved, never the Secret.
+// accessKeyJSON is a provider's account access key as the editor sees
+// it: whose ("volcengine", "tencent"), the ID, and whether a Secret is
+// saved, never the Secret.
 type accessKeyJSON struct {
+	Vendor    string `json:"vendor"`
 	ID        string `json:"id"`
 	SecretSet bool   `json:"secretSet"`
+}
+
+// presetAccessKey is whose account access key a preset's plans are read
+// with ("volcengine", "tencent", "" for none) and, when only some of its
+// regions are such a plan (Tencent Cloud's Token Plan 企业版 beside its
+// personal plan and pay as you go, #1574), their ids; nil when all are.
+func presetAccessKey(pr provider.PresetDef) (string, []string) {
+	vendor := provider.AccessKeyVendor(provider.Provider{Chat: pr.Chat, Responses: pr.Responses, Anthropic: pr.Anthropic})
+	var ids []string
+	for _, r := range pr.Regions {
+		if v := provider.AccessKeyVendor(provider.Provider{Chat: r.Chat, Responses: r.Responses, Anthropic: r.Anthropic}); v != "" {
+			ids = append(ids, r.ID)
+			if vendor == "" {
+				vendor = v
+			}
+		}
+	}
+	if vendor == "" || len(ids) == len(pr.Regions) {
+		return vendor, nil
+	}
+	return vendor, ids
 }
 
 type stepPlanJSON struct {
@@ -309,9 +344,16 @@ type presetJSON struct {
 	// ZhipuTeam: a key of it may be on a team's GLM Coding Plan, whose
 	// organization and project the editor offers to take
 	ZhipuTeam bool `json:"zhipuTeam,omitempty"`
-	// AccessKey: a Volcengine Ark plan, whose windows are read with the
-	// account's access key, which the editor offers to take
-	AccessKey bool `json:"accessKey,omitempty"`
+	// AccessKey: a plan whose windows are read with the account's access
+	// key (Volcengine Ark's, Tencent Cloud's Token Plan 企业版), which the
+	// editor offers to take; AccessKeyVendor whose, and AccessKeyRegions
+	// the regions it is asked at when not all of them (presetAccessKey)
+	AccessKey        bool     `json:"accessKey,omitempty"`
+	AccessKeyVendor  string   `json:"accessKeyVendor,omitempty"`
+	AccessKeyRegions []string `json:"accessKeyRegions,omitempty"`
+	// Vertex: it is Google Vertex AI, whose editor asks for a Google Cloud
+	// project and the Google credentials to sign with, not a key
+	Vertex bool `json:"vertex,omitempty"`
 	// a partner's tagline by language, and the languages it is listed in
 	Notes map[string]string `json:"notes,omitempty"`
 	Langs []string          `json:"langs,omitempty"`
@@ -324,6 +366,9 @@ type gatewayJSON struct {
 	URL     string   `json:"url"`
 	LAN     bool     `json:"lan"`
 	LANURLs []string `json:"lanURLs,omitempty"`
+	// PublicURL is MAGPIE_PUBLIC_URL when it is among LANURLs: Connect
+	// starts there until the user picks an address (#1551)
+	PublicURL string `json:"publicURL,omitempty"`
 	// OnNetwork: MAGPIE_ADDR puts it beyond loopback (a server, a Docker
 	// image), so every caller is shown a gateway key, and LAN is true too:
 	// callers from elsewhere, a container's host among them, need one
@@ -450,12 +495,22 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), TestsAs: p.TestClients(), DecideTest: p.AsksDecideModels(),
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
-		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, Headers: p.Headers, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
-		Ready: p.Ready(), Chosen: p.Models, Models: []modelJSON{}, Agents: []providerAgent{},
+		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountNames: p.AccountNames, Headers: p.Headers, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
+		Ready: p.Ready(), Chosen: p.Picks(), Models: []modelJSON{}, Agents: []providerAgent{},
 		Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Unlisted: p.Unlisted, Off: p.Off, Contexts: p.Contexts,
 		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(), PriceRate: p.PriceRate,
 		AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM,
 		Outputs: provider.OutputsOf(p.ID), Compacts: provider.CompactsOf(p.ID),
+	}
+	if p.Account != nil {
+		for _, r := range p.AccountRefs() {
+			if s := provider.SeatNameOf(p.ID, r); s != "" {
+				if out.AccountSeats == nil {
+					out.AccountSeats = map[string]string{}
+				}
+				out.AccountSeats[strings.ToLower(strings.TrimSpace(r))] = s
+			}
+		}
 	}
 	if out.Fallback == nil {
 		out.Fallback = []string{}
@@ -474,8 +529,20 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 			*out.ZhipuTeam = *p.ZhipuTeam
 		}
 	}
-	if provider.TakesVolcAccessKey(p) || p.AccessKeyID != "" || p.SecretAccessKey != "" {
-		out.AccessKey = &accessKeyJSON{ID: p.AccessKeyID, SecretSet: p.SecretAccessKey != ""}
+	// a provider of a preset with such a plan among its regions takes one
+	// wherever it is, the editor showing it at those regions
+	vendor := provider.AccessKeyVendor(p)
+	if pr := provider.Preset(p.Preset); vendor == "" && pr != nil {
+		vendor, _ = presetAccessKey(*pr)
+	}
+	if vendor != "" || p.AccessKeyID != "" || p.SecretAccessKey != "" {
+		out.AccessKey = &accessKeyJSON{Vendor: vendor, ID: p.AccessKeyID, SecretSet: p.SecretAccessKey != ""}
+	}
+	if p.IsVertex() {
+		out.Vertex = &provider.Vertex{}
+		if p.Vertex != nil {
+			*out.Vertex = *p.Vertex
+		}
 	}
 	if site := provider.StepFunSite(p); site != "" {
 		out.StepPlan = &stepPlanJSON{site, provider.StepFunSignedIn(site), provider.StepFunSignInURL(site), provider.StepFunBookmarklet()}
@@ -699,13 +766,17 @@ func providersState() providersJSON {
 	for _, pr := range provider.Presets() {
 		bases := provider.Provider{Chat: pr.Chat, Responses: pr.Responses, Anthropic: pr.Anthropic}
 		team := provider.TakesZhipuTeam(bases)
-		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID], ZhipuTeam: team, AccessKey: provider.TakesVolcAccessKey(bases)})
+		vendor, keyRegions := presetAccessKey(pr)
+		s.Presets = append(s.Presets, presetJSON{PresetDef: pr, Added: have[pr.ID], ZhipuTeam: team, AccessKey: vendor != "", AccessKeyVendor: vendor, AccessKeyRegions: keyRegions, Vertex: pr.ID == provider.VertexPreset})
 	}
 	cat := provider.Catalog()
 	s.Gateway = gatewayJSON{URL: gateway.URL(), OnNetwork: gateway.OnNetwork(), Models: len(cat), Calls: []gateway.Call{}, Groups: []gwGroupJSON{}}
 	s.Gateway.LAN = settings.Load().LAN || s.Gateway.OnNetwork
 	if s.Gateway.LAN {
 		s.Gateway.LANURLs = gateway.LANURLs()
+		if u := gateway.PublicURL(); slices.Contains(s.Gateway.LANURLs, u) {
+			s.Gateway.PublicURL = u
+		}
 	}
 	for _, e := range cat {
 		if e.Group == "" {
@@ -726,7 +797,12 @@ func providersState() providersJSON {
 	}
 	if gw := served.Load(); gw != nil {
 		s.Gateway.Running, s.Gateway.Mine, s.Gateway.Window = true, true, true
+		// the calls without their bodies, which only an opened row reads
+		// (GET /api/gateway/call)
 		s.Gateway.Calls = gw.Recent()
+		for i := range s.Gateway.Calls {
+			s.Gateway.Calls[i].RequestBody, s.Gateway.Calls[i].ResponseBody = "", ""
+		}
 		s.Gateway.Lanes = gw.Lanes()
 	} else {
 		o := gateway.ServedBy()
@@ -805,6 +881,26 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			provider.FetchNew(8 * time.Second)
 		}
 		writeJSON(rw, providersState())
+	})
+	// Recent-call bodies are read only when their row is opened, not with
+	// every Providers or Gateway refresh (#1521): forty calls' bodies made
+	// /api/providers 20 MB. The ring may have moved on by then.
+	mux.HandleFunc("GET /api/gateway/call", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Cache-Control", "no-store")
+		if gw := served.Load(); gw != nil {
+			if id, err := strconv.ParseUint(r.URL.Query().Get("id"), 10, 64); err == nil {
+				if c, ok := gw.RecentCall(id); ok {
+					writeJSON(rw, map[string]any{
+						"requestBody": c.RequestBody, "responseBody": c.ResponseBody,
+						"requestTruncated": c.RequestTruncated, "responseTruncated": c.ResponseTruncated,
+					})
+					return
+				}
+			}
+		}
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusNotFound)
+		writeJSON(rw, map[string]string{"error": "This request is no longer in the recent calls."})
 	})
 	// the order the Providers tab lists them in, which is the order they
 	// are tried in too (#499)
@@ -906,9 +1002,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// ClearBalanceToken drops the saved balance token, which a
 			// blank one in the form otherwise keeps
 			ClearBalanceToken bool `json:"clearBalanceToken"`
-			// AccessKeyID is a Volcengine access key's ID, "" for none; a
-			// save that leaves it out keeps it. Its Secret (SecretAccessKey)
-			// is kept when sent blank, unless ClearAccessKey drops it.
+			// AccessKeyID is a Volcengine access key's ID or a Tencent
+			// Cloud SecretId, "" for none; a save that leaves it out keeps
+			// it. Its Secret (SecretAccessKey, a Tencent SecretKey) is kept
+			// when sent blank, unless ClearAccessKey drops it.
 			AccessKeyID    *string `json:"accessKeyID"`
 			ClearAccessKey bool    `json:"clearAccessKey"`
 			// From is the id the provider had: another is a rename
@@ -961,6 +1058,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// DetectModels, for detect: models to ask on each API, each
 			// answered on its own, in place of Model
 			DetectModels []string `json:"detectModels"`
+			// Picked, for detect with no Model: the models the form has
+			// picked and not saved yet, one of which each API is asked
+			// for before the saved picks or the vendor's list (#1545)
+			Picked []string `json:"picked"`
 			// Account and Allow, for accountmodels: the account (its name)
 			// or key (its id) and the models it alone serves, none for all
 			// the provider's (#474)
@@ -972,6 +1073,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// it follow the account's cap
 			Cap    int    `json:"cap"`
 			Window string `json:"window"`
+			// Alias, for accountname: the account's name of the user's
+			// own, "" to take it off (#1515)
+			Alias string `json:"alias"`
 			// Typed, for test and models: the request carries the editor's
 			// form, which is tried as it stands before a Save (see typed)
 			Typed bool `json:"typed"`
@@ -1064,6 +1168,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				pr.Key, pr.Models, pr.Fallback, pr.Headers, pr.BalanceToken, pr.Contexts = in.Key, in.Models, in.Fallback, in.Headers, in.BalanceToken, in.Contexts
 				pr.ZhipuTeam = in.ZhipuTeam
 				pr.SecretAccessKey = in.SecretAccessKey
+				pr.Vertex = in.Vertex
 				pr.Searches = in.Searches
 				pr.PinUpstream = in.PinUpstream
 				pr.Unredacted = in.Unredacted
@@ -1197,6 +1302,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				if old != nil {
 					in.AccountCaps, in.AccountWindowCaps = old.AccountCaps, old.AccountWindowCaps
 					in.AccountConcurrency = old.AccountConcurrency
+					in.AccountNames = old.AccountNames // with accountname
 				}
 				// a Zhipu key's team likewise: {} clears it
 				if in.ZhipuTeam == nil && old != nil {
@@ -1209,6 +1315,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				}
 				if in.SecretAccessKey == "" && old != nil && !req.ClearAccessKey {
 					in.SecretAccessKey = old.SecretAccessKey
+				}
+				// and a Vertex AI provider's project and credentials
+				if in.Vertex == nil && old != nil {
+					in.Vertex = old.Vertex
 				}
 				if in.Key == "" && old != nil {
 					in.Key = old.Key
@@ -1310,7 +1420,18 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 		case "key":
 			// the saved key, for the editor's Show button; it never
-			// leaves this machine (the panel is served on loopback)
+			// leaves this machine (the panel is served on loopback).
+			// With Account, the key of that id: each of several keys'
+			// rows copies its own (#1480).
+			if req.Account != "" {
+				k, err := provider.KeyOf(in.ID, req.Account)
+				if err != nil {
+					fail(rw, err)
+					return
+				}
+				writeJSON(rw, map[string]string{"key": k})
+				return
+			}
 			p, err := provider.Find(in.ID)
 			if err != nil {
 				fail(rw, err)
@@ -1351,6 +1472,11 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 		case "accountcap":
 			if err := provider.SetAccountCap(in.ID, req.Account, req.Cap); err != nil {
+				fail(rw, err)
+				return
+			}
+		case "accountname":
+			if err := provider.SetAccountName(in.ID, req.Account, req.Alias); err != nil {
 				fail(rw, err)
 				return
 			}
@@ -1442,10 +1568,17 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		case "detect":
 			// which APIs answer at the URL typed (Model, or one from the
 			// list for each), the form as it stands: a new provider's,
-			// or a saved one's with its key when none is typed
+			// or a saved one's with its key when none is typed — a copy
+			// not saved yet with the key of the one it copies (CopyOf),
+			// as its Add takes it. Nothing is written: the provider is
+			// only asked, never kept, listed or routed to (#1545).
 			var p provider.Provider
-			if in.ID != "" {
-				saved, err := provider.Find(in.ID)
+			from := in.ID
+			if from == "" && req.New {
+				from = req.CopyOf
+			}
+			if from != "" {
+				saved, err := provider.Find(from)
 				if err != nil {
 					fail(rw, err)
 					return
@@ -1476,7 +1609,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 			ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 			defer cancel()
-			got, err := p.Detect(ctx, req.Base, req.Model)
+			got, err := p.Detect(ctx, req.Base, req.Model, req.Picked...)
 			if err != nil {
 				fail(rw, err)
 				return
@@ -1862,10 +1995,15 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 // Refresh and Test models before a Save: a key pasted to replace the saved
 // one is the one asked with, and the URLs, headers and proxy typed are
 // where and how. Nothing is saved. What the form left blank (the key above
-// all) is the saved one's; the provider's other keys are kept.
+// all) is the saved one's; the provider's other keys are kept. A Vertex AI
+// provider's project, location, credentials file and service account are
+// the ones typed, spelled as a Save keeps them, unless no project is.
 func typed(p, in provider.Provider, proxy *string) provider.Provider {
 	if k := strings.TrimSpace(in.Key); k != "" && k != p.Key {
 		p.Key, p.KeyName, p.KeyProtocol, p.KeyWeight = k, "", "", 0
+	}
+	if v := in.Vertex.Normal(); v != nil && p.IsVertex() && v.Project != "" {
+		p.Vertex = v
 	}
 	for _, f := range []struct {
 		to *string
