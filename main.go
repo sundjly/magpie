@@ -49,6 +49,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie <agent> <field> <value>  set another field   e.g. magpie codex effort high
   magpie <agent> default          take magpie out: the agent back on what it had before
   magpie <agent> <field> default  that field back to the agent's own default
+  magpie <command> --help         what a command or an agent takes; -h or --help anywhere does nothing else
 
   magpie save <name>              snapshot every agent's settings as a profile
   magpie use <name>               apply a profile
@@ -75,7 +76,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie visible [<agent> <family|provider|group>,… | all | --only-picked | --show-new]
                                   which models an agent is shown: families (magpie provider/group set <id> family=…),
                                   or only the models ticked for it, a new one off until it is ticked
-  magpie search [add <api> <key>|rm <api>]   Tavily, Brave, Exa, Firecrawl or SearXNG for web search when no provider can search
+  magpie search [add <api> <key>|rm <api>]   Tavily, Brave, Exa, Firecrawl, You.com or SearXNG for web search when no provider can search
   magpie groups                   routing groups: several models agents pick as one, group/<id>
   magpie group add <name> models=<m1>,<m2> [routing=smart|order|rotate|usage|pace] [stays=auto|session|turn|off]
   magpie group <id> | set <id> k=v… | rm <id>   show, change or remove one (magpie group help for more)
@@ -189,6 +190,12 @@ func runTUI() error {
 var tuiRun = tui.Run
 
 func run(args []string) error {
+	// before anything is read, moved or started: --help on any command
+	// prints its usage and does nothing else
+	if helpAsked(args) {
+		fmt.Println(strings.TrimRight(helpFor(args), "\n"))
+		return nil
+	}
 	if len(args) > 0 && args[0] == "healthcheck" {
 		return healthcheck() // every few seconds in a container: nothing else
 	}
@@ -356,6 +363,11 @@ func run(args []string) error {
 	a, err := agent.Find(args[0])
 	if err != nil {
 		return err
+	}
+	// no agent form takes a flag: one is never set as a model or a value
+	// (`magpie snow --verbose` would take magpie out of Snow, #1457)
+	if f := flagArg(args[1:]); f != "" {
+		return fmt.Errorf("unknown flag %s: nothing was changed\n\n%s", f, strings.TrimRight(agentHelp(a), "\n"))
 	}
 	if len(a.Fields) == 0 && a.Import != nil {
 		// `magpie cindy`: it takes magpie through its own link, confirmed there

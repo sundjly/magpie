@@ -760,17 +760,26 @@ func anyImageInput(a, b *bool) *bool {
 
 // Serves reports whether key k can be asked for model: false only when the
 // vendor's lists say another of the provider's keys sees it and k doesn't.
+// A key no list marks — its own wasn't answered, or it was added since —
+// is unknown, and serves: a failed list is not an empty one (#1598, the
+// first of five keys left out of every request).
 func (p Provider) Serves(k KeyAccount, model string) bool {
 	live, _, ok := p.live()
 	if !ok {
 		return true
 	}
+	id := keyID(k.Key)
+	var keys []string
+	found, listed := false, false
 	for _, m := range live {
 		if m.ID == model {
-			return len(m.Keys) == 0 || slices.Contains(m.Keys, keyID(k.Key))
+			keys, found = m.Keys, true
+		}
+		if !listed && slices.Contains(m.Keys, id) {
+			listed = true
 		}
 	}
-	return true
+	return !found || len(keys) == 0 || !listed || slices.Contains(keys, id)
 }
 
 // Exposed lists the models magpie offers to agents for this provider: the
@@ -1206,9 +1215,15 @@ func byIDOrWas(id string) (Provider, bool) {
 // prices it.
 var grokEffort = regexp.MustCompile(`^((?:.*/)?grok-[0-9][^/]*?)-(?:minimal|low|medium|high|xhigh|extra-high)$`)
 
+// grokWindow is a Grok id offered at a context window of its own
+// ("grok-4.7@500k", grokContextModels and the grok plugin's windowsOf): the
+// same model, asked for at a longer window.
+var grokWindow = regexp.MustCompile(`^((?:.*/)?grok-[0-9][^/@]*)@[0-9]+k$`)
+
 // pricedNames are the ids a model is priced by, in order: its own, then,
 // for a Grok id named at an effort, the model it is that effort of — the
-// same model, at the same price (#224). Codex Auto Review uses GPT-5.6 Luna
+// same model, at the same price (#224) — or at a window (grok-4.7@500k),
+// the model it is that window of. Codex Auto Review uses GPT-5.6 Luna
 // according to OpenAI's rate card (2026-09-30):
 // https://help.openai.com/en/articles/11481834-chatgpt-rate-card-business-enterpriseedu-credit-based-pricing
 // This is a list-price estimate, not evidence of a response's served model.
@@ -1218,6 +1233,9 @@ func pricedNames(model string) []string {
 	out := []string{model}
 	if model == "codex-auto-review" {
 		out = append(out, "gpt-5.6-luna")
+	}
+	if m := grokWindow.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model))); m != nil {
+		out = append(out, m[1])
 	}
 	if m := grokEffort.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model))); m != nil {
 		out = append(out, m[1])
@@ -1280,6 +1298,10 @@ type Entry struct {
 	Icons      []string `json:"-"`                // a group's: its providers' icons, one per provider
 	Images     bool     `json:"images,omitempty"` // takes images as input (a group's: a member does)
 	ImageInput *bool    `json:"-"`                // explicit answer, nil when unknown
+	// Inputs and Outputs are what the model's source listed it takes and
+	// gives (catalog.Model's InputModalities, OutputModalities); see
+	// Modalities
+	Inputs, Outputs []string `json:"-"`
 	// Context is the tokens a prompt may hold, when known (a group's: the
 	// least of its members')
 	Context int `json:"context,omitempty"`
@@ -1388,7 +1410,8 @@ func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
 	// an agent's list showed the whole magpie/<provider>/<model> (#955)
 	name := cmp.Or(m.Name, m.ID)
 	e := Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Family: p.Family, Name: name, Efforts: effortsOf(m), Provider: p,
-		Images: images, ImageInput: imageInput, Context: ctx, Output: output, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas, Tiers: m.Tiers, Released: m.Released}
+		Images: images, ImageInput: imageInput, Context: ctx, Output: output, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas, Tiers: m.Tiers, Released: m.Released,
+		Inputs: m.InputModalities, Outputs: m.OutputModalities}
 	if n, ok := modelNameIn(s.ModelNames, p.ID, m.ID); ok {
 		e.Name, e.Default = n, name
 	} else {
@@ -1409,6 +1432,29 @@ func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
 		e.AgentsV2 = slices.Contains(e.Efforts, "ultra")
 	}
 	return e
+}
+
+// Modalities are what the model takes and gives, as an agent's model list
+// says them: every kind its source listed (a plugin's audio, video and pdf
+// too, #1595), with image as Images has it, the user's say included. With
+// no list, the input is text and image or text alone when whether it
+// takes images is known, and nil when it isn't; output is nil unless said.
+func (e Entry) Modalities() (in, out []string) {
+	if e.Inputs != nil {
+		in = slices.DeleteFunc(slices.Clone(e.Inputs), func(k string) bool { return k == "image" })
+		if e.Images {
+			at := 0
+			if len(in) > 0 && in[0] == "text" {
+				at = 1
+			}
+			in = slices.Insert(in, at, "image")
+		}
+	} else if e.Images {
+		in = []string{"text", "image"}
+	} else if e.ImageInput != nil {
+		in = []string{"text"}
+	}
+	return in, slices.Clone(e.Outputs)
 }
 
 // EntryOf is the model as the agents see it, by the id they ask for. It is

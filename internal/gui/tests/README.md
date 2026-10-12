@@ -765,6 +765,22 @@ wide:
 node --test internal/gui/tests/segs-press-redraw.test.cjs
 ```
 
+`segs-glide.test.cjs` records every thumb on Settings → General frame by
+frame while Lightweight mode is clicked. General is opened from another tab
+first (drawn while hidden): every thumb is under its option. A save whose
+answer comes back mid-glide, one answered at once, and one with the page
+drawn twice more on the way each move the clicked thumb one way only, never
+back, and end under the option, while every other thumb on the page doesn't
+move at all; a refused save glides it back to Off. The click doesn't scroll
+the page. Before the fix the redraw restarted the glide from Off and every
+thumb on the page grew in from the left on the first save. Chromium and
+WebKit, en, zh, zh-TW, ja and de, 900 and 440px wide (`THROTTLE=4` slows
+Chromium's CPU):
+
+```sh
+node --test internal/gui/tests/segs-glide.test.cjs
+```
+
 `update-check.test.cjs` checks the version row: the button stays, dimmed,
 through a check, a second click asks nothing, and the answer puts it back.
 A read still out cannot draw "checking" over that answer. A row drawn again
@@ -1156,6 +1172,17 @@ header is as at 100%. Chromium zooms the page as the webview does (its default
 zoom level), where the buttons' edge measures a hair past the header's
 padding; WebKit, which has no page zoom to set, uses the device scale factor.
 English and Chinese, with `/api/plugins` faked.
+
+`header-relang.test.cjs` opens a macOS window in Chinese at 830px, with the
+header's tabs picked over the sidebar, and switches it from Settings to
+English, Traditional Chinese, Japanese, German and back (kiwiflysky on X).
+In English it is handed a wide font (Menlo, as the host hands a saved font)
+on the Agents page, swept from 1000 to 640px: each width is fitted to the
+system font first and, given Menlo, must match a fresh fit. Each language is
+then swept from 1100 to 600px, and the tabs keep 7.5px from the magpie (or
+the header's padding past the traffic lights) and from the buttons, which
+stay in the header; drawn in all the way, they scroll in the room between.
+Chromium and WebKit, with `/api/settings` faked.
 
 `strip-scrollbar.test.cjs` lays out an overflowing tab strip (`segs regions`,
 the Sessions page's agents and a provider's regions) in Chromium with its

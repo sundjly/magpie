@@ -179,6 +179,12 @@ type Provider struct {
 	// ignore them: their auth is the agent's own.
 	Headers map[string]string `json:"headers,omitempty"`
 
+	// ExtraBody are JSON fields added to the body of every request to the
+	// vendor (#1604), filling in what the body lacks, or replacing it for a
+	// name written "!name"; ${sessionId} in a value is the conversation's
+	// id (extrabody.go). Signed-in agent accounts ignore it, as Headers.
+	ExtraBody ExtraBody `json:"extraBody,omitempty"`
+
 	// Searches says the vendor answers a web search tool offered on its
 	// Anthropic or Responses API by itself (web_search_20250305,
 	// web_search): a relay in front of Anthropic's or OpenAI's API, which
@@ -451,6 +457,7 @@ func (p Provider) clone() Provider {
 	p.Models = slices.Clone(p.Models)
 	p.PickedFrom = slices.Clone(p.PickedFrom)
 	p.Headers = maps.Clone(p.Headers)
+	p.ExtraBody = maps.Clone(p.ExtraBody)
 	p.AccountProxies = maps.Clone(p.AccountProxies)
 	p.AccountCaps = maps.Clone(p.AccountCaps)
 	p.AccountNames = maps.Clone(p.AccountNames)
@@ -1036,6 +1043,11 @@ func normalize(p Provider) Provider {
 			p.Decide = pr.Decide
 		}
 	}
+	// an oMLX provider saved before its preset had System One (#1641)
+	// asks it where its chat completions are, at whatever port it was given
+	if p.Preset == OMLXPreset && p.Decide == "" && p.Chat != "" {
+		p.Decide = p.Chat
+	}
 	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed && p.Routing != Pace && p.Routing != Weighted {
 		p.Routing = ""
 	}
@@ -1063,6 +1075,7 @@ func normalize(p Provider) Provider {
 	// a preset's provider keeps its headers too: the preset gives the
 	// endpoints and catalog, the headers say which workspace or app it is
 	p.Headers = cleanHeaders(p.Headers)
+	p.ExtraBody = cleanExtraBody(p.ExtraBody)
 	if pr := Preset(p.Preset); pr != nil {
 		if p.Icon == "" {
 			p.Icon = pr.Icon
@@ -1216,8 +1229,13 @@ func (p Provider) Speaks() []Protocol {
 func (p Provider) FactoryGemini() bool { return p.ID == "factory" && p.Account != nil }
 
 // ResponsesFirst: an OpenAI model on OpenAI's API, Copilot's, PipeLLM's or Bedrock's,
-// which is best asked on the Responses API though Chat serves it too.
+// which is best asked on the Responses API though Chat serves it too; and
+// every model where only the Responses API tells what the vendor's cache
+// answered (ResponsesTellsCache).
 func (p Provider) ResponsesFirst(model string) bool {
+	if p.ResponsesTellsCache() {
+		return true
+	}
 	if p.Responses != "" && p.IsBedrock() {
 		return bedrockGPT(model)
 	}
@@ -1227,6 +1245,24 @@ func (p Provider) ResponsesFirst(model string) bool {
 		return false
 	}
 	return openAIModel(model)
+}
+
+// ResponsesTellsCache is a provider whose Responses API says how much of
+// the prompt its cache answered (input_tokens_details.cached_tokens) and
+// what the model reasoned, while its Chat API, served by the same cache,
+// says neither: ModelScope's API-Inference, by its preset or its host
+// (#1578, sparrowbits: Claude Desktop, translated to Chat, read 0 of 34.9M
+// tokens from cache; Codex on Responses, 94%). A translated request goes
+// there on Responses, and an agent that asks each model on one API is
+// wired to it. Other vendors with both URLs keep Chat: their Chat reports
+// its cache (Groq, Volcengine Ark), their Claude-format requests go to
+// their Anthropic URL as they are, or nothing is known of their Responses
+// API (a relay the user added).
+func (p Provider) ResponsesTellsCache() bool {
+	if p.Responses == "" || p.Chat == "" {
+		return false
+	}
+	return p.Preset == "modelscope" || HostOf(p.Responses) == "api-inference.modelscope.cn"
 }
 
 // MessagesFirst: a Claude model where the provider has Anthropic's Messages

@@ -974,7 +974,7 @@ func newLooseTurn(owner string, req *Request, msgs []Message, sealed bool) *loos
 		}
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%t\x00%s\x00%s\x00%t\x00%s\x00%d", owner, req.Model, req.Effort != "", req.ThinkOff, req.ToolChoice, req.System, req.WebSearch, req.Format.schema(), start)
+	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%t\x00%s\x00%s\x00%t\x00%s\x00%d", owner, req.Model, req.Effort != "", req.ThinkOff, req.ToolChoice, withoutBillingHeader(req.System), req.WebSearch, req.Format.schema(), start)
 	hashMessages(h, msgs[:start], nil)
 	l := &looseTurn{key: hex.EncodeToString(h.Sum(nil)), runs: heardRuns(msgs[start:], sealed)}
 	words := messageWords(msgs)
@@ -1187,16 +1187,40 @@ func (r *subscriptionRun) ended(req *Request, said, stop string, ok bool) {
 	r.bridge.mu.Lock()
 	r.loose = loose
 	r.bridge.mu.Unlock()
-	r.bridge.keepIdle(r, key, conv)
+	if !r.bridge.keepIdle(r, key, conv) {
+		return // it ended during its reply (#1667)
+	}
 	r.timer.Reset(idleLongest)
 }
 
 // keepIdle leaves run waiting for the turn after the conversation key
 // names, the longest waiting let go past idleMost; conv, when set, is that
-// conversation whatever the model (convKey).
-func (b *subscriptionBridge) keepIdle(r *subscriptionRun, key, conv string) {
+// conversation whatever the model (convKey). A run that has ended isn't
+// kept, and keepIdle says so: its 30-minute timer can end it during a
+// reply that still reaches the client whole (#1667), and kept, it held one
+// of idleMost places until pushed out, as removeRun, which takes it out,
+// had already been. finish says it ended before removeRun takes b.mu, so a
+// run kept here before then is taken out by it.
+func (b *subscriptionBridge) keepIdle(r *subscriptionRun, key, conv string) bool {
 	var drop []*subscriptionRun
 	b.mu.Lock()
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	if closed {
+		b.mu.Unlock()
+		return false
+	}
+	// a run waits at one point of its conversation: kept again, it leaves
+	// the key it waited at, unless another run waits there now (#1596:
+	// which caller kept one run twice isn't known; ended and letGo of one
+	// request exclude each other through gone()). Left there, the same
+	// run under two keys was the oldest again after each pass below, which
+	// let go of one key only, so the loop never ended and drop grew with
+	// b.mu held (X, Sma1lboy: magpie at 158 GB after two days).
+	if r.idleKey != "" && r.idleKey != key && b.idle[r.idleKey] == r {
+		delete(b.idle, r.idleKey)
+	}
 	if old := b.idle[key]; old != nil && old != r {
 		drop = append(drop, old)
 	}
@@ -1206,21 +1230,28 @@ func (b *subscriptionBridge) keepIdle(r *subscriptionRun, key, conv string) {
 		r.convKey = conv
 	}
 	for len(b.idle) > idleMost {
+		var oldKey string
 		var oldest *subscriptionRun
-		for _, run := range b.idle {
+		for k, run := range b.idle {
 			if oldest == nil || run.idleAt.Before(oldest.idleAt) {
-				oldest = run
+				oldKey, oldest = k, run
 			}
 		}
 		b.shelve(oldest)
-		delete(b.idle, oldest.idleKey)
-		oldest.idleKey = ""
-		drop = append(drop, oldest)
+		// the key found, not the run's own: each pass takes one entry out
+		delete(b.idle, oldKey)
+		if oldest.idleKey == oldKey {
+			oldest.idleKey = ""
+		}
+		if !slices.Contains(drop, oldest) {
+			drop = append(drop, oldest)
+		}
 	}
 	b.mu.Unlock()
 	for _, run := range drop {
 		run.abort()
 	}
+	return true
 }
 
 // shelfMost is how many saved sessions the shelf keeps, the longest
@@ -1517,7 +1548,9 @@ func (r *subscriptionRun) letGo() {
 	// stops (an interrupted result) is read past
 	r.endSegment()
 	// found at once by a resend, which waits for the rewind (resume)
-	r.bridge.keepIdle(r, back, "")
+	if !r.bridge.keepIdle(r, back, "") {
+		return // it ended since (#1667): there is nothing to take back
+	}
 	if err := r.rewind(turn); err != nil {
 		log.Printf("claude: a turn the client gave up on could not be taken back, its run let go: %v", err)
 		r.abort()
@@ -1648,10 +1681,14 @@ func (r *subscriptionRun) park() {
 // turned thinking off, which its Claude Code was started with): a
 // run is told another level as its turn starts (setEffort), where one
 // started anew would write the whole conversation to the cache again (#502).
+// Nor is the client's billing line, which renderClaudePrompt leaves out of
+// what a run is told: its Claude Code changes fields in it every turn (cch,
+// cc_prompt_id, cc_prev_req…), and with them in the key no turn found the
+// run it went on from, so each started one anew (#1638).
 func turnKey(owner string, req *Request, msgs []Message) string {
 	h := sha256.New()
 	tools, _ := json.Marshal(req.Tools)
-	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%t\x00%s\x00%s\x00%s\x00%t\x00%s", owner, req.Model, req.Effort != "", req.ThinkOff, req.ToolChoice, req.System, tools, req.WebSearch, req.Format.schema())
+	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%t\x00%s\x00%s\x00%s\x00%t\x00%s", owner, req.Model, req.Effort != "", req.ThinkOff, req.ToolChoice, withoutBillingHeader(req.System), tools, req.WebSearch, req.Format.schema())
 	hashMessages(h, msgs, nil)
 	return hex.EncodeToString(h.Sum(nil))
 }

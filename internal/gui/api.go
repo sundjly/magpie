@@ -43,6 +43,7 @@ import (
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/redact"
+	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
 )
@@ -463,6 +464,10 @@ type searchVendorJSON struct {
 	Name    string `json:"name"`
 	KeysURL string `json:"keysURL,omitempty"`
 	NeedURL bool   `json:"needURL,omitempty"` // one the user runs
+	// KeyOptional: it can be added with no key (You.com's free search, #1626)
+	KeyOptional bool `json:"keyOptional,omitempty"`
+	// its own address, the one used while no base URL is set (#1580)
+	Base string `json:"base,omitempty"`
 }
 
 func searchState(s *settingsJSON) {
@@ -479,7 +484,7 @@ func searchState(s *settingsJSON) {
 		s.SearchAPIs = append(s.SearchAPIs, j)
 	}
 	for _, v := range provider.SearchVendors {
-		s.SearchVendors = append(s.SearchVendors, searchVendorJSON{ID: v.ID, Name: v.Name, KeysURL: v.KeysURL, NeedURL: v.Base == ""})
+		s.SearchVendors = append(s.SearchVendors, searchVendorJSON{ID: v.ID, Name: v.Name, KeysURL: v.KeysURL, NeedURL: v.Base == "", KeyOptional: v.KeyOptional, Base: v.Base})
 	}
 	s.SearchProvider = gateway.Searcher()
 	s.SearchAuto, s.SearchUnused = gateway.AutoSearcher(), gateway.SearcherUnused()
@@ -526,7 +531,7 @@ func settingsState() settingsJSON {
 		s.TerminalDefault = found.Default
 	}
 	s.FX = currentFX()
-	if (s.UsageAlert > 0 || s.BalanceAlert > 0 || s.ResetReminder > 0) && notifyProblem != nil {
+	if (s.UsageAlert > 0 || s.BalanceAlert > 0 || s.ResetReminder > 0 || s.TurnDoneAlert > 0) && notifyProblem != nil {
 		s.NotifyProblem = notifyProblem()
 	}
 	s.ProxyNow, s.ProxySource = netproxy.Describe()
@@ -1050,10 +1055,11 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// round — keyed by agent, not by "<provider>/<model>" — so they are
 		// not among them, and belong to the Agents page.
 		in.Visible, in.HiddenModels, in.OrderedModels = cur.Visible, cur.HiddenModels, cur.OrderedModels
-		in.PickedModels = cur.PickedModels     // "only models I pick" (#1337)
-		in.FastPicks = cur.FastPicks           // switched in the agents' pickers (#954)
-		in.AgentEfforts = cur.AgentEfforts     // picked in an agent's row (#1003)
-		in.PluginCheckins = cur.PluginCheckins // set on its own (plugin-checkin below)
+		in.PickedModels = cur.PickedModels       // "only models I pick" (#1337)
+		in.OwnModelsHidden = cur.OwnModelsHidden // an agent's own models left out (#1642)
+		in.FastPicks = cur.FastPicks             // switched in the agents' pickers (#954)
+		in.AgentEfforts = cur.AgentEfforts       // picked in an agent's row (#1003)
+		in.PluginCheckins = cur.PluginCheckins   // set on its own (plugin-checkin below)
 		settings.CarryPerModel(&in, &cur)
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.LANKeyID = cur.LANKeyID
@@ -1141,8 +1147,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		// an alert turned on or moved is looked at now, the Mac asked for its
 		// leave to notify as it is turned on (#368)
-		if (in.UsageAlert != cur.UsageAlert || in.BalanceAlert != cur.BalanceAlert || in.ResetReminder != cur.ResetReminder) &&
-			(in.UsageAlert > 0 || in.BalanceAlert > 0 || in.ResetReminder > 0) && onAlerts != nil {
+		if (in.UsageAlert != cur.UsageAlert || in.BalanceAlert != cur.BalanceAlert || in.ResetReminder != cur.ResetReminder || in.TurnDoneAlert != cur.TurnDoneAlert) &&
+			(in.UsageAlert > 0 || in.BalanceAlert > 0 || in.ResetReminder > 0 || in.TurnDoneAlert > 0) && onAlerts != nil {
 			onAlerts()
 		}
 		// the tray menu follows the page's language (#301)
@@ -1820,6 +1826,11 @@ func held(h http.Handler) http.Handler {
 			defer provider.Hold()()
 			// and the files read, not looked at again for each look-up
 			defer filememo.Hold()()
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/sessions") || strings.HasPrefix(r.URL.Path, "/api/usage") {
+			// a page waits on the session files: the warm-up reading
+			// them reads at full speed meanwhile
+			defer sessions.Ask()()
 		}
 		if !(api && r.Method == http.MethodGet) {
 			// anything that may have written drops what was held, once it
