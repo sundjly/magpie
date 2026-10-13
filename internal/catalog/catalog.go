@@ -56,9 +56,10 @@ type Model struct {
 	// Output is the most tokens a reply may hold, when known.
 	Output int `json:",omitempty"`
 	// Compact is where the user has Codex compact a conversation on this
-	// model (#876), its own or its provider's (settings.ModelCompacts): the
-	// window it is told when Context is longer. 0 is none set, for the
-	// one for every model (settings.Compact).
+	// model (#876), its own or its provider's (settings.ModelCompacts), or
+	// Context itself when that is a window the user typed (#1809,
+	// provider.CompactFor): the window it is told when Context is longer.
+	// 0 is none set, for the one for every model (settings.Compact).
 	Compact int `json:",omitempty"`
 	// Plain, on a model of another magpie's list, is its name there alone
 	// (display_name), when Name is its label there, with that magpie's
@@ -361,14 +362,36 @@ func (p mdProvider) levels(m mdModel) []string {
 // models.dev gives one (gpt-5's 272K of its 400K), else the whole context.
 // A row whose input limit sits above its window (Cloudflare AI Gateway's
 // gpt-5 at 272K over 128K) holds the window: the cap never exceeds it.
+//
+// Either limit under LeastWindow says nothing (Window), so the other one
+// answers, or none does.
 func (m mdModel) window() int {
-	if m.Limit.Input > 0 {
-		if m.Limit.Context > 0 && m.Limit.Context < m.Limit.Input {
-			return m.Limit.Context
+	in, ctx := Window(m.Limit.Input), Window(m.Limit.Context)
+	if in > 0 {
+		if ctx > 0 && ctx < in {
+			return ctx
 		}
-		return m.Limit.Input
+		return in
 	}
-	return m.Limit.Context
+	return ctx
+}
+
+// LeastWindow is the smallest context window a list is taken at its word
+// for. Less can't hold an agent's system prompt, let alone a turn, and an
+// agent told it compacts at once or won't send at all (H20 on Discord: hy3
+// and Cline's free models listed at 512, which Claude Code and Codex took
+// as the model's window). The smallest real chat models' windows are
+// about 4096 (gpt-3.5-turbo-instruct's 4095, mythomax's 4096): those stand.
+const LeastWindow = 2048
+
+// Window is n as a model's context window: n, or 0 — not known, for
+// models.dev, a family's window or the agent's default to answer — when n
+// is under LeastWindow.
+func Window(n int) int {
+	if n < LeastWindow {
+		return 0
+	}
+	return n
 }
 
 var modelsDevURL = "https://models.dev/api.json" // a var for tests
@@ -1239,6 +1262,22 @@ func ImagesAPI(id string) bool {
 	return false
 }
 
+// PointsToImagesAPI is whether a vendor's refusal of a chat request names
+// its images API as the one the model is asked on: Agnes answers
+// agnes-image-2.5-flash on chat completions with 400 "Model
+// agnes-image-2.5-flash is an image model. Use /v1/images/generations"
+// (#1837), a model ImagesAPI can't tell by its name from gemini's -flash
+// image ones, which chat. The vendor's own words decide it then.
+func PointsToImagesAPI(text string) bool {
+	return strings.Contains(strings.ToLower(text), "images/generations")
+}
+
+// PointsToChat is PointsToImagesAPI the other way round: a refusal on the
+// images API that names chat completions as where the model draws.
+func PointsToChat(text string) bool {
+	return strings.Contains(strings.ToLower(text), "chat/completions")
+}
+
 // Drawers are the models of one models.dev provider that make images,
 // newest first.
 func Drawers(id string) []Model {
@@ -1336,6 +1375,39 @@ func parseCodex(b []byte) ([]Model, error) {
 func MagpieAdded(etag, slug, description string) bool {
 	return strings.HasSuffix(description, " via magpie") ||
 		strings.Contains(etag, "+magpie-") && strings.Contains(slug, "/")
+}
+
+// EffortRank orders the reasoning levels agents and vendors name, weakest
+// first.
+var EffortRank = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+
+// NearestEffort is the level of levels nearest want in EffortRank's order,
+// a tie going up, never "none" unless it is want; want itself when levels
+// are none, hold it, or want is no level EffortRank knows. The gateway
+// fits an effort to a model's levels by it on the way out (fitEffort), and
+// Codex's catalog gives a model the effort set for new sessions by it
+// (codexcat.ModelDefault), so the level a model starts at is the one it
+// would be sent at.
+func NearestEffort(want string, levels []string) string {
+	at := slices.Index(EffortRank, want)
+	if len(levels) == 0 || at < 0 || slices.Contains(levels, want) {
+		return want
+	}
+	best, dist := want, len(EffortRank)
+	for _, l := range levels {
+		i := slices.Index(EffortRank, l)
+		if i < 0 || l == "none" {
+			continue
+		}
+		d := i - at
+		if d < 0 {
+			d = -d
+		}
+		if d < dist || d == dist && i > at {
+			best, dist = l, d
+		}
+	}
+	return best
 }
 
 // Efforts returns the reasoning levels a model supports, if known.

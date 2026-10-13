@@ -361,6 +361,12 @@ func Run(version string, showMain bool, link string) error {
 		// Wails exits on some webview errors; say why before it does.
 		ErrorHandler: func(err error) { log.Println("magpie:", err) },
 	})
+	// Windows without the WebView2 runtime can make no window: Wails would
+	// exit on the first, with nothing on screen to say why (#1806). The
+	// reader is told in a box of Windows' own instead, and the launch ends.
+	if !webView2Check(h.app) {
+		return nil
+	}
 	// Wails' default Learn More replaces the current window with wails.io.
 	// Keep the native menus, but open magpie's help in the system browser.
 	// macOS only: it is the one that shows a menu bar unasked; on Linux a
@@ -475,7 +481,7 @@ func Run(version string, showMain bool, link string) error {
 	go h.lighten()
 	h.watchAlerts()
 	// the quick panel by the icon, or the main window if the user would
-	// rather (Settings → Tray icon)
+	// rather (Settings → Click the tray icon to)
 	h.tray.OnClick(func() {
 		if cmdClick() {
 			return // Command-drag moves the icon; the system handles it
@@ -602,7 +608,8 @@ func (h *host) setBird(b []byte) {
 	}
 }
 
-// panelOptions: the tray panel's window, frameless and see-through. On
+// panelOptions: the tray panel's window, frameless and (but on Linux)
+// see-through. On
 // Windows, Wails creates a frameless window as WS_OVERLAPPEDWINDOW with
 // DWM's frame extended into the whole client area (for the shadow and the
 // round corners), and with the close button left enabled (WS_SYSMENU) DWM
@@ -610,7 +617,15 @@ func (h *host) setBird(b []byte) {
 // where it shows through the panel's translucent page over the Settings
 // gear (#238). Hiding the caption buttons there takes WS_SYSMENU and the
 // minimise and maximise boxes off, so DWM has nothing to draw; the shadow
-// and corners stay. The Mac and Linux keep what they had.
+// and corners stay. The Mac keeps what it had.
+//
+// On Linux the panel is a solid window, as the main window is (#1803). A
+// see-through one is an RGBA, app-paintable GTK window under a transparent
+// webview, and scrolling it left a fainter copy of the old position's
+// paint behind (KDE Plasma 6, on Wayland and on XWayland, with WebKit's
+// compositing mode on or off), while the same page in the main window
+// never did. The page paints itself opaque there too (body.linux.panel in
+// app.css).
 func panelOptions(goos, theme string) application.WebviewWindowOptions {
 	o := application.WebviewWindowOptions{
 		Name:            "panel",
@@ -630,6 +645,9 @@ func panelOptions(goos, theme string) application.WebviewWindowOptions {
 			CornerRadius: 12,
 		},
 		Windows: application.WindowsWindow{HiddenOnTaskbar: true},
+	}
+	if goos == "linux" {
+		o.BackgroundType = application.BackgroundTypeSolid
 	}
 	if goos == "windows" {
 		o.MinimiseButtonState = application.ButtonHidden
@@ -716,11 +734,11 @@ func (h *host) togglePanelNow() {
 // click, the way Omarchy's own drop-downs sit: a Wayland window can't place
 // itself, so Hyprland is given a rule for it (see omarchy.PlacePanel).
 func (h *host) placePanel() {
-	x, y, room, ok := omarchy.PanelAt(h.panelW())
+	mon, x, y, room, ok := omarchy.PanelAt(h.panelW())
 	if !ok {
 		return
 	}
-	if err := omarchy.PlacePanel(panelTitle, x, y); err != nil {
+	if err := omarchy.PlacePanel(panelTitle, mon, x, y); err != nil {
 		log.Println("hyprland:", err)
 		return
 	}

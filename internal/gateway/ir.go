@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+	"time"
+
+	"github.com/yetone/magpie/internal/catalog"
 )
 
 // The APIs are close cousins; everything below is the shape they have
@@ -283,6 +286,13 @@ type Event struct {
 	Usage            Usage
 	Hits             []Hit
 	SafeguardResults json.RawMessage
+	// StopDetails: Anthropic's stop_details, what its classifier said of
+	// a refusal (#1768), carried to the client as it came
+	StopDetails json.RawMessage
+
+	// Wait: for KError, how long the vendor said to wait before asking
+	// again, when it said; sent on as Retry-After
+	Wait time.Duration
 }
 
 // Usage counts tokens.
@@ -370,6 +380,7 @@ type Result struct {
 	Stop             string
 	Usage            Usage
 	SafeguardResults json.RawMessage
+	StopDetails      json.RawMessage
 }
 
 // collector assembles a Result from events. Encoders use the same logic to
@@ -418,6 +429,9 @@ func (c *collector) closeTool() {
 func (c *collector) add(ev Event) {
 	if len(ev.SafeguardResults) > 0 {
 		c.res.SafeguardResults = ev.SafeguardResults
+	}
+	if len(ev.StopDetails) > 0 {
+		c.res.StopDetails = ev.StopDetails
 	}
 	switch ev.Kind {
 	case KStart:
@@ -652,7 +666,7 @@ func effortOf(s string) string {
 }
 
 // effortRank orders the reasoning levels agents and vendors name.
-var effortRank = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+var effortRank = catalog.EffortRank
 
 // ByStrength is efforts weakest first, in effortRank's order; a level it
 // doesn't know keeps its place among the others of its kind, after them.
@@ -682,28 +696,7 @@ func fitEffort(want string, levels []string) string {
 		want = "max"
 		levels = slices.DeleteFunc(slices.Clone(levels), func(l string) bool { return l == "ultra" })
 	}
-	if len(levels) == 0 || slices.Contains(levels, want) {
-		return want
-	}
-	at := slices.Index(effortRank, want)
-	if at < 0 {
-		return want
-	}
-	best, dist := want, len(effortRank)
-	for _, l := range levels {
-		i := slices.Index(effortRank, l)
-		if i < 0 || l == "none" {
-			continue
-		}
-		d := i - at
-		if d < 0 {
-			d = -d
-		}
-		if d < dist || d == dist && i > at {
-			best, dist = l, d
-		}
-	}
-	return best
+	return catalog.NearestEffort(want, levels)
 }
 
 // budgetOf is the Anthropic thinking budget for an effort level.

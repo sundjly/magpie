@@ -31,14 +31,20 @@ const providerUsage = `usage:
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
                                           again, it adds another (deepseek-2); k=v pairs too: id, name, header.X-Foo
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, gemini, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.token, models.url, search,
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, gemini, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.token, models.url, search, user-agent,
                                           access.key, access.secret (a Volcengine access key, or a Tencent Cloud SecretId and SecretKey, for its plan's windows)
-  magpie provider set <id> k=v…           change a provider's settings, with the same k=v pairs as add
+  magpie provider set <id> k=v…           change a provider's settings, with the same k=v pairs as add;
+                                          codex=as-sent sends Codex's Responses requests as Codex sent them
+                                          (a relay that checks they are Codex's own), codex=default fits them;
+                                          user-agent=agent sends the User-Agent the agent gave (pi, opencode…)
+                                          in place of magpie's, for a plan that serves only agents it names;
+                                          user-agent=magpie, the default, sends magpie's
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
   magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose:
-                                          ids… replace the list, +id adds one, -id takes one out, all: the default
+                                          ids… replace the list, +id adds one, -id takes one out, all: the default,
+                                          none: serve none of them, its balance and usage still shown
   magpie provider refresh <id>            fetch the vendor's model list again (as the app's Fetch models)
   magpie provider account-models <id> [account|key [ids…|all]]
                                           the models one account or key alone serves; all: every model the provider has
@@ -56,6 +62,9 @@ const providerUsage = `usage:
                                           past either a request is turned away with a 429 (0: no bound)
   magpie provider rpm <id> [n|off]        how many requests each account or key sends the vendor in any minute;
                                           one more waits for room, up to 2 minutes, then is turned away with a 429
+  magpie provider quota-rest <id> [30m|6h|7d|default]
+                                          how long a key sits out once the vendor says it is out of its allowance
+                                          without saying when it is back (default: 15 minutes; at most 8 days)
   magpie provider listed <id> yes|no      no: its models serve only through routing groups, not in the list
   magpie provider off|on <id>             switch it off (kept, but no agent or request uses it), or on again
   magpie provider test <id> [--as codex|claude-code] [model…]
@@ -308,7 +317,7 @@ func models(args []string) error {
 	// the models a provider's list has that it doesn't expose, which a
 	// group naming one finds "not served" (MOMO on Discord: 35 of 37)
 	for _, p := range provider.All() {
-		if !p.On() || p.Unlisted {
+		if !p.On() || p.Unlisted || p.ServesNone() {
 			continue
 		}
 		if ids, why := notExposed(p); len(ids) > 0 {
@@ -540,6 +549,8 @@ func providerCmd(args []string) error {
 		return queueCmd(rest)
 	case "rpm":
 		return rpmCmd(rest)
+	case "quota-rest":
+		return quotaRestCmd(rest)
 	case "listed":
 		// no: the provider's models leave the list agents see and serve
 		// only through the routing groups they are in
@@ -594,11 +605,17 @@ func providerCmd(args []string) error {
 		}
 		if len(rest) > 1 {
 			before := *p
+			// none: no model served at all, the provider kept for its
+			// balance and usage (#1818); all is the vendor's list again
+			none := len(rest) == 2 && rest[1] == "none"
 			picks, err := editPicks(*p, rest[1:])
+			if none {
+				picks, err = nil, nil
+			}
 			if err != nil {
 				return err
 			}
-			p.Models = picks
+			p.Models, p.NoModels = picks, none
 			if err := provider.Save(*p); err != nil {
 				return err
 			}
@@ -732,6 +749,13 @@ func showProvider(p provider.Provider) error {
 	kv("gemini", p.Gemini)
 	if p.Searches {
 		kv("search", "by itself"+muted.Render("  a client's web search goes to it as sent"))
+	}
+	if p.PassUserAgent {
+		why := "  the User-Agent the agent gave, not magpie's"
+		if !p.PassesUserAgent() {
+			why = "  but magpie's: it goes as a client of " + p.Name + "'s own"
+		}
+		kv("user-agent", "agent's"+muted.Render(why))
 	}
 	if p.Unredacted {
 		why := "  local: Settings' redaction leaves its requests as written"
@@ -939,6 +963,34 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.SecretAccessKey = v
 		case "models.url":
 			p.ModelsURL = v
+		case "codex":
+			// as-sent: Codex's requests go to it as Codex sent them, for
+			// a relay that checks they are Codex's own (#1758)
+			switch strings.ToLower(v) {
+			case "as-sent", "yes", "on":
+				p.CodexAsSent = true
+			case "default", "no", "off":
+				p.CodexAsSent = false
+			default:
+				return fmt.Errorf("codex=as-sent|default, not %q", v)
+			}
+		case "user-agent", "ua":
+			// agent: a request goes with the User-Agent the agent that
+			// sent it gave, for a coding plan that serves only agents it
+			// names (#1851); magpie: magpie's own, as by default. A
+			// header.User-Agent the user set stands over both
+			var on bool
+			switch strings.ToLower(v) {
+			case "agent", "pass", "yes", "on":
+				on = true
+			case "magpie", "default", "no", "off":
+			default:
+				return fmt.Errorf("user-agent=agent|magpie, not %q", v)
+			}
+			if on && p.Account != nil {
+				return fmt.Errorf("%s signs in as its own client, which sends the User-Agent it does; user-agent= is for a provider with an API key", p.Name)
+			}
+			p.PassUserAgent = on
 		case "search":
 			// yes: the vendor searches the web by itself, a web search a
 			// client offers going to it as it was sent (a relay in front of
@@ -1515,6 +1567,71 @@ func rpmCmd(rest []string) error {
 	return nil
 }
 
+// quotaRestCmd shows, or sets, how long a provider's keys sit out once the
+// vendor says one is out of its allowance without saying when it is back
+// (#1772: Ollama Cloud's weekly limit, asked again every 15 minutes).
+func quotaRestCmd(rest []string) error {
+	if len(rest) < 1 || len(rest) > 2 {
+		return fmt.Errorf("magpie provider quota-rest <id> [30m|6h|7d|default]")
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	if len(rest) > 1 {
+		minutes, err := restMinutes(rest[1])
+		if err != nil {
+			return err
+		}
+		if err := provider.SetQuotaRest(p.ID, minutes); err != nil {
+			return err
+		}
+		if p, err = provider.Find(p.ID); err != nil {
+			return err
+		}
+	}
+	if d := p.QuotaRestFor(); d > 0 {
+		fmt.Printf("%s · a key out of its allowance, with no word of when it is back, sits out %s\n", p.Name, restWords(d))
+	} else {
+		fmt.Printf("%s · a key out of its allowance, with no word of when it is back, sits out 15 minutes (magpie's own)\n", p.Name)
+	}
+	return nil
+}
+
+// restMinutes reads a rest as quotaRestCmd takes it: default (0), a
+// number of minutes, a Go duration (90m, 6h) or a number of days (7d).
+func restMinutes(s string) (int, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "default", "off", "none", "-", "0":
+		return 0, nil
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		return n, nil
+	}
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		if n, err := strconv.Atoi(days); err == nil {
+			return n * 24 * 60, nil
+		}
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < time.Minute {
+		return 0, fmt.Errorf("a rest is minutes, or as 30m, 6h or 7d, or default, not %q", s)
+	}
+	return int(d / time.Minute), nil
+}
+
+// restWords is a rest as a person says it: 7 days, 6 hours, 90 minutes.
+func restWords(d time.Duration) string {
+	switch {
+	case d%(24*time.Hour) == 0:
+		return plural(int(d/(24*time.Hour)), "day")
+	case d%time.Hour == 0:
+		return plural(int(d/time.Hour), "hour")
+	}
+	return plural(int(d/time.Minute), "minute")
+}
+
 // printMoved says which agents a change moved off models it stopped
 // serving (agent.Reseat).
 func printMoved(moved []agent.Move) {
@@ -1570,7 +1687,7 @@ func editPicks(p provider.Provider, args []string) ([]string, error) {
 	}
 	if len(picks) == 0 {
 		// no picks means the default list, not none
-		return nil, fmt.Errorf("that leaves no model exposed · to keep %s's models out of the list: magpie provider listed %s no", p.Name, p.ID)
+		return nil, fmt.Errorf("that leaves no model exposed · to serve none of %s's models: magpie provider models %s none; to keep them for routing groups alone: magpie provider listed %s no", p.Name, p.ID, p.ID)
 	}
 	return picks, nil
 }

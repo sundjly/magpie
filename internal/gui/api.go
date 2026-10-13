@@ -276,6 +276,10 @@ type stateJSON struct {
 	// Last: this is the state kept from the last read (laststate.go), for
 	// the page to draw while the fresh one is read
 	Last bool `json:"last,omitempty"`
+	// Served is how many models magpie serves, groups left out: the Get
+	// started card's first step ("add a model source") is done once
+	// there is one, agents found or not
+	Served int `json:"served"`
 }
 
 // unlistedJSON is a model of a provider kept for routing groups, and the
@@ -342,6 +346,12 @@ type settingsJSON struct {
 	PublicURL string `json:"publicURL,omitempty"`
 	// MAGPIE_ADDR, when it sets the gateway's address over Settings' port
 	AddrEnv string `json:"addrEnv,omitempty"`
+	// MAGPIE_ALLOW_IPS, when it sets the allow list over Settings', and
+	// the list it sets; OnNetwork: MAGPIE_ADDR listens on the network, so
+	// the list is shown even while sharing is off
+	AllowIPsEnv     string   `json:"allowIPsEnv,omitempty"`
+	AllowIPsFromEnv []string `json:"allowIPsFromEnv,omitempty"`
+	OnNetwork       bool     `json:"onNetwork,omitempty"`
 	// Dir is the data folder beside a portable magpie (#508)
 	Portable bool `json:"portable,omitempty"`
 	// WSL is whether there is WSL to look in for agents (Windows), for
@@ -377,12 +387,18 @@ type settingsJSON struct {
 	VisionMissing string `json:"visionMissing,omitempty"`
 	// the models Codex's thread titles may be sent to (CodexTitles, #705)
 	TitleModels []modelRef `json:"titleModels"`
+	// what each of the disabled models (#1867) turns off now, by pattern
+	DisabledHits map[string][]string `json:"disabledHits,omitempty"`
 	// the model magpie's generate_image tool draws with when ImageGen
 	// names none, and those that can be named
 	ImageGenAuto string `json:"imageGenAuto,omitempty"`
 	// the ImageGen the user picked when magpie can't find it any more
-	ImageGenMissing string     `json:"imageGenMissing,omitempty"`
-	ImageGenModels  []modelRef `json:"imageGenModels"`
+	ImageGenMissing string `json:"imageGenMissing,omitempty"`
+	// the listed model the ImageGen the user picked stands for, when it
+	// isn't listed itself: a ChatGPT account's gpt-image-2.5, saved when
+	// magpie listed it, is its one GPT Image (gateway.ListedDrawer, #1865)
+	ImageGenShown  string     `json:"imageGenShown,omitempty"`
+	ImageGenModels []modelRef `json:"imageGenModels"`
 	// the web search APIs a model's search goes to when no provider can
 	// search (#419), their keys masked; the ones that can be added; and
 	// the provider that searches first, if one does
@@ -396,6 +412,10 @@ type settingsJSON struct {
 	SearchAuto    string             `json:"searchAuto,omitempty"`
 	SearchUnused  string             `json:"searchUnused,omitempty"`
 	SearchRelays  []string           `json:"searchRelays,omitempty"`
+	// the last search the one it names didn't make, since it last
+	// searched: no other provider searched in its place (Gearclickist on
+	// Discord)
+	SearchFailed *searchFailedJSON `json:"searchFailed,omitempty"`
 	// the providers on that aren't offered, as they can't search the web
 	// by themselves (#825)
 	SearchLeftOut []string `json:"searchLeftOut,omitempty"`
@@ -492,6 +512,9 @@ func searchState(s *settingsJSON) {
 	}
 	s.SearchProvider = gateway.Searcher()
 	s.SearchAuto, s.SearchUnused = gateway.AutoSearcher(), gateway.SearcherUnused()
+	if f, ok := gateway.SearcherFailed(); ok {
+		s.SearchFailed = &searchFailedJSON{Searcher: f.Searcher, Why: f.Why, NothingFound: f.NothingFound, NotSearched: f.NotSearched, At: f.At}
+	}
 	s.SearchChoices = []searchChoiceJSON{}
 	for _, c := range gateway.Searchers() {
 		p := c.Provider
@@ -512,9 +535,22 @@ func searchState(s *settingsJSON) {
 	}
 }
 
+// searchFailedJSON is gateway.SearchFailure as Settings shows it.
+type searchFailedJSON struct {
+	Searcher     string    `json:"searcher"`
+	Why          string    `json:"why,omitempty"`
+	NothingFound bool      `json:"nothingFound,omitempty"`
+	NotSearched  bool      `json:"notSearched,omitempty"`
+	At           time.Time `json:"at"`
+}
+
 func settingsState() settingsJSON {
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
 	s.AddrEnv = os.Getenv("MAGPIE_ADDR")
+	s.OnNetwork = gateway.OnNetwork()
+	if list, env := gateway.AllowIPs(); env {
+		s.AllowIPsEnv, s.AllowIPsFromEnv = os.Getenv(gateway.AllowIPsEnv), list
+	}
 	if s.LAN || gateway.OnNetwork() {
 		s.PublicURL = gateway.PublicURL()
 	}
@@ -567,6 +603,12 @@ func settingsState() settingsJSON {
 		}
 	}
 	s.TitleModels = []modelRef{}
+	for _, pat := range s.DisabledModels {
+		if s.DisabledHits == nil {
+			s.DisabledHits = map[string][]string{}
+		}
+		s.DisabledHits[pat] = provider.DisabledHits(pat)
+	}
 	for _, e := range provider.Served() {
 		if e.Group != "" || e.Provider.Ready() && !e.Provider.DecideOnly() {
 			m := modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon}
@@ -587,8 +629,11 @@ func settingsState() settingsJSON {
 			if name == "" {
 				name = m.ID
 			}
-			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: p.ID + "/" + m.ID, Name: name, Provider: p.ID, PName: p.Name, Icon: p.Icon})
+			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: p.ID + "/" + m.ID, Name: name, Provider: p.ID, PName: p.Name, Icon: p.Icon, VendorPicks: gateway.VendorPicksDrawer(p)})
 		}
+	}
+	if v := gateway.ListedDrawer(s.ImageGen); v != s.ImageGen {
+		s.ImageGenShown = v
 	}
 	return s
 }
@@ -1036,8 +1081,14 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		// the Settings page sends its own choices; how the agents are
-		// arranged is the Agents page's, and the window's size its own; both stay as they are
-		cur := settings.Load()
+		// arranged is the Agents page's, and the window's size its own; both stay as they are.
+		// Unreadable settings are never carried as the defaults (an empty
+		// allow list, every address let in): Save would refuse them too.
+		cur, err := settings.LoadChecked()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
 		var fields map[string]json.RawMessage
 		_ = json.Unmarshal(body, &fields)
 		// Older pages do not send fonts. An explicit null restores the
@@ -1069,11 +1120,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.LANKeyID = cur.LANKeyID
 		in.Port = cur.Port                                 // set on its own (port below), which moves the gateway
 		in.CORSOrigins = cur.CORSOrigins                   // set on its own (cors below)
+		in.AllowIPs = cur.AllowIPs                         // set on its own (allowips below)
 		in.GitHubToken = cur.GitHubToken                   // set on its own (github-token below), never sent to the page
 		in.RequestArchive = cur.RequestArchive             // the Gateway page's, set on its own
 		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB   // in settings.json only
 		in.GatewayConversations = cur.GatewayConversations // Sessions' explicit recording consent
 		in.RedactRules = cur.RedactRules                   // the masking rules, set on their own
+		in.DisabledModels = cur.DisabledModels             // set on their own (disabled-models below, #1867)
 		// used or left is the Usage page's toggle as much as Settings', set on its own
 		in.QuotaLeft = cur.QuotaLeft
 		in.QuotaReads = cur.QuotaReads // set on its own (quota-reads below)
@@ -1089,6 +1142,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.CompactAt = cur.CompactAt     // and so is the threshold
 		// Claude Desktop's list, set in its row on the Agents page
 		in.DesktopLongest = cur.DesktopLongest
+		// and the Get started card put away, from the card itself
+		in.GuideHidden = cur.GuideHidden
 
 		in.CodexTitles = cur.CodexTitles // set on its own (codex-titles below)
 		// and so is the model Codex's auto-review runs on (codex-auto-review)
@@ -1280,6 +1335,21 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, settingsState())
 	})
+	// the Agents page's Get started card put away, or back (GuideHidden)
+	mux.HandleFunc("POST /api/settings/guide", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Hidden bool }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		s := settings.Load()
+		s.GuideHidden = in.Hidden
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
 	// whether Claude Desktop lists a model of 1M or more once, by its 1M id
 	// (settings.DesktopLongest, #1272): it reads the list as it starts
 	mux.HandleFunc("POST /api/settings/desktop-longest", func(rw http.ResponseWriter, r *http.Request) {
@@ -1328,6 +1398,20 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	})
 	// where Codex's requests for a thread's title go (#705): "" as Codex
 	// sends them, "off", or a model's id
+	// the models turned off for every request through magpie (#1867), each
+	// an id or a glob, the list sent whole
+	mux.HandleFunc("POST /api/settings/disabled-models", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Models []string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if err := provider.SetDisabledModels(in.Models); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
 	mux.HandleFunc("POST /api/settings/codex-titles", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ Model string }
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -1640,6 +1724,42 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, settingsState())
 	})
+	// the allow list (lc on Discord): the addresses other computers may
+	// reach magpie from, as IPs and CIDR ranges; none lets every address in.
+	// One that would shut out the page saving it (magpie web, opened from
+	// another computer) is refused, and so is any while MAGPIE_ALLOW_IPS
+	// sets the list.
+	mux.HandleFunc("POST /api/settings/allowips", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ IPs []string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if _, env := gateway.AllowIPs(); env {
+			fail(rw, fmt.Errorf("%s sets the allow list; change it there", gateway.AllowIPsEnv))
+			return
+		}
+		list, err := settings.CleanAllowIPs(in.IPs)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		if addr, out := gateway.KeepsOut(list, r); out {
+			fail(rw, fmt.Errorf("that allow list would shut out %s, the address this page is open from: add it first", addr))
+			return
+		}
+		s, err := settings.LoadChecked()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		s.AllowIPs = list
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
 	// the gateway's port (Magic_zero on Discord), set on its own: it moves
 	// the gateway and every agent connected to it
 	mux.HandleFunc("POST /api/settings/port", func(rw http.ResponseWriter, r *http.Request) {
@@ -1861,6 +1981,11 @@ func state() stateJSON {
 	}
 	s.Unlisted = unlistedModels()
 	s.CLIBehind = cliBehind()
+	for _, e := range provider.Served() {
+		if e.Group == "" {
+			s.Served++
+		}
+	}
 	for _, a := range agent.Clients() {
 		s.Clients = append(s.Clients, clientJSON{ID: a.ID, Name: a.Name, Icon: a.Icon})
 	}

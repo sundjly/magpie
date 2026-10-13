@@ -86,6 +86,9 @@ func (s *Server) decideFailed(c candidate, status int, header http.Header, body 
 // in turn until one answers, or the last one's answer passed on.
 func (s *Server) serveDecisionGroup(w http.ResponseWriter, r *http.Request, body []byte, asked string, g provider.Group, ms []provider.Member) {
 	start := time.Now()
+	if refuseOff(w, provider.Chat, asked) { // every model of it disabled (#1867)
+		return
+	}
 	g = g.Live()
 	keyWho, keyHeld := keyHolds(r)
 	accWho, accHeld := accountHolds(r)
@@ -121,6 +124,7 @@ func (s *Server) serveDecisionGroup(w http.ResponseWriter, r *http.Request, body
 			return
 		}
 	}
+	cs = probeOne(cs) // of those resting, only the one back soonest (#1799)
 	if len(cs) == 0 {
 		writeError(w, provider.Chat, http.StatusServiceUnavailable, fmt.Sprintf("no key or account of the group %s's decision models may serve them now", g.Name))
 		return
@@ -246,6 +250,7 @@ func (s *Server) askDecisionGroup(model string, intents []string, prev before, e
 	g = g.Live()
 	ms, _ = provider.PausedOut(g, ms, RouterAgent, "", ruleClock())
 	cs, _, _ := s.decideTries(g, ms)
+	cs = probeOne(cs) // of those resting, only the one back soonest (#1799)
 	if len(cs) == 0 {
 		return verdict{}, true, fmt.Errorf("no decision model of the group %s can be asked now", g.Name)
 	}

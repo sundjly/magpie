@@ -17,7 +17,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -147,7 +146,7 @@ func npmInstall(pkg, goos string, node bool) InstallCmd {
 // Homebrew's, …) or, on Windows, in the PATH a terminal opened now has
 // and in Node.js's installer's own folder.
 func nodeHere() bool {
-	if _, err := exec.LookPath("npm"); err == nil {
+	if _, err := proc.Look("npm"); err == nil {
 		return true
 	}
 	dirs := proc.UserBinDirs()
@@ -206,10 +205,14 @@ var npmPrefixes memo
 // npmGlobalPrefix is where npm install -g puts packages (npm prefix -g),
 // "" when that isn't known.
 func npmGlobalPrefix() string {
-	npm, err := exec.LookPath("npm")
+	npm, err := proc.Look("npm")
 	if err != nil {
-		npm = filepath.Join(os.Getenv("ProgramFiles"), "nodejs", "npm.cmd")
-		if os.Getenv("ProgramFiles") == "" || !isFile(npm) {
+		pf := proc.SystemDirs(os.Getenv("ProgramFiles"))
+		if len(pf) == 0 {
+			return ""
+		}
+		npm = filepath.Join(pf[0], "nodejs", "npm.cmd")
+		if !isFile(npm) {
 			return ""
 		}
 	}

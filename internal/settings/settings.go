@@ -91,12 +91,20 @@ type Settings struct {
 	// named caller keys. LANKey is retained for older Magpie versions.
 	LAN    bool   `json:"lan,omitempty"`
 	LANKey string `json:"lanKey,omitempty"`
-	// CORSOrigins are the web pages (scheme://host[:port]) whose scripts
-	// may call the gateway from a browser (#1051): a preflight from one is
+	// CORSOrigins are the web pages (scheme://host[:port]) and browser
+	// extensions (chrome-extension://<id>, moz-extension://<uuid>,
+	// safari-web-extension://<uuid>) whose scripts may call the gateway
+	// from a browser (#1051): a preflight from one is
 	// answered, and its calls carry the CORS headers that let it read the
 	// reply, each with an enabled gateway key. None by default: a page
 	// gets no CORS headers, as before.
 	CORSOrigins []string `json:"corsOrigins,omitempty"`
+	// AllowIPs are the addresses (IPs and CIDR ranges) other computers may
+	// reach the gateway from at all (lc on Discord); any other is refused
+	// 403 even with a gateway key. None: every address, as before. This
+	// computer is always let in. MAGPIE_ALLOW_IPS, where set, is used in
+	// its place (gateway.AllowIPs).
+	AllowIPs []string `json:"allowIPs,omitempty"`
 	// Port is the gateway's port on this computer, 0 for DefaultPort.
 	// MAGPIE_ADDR, where it is set, comes first (GatewayAddr).
 	Port int `json:"port,omitempty"`
@@ -364,6 +372,10 @@ type Settings struct {
 	// "[1m]", and adds none to one whose id has it. Off, as before, it shows
 	// both, the plain one compacting at Claude Code's 200K.
 	DesktopLongest bool `json:"desktopLongest,omitempty"`
+	// GuideHidden: the user put away the Agents page's Get started card
+	// (wangye1644294 on X) before finishing it. Kept here, not in the
+	// page's storage, so the panel, the window and a reload agree.
+	GuideHidden bool `json:"guideHidden,omitempty"`
 	// CompactAt is the window told for a longer one when FullContext is
 	// off, in tokens: 0 is WorkingWindow (#876: 272K was the only one).
 	// A provider's or a model's own (ModelCompacts) comes before it.
@@ -412,6 +424,11 @@ type Settings struct {
 	// or a group's) taken out of an agent's lists one by one, by agent id,
 	// after Visible: a model not named here, a new one among them, is shown.
 	HiddenModels map[string][]string `json:"hiddenModels,omitempty"`
+	// DisabledModels are models turned off for every request through magpie
+	// (#1867), each an exact id or a glob ("*fable*"), matched ignoring case
+	// against "<provider>/<model>" and the bare model id: they are left out
+	// of every list, and the gateway refuses them on every route.
+	DisabledModels []string `json:"disabledModels,omitempty"`
 	// PickedModels, for an agent it names, are the only catalog entries its
 	// lists show, after Visible (#1337): the user switched the agent to
 	// "only models I pick", so a model that comes later, of a new provider
@@ -858,23 +875,50 @@ func Load() Settings {
 	return load()
 }
 
+// LoadChecked is Load, and an error when what the file holds is unknown:
+// it is there but can't be read, or it doesn't parse and has no last good
+// generation to read instead. The Settings returned then are Load's (the
+// defaults), which a caller guarding something with a setting (the
+// gateway's allow list) must not take for the user's own: a failed read
+// is unknown, never empty. No file, or an empty one, is no settings and
+// not an error — the cases Save writes over, where it refuses the others.
+func LoadChecked() (Settings, error) {
+	fileMu.RLock()
+	defer fileMu.RUnlock()
+	return loadChecked()
+}
+
 // load is called with fileMu held for reading or writing.
 func load() Settings {
+	s, _ := loadChecked()
+	return s
+}
+
+// loadChecked is LoadChecked, called with fileMu held.
+func loadChecked() (Settings, error) {
 	var s Settings
 	// read again only once the file changed: a look at the agents asks for
 	// the settings for every model of every agent (hundreds of reads, a
 	// fifth of the Agents page's wait)
-	if b, err := filememo.Read("settings", Path(), func(b []byte) ([]byte, error) { return b, nil }); err == nil {
-		// parsed once: this runs for every model of every agent
-		if err := json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &s); err != nil {
-			// one left all zero by a crash (#1505) is its last good generation
-			if bak, err := lastgood.Fallback(Path(), b, validSettings); err == nil {
-				s = Settings{}
-				_ = json.Unmarshal(bytes.TrimPrefix(bak, []byte("\xef\xbb\xbf")), &s)
-			}
+	b, err := filememo.Read("settings", Path(), func(b []byte) ([]byte, error) { return b, nil })
+	if err != nil {
+		if os.IsNotExist(err) {
+			return s.normal(), nil
+		}
+		return s.normal(), fmt.Errorf("could not read settings at %s: %w", Path(), err)
+	}
+	// parsed once: this runs for every model of every agent
+	if perr := json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &s); perr != nil {
+		// one left all zero by a crash (#1505) is its last good generation
+		bak, ferr := lastgood.Fallback(Path(), b, validSettings)
+		if ferr == nil {
+			s = Settings{}
+			_ = json.Unmarshal(bytes.TrimPrefix(bak, []byte("\xef\xbb\xbf")), &s)
+		} else if len(bytes.TrimSpace(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")))) != 0 {
+			err = fmt.Errorf("could not read settings at %s: %w", Path(), perr)
 		}
 	}
-	return s.normal()
+	return s.normal(), err
 }
 
 // validSettings is settings.json's contents read as Settings.

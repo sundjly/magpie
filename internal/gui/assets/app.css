@@ -116,6 +116,10 @@ body.panel { --panel-tint: color-mix(in srgb, var(--bg) 93%, transparent); backg
 /* on the Mac the panel's colour is painted under the page, where it keeps up
    with the panel as it grows (see tintPanel) */
 body.panel.tinted { background: transparent; }
+/* on Linux the panel is an opaque window, as the main window is, and its
+   page is opaque too: WebKitGTK repainting a scroll over the see-through
+   panel left the old position's paint showing through the new (#1803) */
+body.linux.panel { --panel-tint: var(--bg); }
 .tint-probe { display: none; background: var(--panel-tint); }
 /* on the frosted panel the surfaces are tints of the backdrop, not flat paint */
 @media (prefers-color-scheme: dark) {
@@ -140,6 +144,9 @@ code { font: var(--code-style, normal) var(--code-weight, 400) 11.5px var(--code
 .ic img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .ic .mask { width: 100%; height: 100%; background: currentColor; -webkit-mask: var(--i) center / contain no-repeat; mask: var(--i) center / contain no-repeat; }
 .ic.generic { color: var(--muted); }
+/* maskSpan's shelf: a hidden user of every mask picture loaded, so a logo drawn again paints at once (#1847) */
+.mask-shelf { position: fixed; top: 0; left: 0; width: 0; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
+.mask-shelf .mask { display: block; width: 16px; height: 16px; -webkit-mask: var(--i) center / contain no-repeat; mask: var(--i) center / contain no-repeat; }
 /* a routing group's providers, overlapping discs with the first on top */
 .ic-stack { display: inline-flex; flex: none; align-items: center; }
 .ic-stack .disc { position: relative; width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: var(--card); box-shadow: 0 0 0 1px var(--line); }
@@ -325,8 +332,20 @@ body.side-drag, body.side-drag * { cursor: col-resize !important; user-select: n
 body.window.mac .side-top { height: calc(50px / var(--zoom, 1)); padding: calc(2px / var(--zoom, 1)) 0 0 calc(84px / var(--zoom, 1)); }
 /* Windows' title bar above already shows the icon and the name */
 body.window:not(.mac):not(.linux):not(.web) .side-top { height: 10px; }
-.side-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 10px 10px; scrollbar-width: thin; }
+.side-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 10px 10px; }
 .side-foot { flex: none; max-height: 55%; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; padding: 8px 10px 10px; border-top: .5px solid var(--line-2); }
+/* a short window's sidebar keeps no bar beside its pages: a thin one is laid
+   over them while they scroll and fades once they stop, as a Mac's overlay
+   scroll bar does (app.js sideBars), the same in WebKit, WebView2 and
+   WebKitGTK, whose own bars would take a gutter at rest */
+:is(.side-scroll, .side-foot) { scrollbar-width: none; }
+:is(.side-scroll, .side-foot)::-webkit-scrollbar { display: none; width: 0; height: 0; }
+.side-bar { position: absolute; right: 4px; width: 11px; z-index: 2; opacity: 0; pointer-events: none; transition: opacity .35s ease .1s; }
+.side-bar.on, .side-bar.drag { opacity: 1; pointer-events: auto; transition-duration: .1s; transition-delay: 0s; }
+.side-bar[hidden] { display: none; }
+.side-bar > i { position: absolute; right: 2px; top: 0; width: 6px; min-height: 24px; border-radius: 3px; background: var(--muted); opacity: .55; transition: width .15s ease, opacity .15s ease; touch-action: none; }
+.side-bar:hover > i, .side-bar.drag > i { width: 8px; opacity: .75; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) { .side-bar, .side-bar > i { transition: none; } }
 body.side-nav #nav { position: static; transform: none; display: flex; flex-direction: column; gap: 1px; padding: 0; border-radius: 0; }
 body.side-nav .nav-gl { display: block; padding: 14px 8px 4px; font-size: 11px; font-weight: 500; letter-spacing: .04em; color: var(--muted); }
 body.side-nav .nav-gl:first-child { padding-top: 2px; }
@@ -349,7 +368,10 @@ body.side-nav #nav button.has-dot::after { top: 50%; right: 10px; margin-top: -3
 .nav-sub { position: relative; display: flex; flex-direction: column; gap: 1px; margin: 2px 0 6px 16px; padding-left: 8px; }
 .nav-sub.moving { overflow: hidden; }
 .nav-sub::before { content: ""; position: absolute; left: 0; top: 3px; bottom: 3px; width: 1px; background: var(--line); }
-.nav-sub > button { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--ctl-fg); text-align: left; white-space: nowrap; transition: color .2s var(--ease); }
+/* rows keep their size while the list unrolls or folds: squeezed, a strip
+   drawn again then (Installed gets its count) marked the selection a third
+   of a row up, over Discover (#1787) */
+.nav-sub > button { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--ctl-fg); text-align: left; white-space: nowrap; transition: color .2s var(--ease); }
 .nav-sub > button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .nav-sub > button > em { margin-left: auto; font-style: normal; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* the selection (.nav-hl) is the only shape in the list: a row hovered or
@@ -444,11 +466,12 @@ body:not(.side-nav) .side-toggle .st-pane { opacity: 0; }
 @keyframes view-in { from { opacity: 0; transform: translateY(5px); } }
 @media (prefers-reduced-motion: reduce) { .view { animation-name: fade-in; } }
 body.window .view { padding: 2px 16px 8px; }
-/* a page of rows and settings keeps to a width the eye can follow across,
-   centred in a maximized window, rather than its name at one edge and its
-   switch at the other (#860); the tables and charts of Routing, Usage and
-   Sessions take the whole width */
-body.window :is(#view-agents, #view-providers, #view-gateway, #view-library, #view-plugins, #view-settings) { padding-left: max(16px, calc(50% - 600px)); padding-right: max(16px, calc(50% - 600px)); }
+/* every page keeps to a width the eye can follow across, centred in a
+   maximized window, rather than its name at one edge and its switch at the
+   other (#860); Routing, Usage and Sessions too, so a large screen doesn't
+   stretch them alone edge to edge while the others sit in the middle (面条 on
+   Discord): their tables and charts lay out by the room they get */
+body.window :is(#view-agents, #view-sessions, #view-providers, #view-routing, #view-gateway, #view-usage, #view-library, #view-plugins, #view-settings) { padding-left: max(16px, calc(50% - 600px)); padding-right: max(16px, calc(50% - 600px)); }
 /* a view takes focus (tabIndex -1) only so the keys scroll it after a click;
    a ring round the whole list there marks nothing a reader can act on (#1601) */
 .view:focus { outline: none; }
@@ -626,6 +649,17 @@ body.window .agent-fold-cap { padding: 10px 14px 3px; }
 .agent-fold-cap + .row { border-top: 0; }
 .agent-fold .agent-fold-cap { opacity: 0; transition: opacity .22s ease; }
 .agent-fold.open .agent-fold-cap { opacity: 1; transition: opacity .42s ease; transition-delay: calc(70ms + var(--i) * 48ms); }
+/* the ones hidden by hand, last, behind a disclosure of their own that is
+   shut until opened (a Finder sidebar section's): put away reads as put
+   away, not as pinned under the agents in use */
+.agent-hid-line { display: flex; align-items: center; gap: 4px; width: 100%; margin: 0; padding-bottom: 8px; border-left: 0; border-right: 0; border-bottom: 0; background: none; font-family: inherit; text-align: start; cursor: pointer; }
+.agent-hid-line:hover { color: var(--fg-2); }
+.agent-hid-line:focus-visible { outline: 1.5px solid var(--fg-2); outline-offset: -2px; }
+.agent-hid-line .chev { display: inline-flex; transform: rotate(-90deg); transition: transform .3s cubic-bezier(.22, 1, .36, 1); }
+.agent-hid-line[aria-expanded="true"] .chev { transform: none; }
+.agent-hid-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .42s cubic-bezier(.4, 0, .2, 1); }
+.agent-hid-fold.open { grid-template-rows: 1fr; transition-duration: .62s; transition-timing-function: cubic-bezier(.22, 1, .36, 1); }
+.agent-hid-inner { min-height: 0; overflow: hidden; }
 /* while a row is dragged the others slide out of its way */
 #agents.sorting { user-select: none; -webkit-user-select: none; }
 #agents.sorting > .row { transition: transform .22s cubic-bezier(.22, 1, .36, 1); }
@@ -794,6 +828,8 @@ body.window .field.solo { grid-column: auto; }
 .quota-track { height: 4px; border-radius: 2px; background: var(--pill); overflow: hidden; }
 .quota-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
 .subscription-error { font-size: 11px; color: var(--faint); }
+/* the way to the provider's settings, on a plan card that needs its access key (#1821) */
+.subscription-error .quota-fix { font: inherit; color: var(--accent); padding: 0; background: none; border: 0; cursor: pointer; }
 /* WorkBuddy's credits a day (#568): the period's sum over a bar a day; a
    day before counting began is an empty slot, not a zero */
 .credit-days { margin-top: 10px; }
@@ -838,6 +874,11 @@ body.window .field.solo { grid-column: auto; }
 /* a remote magpie's gateway key (#1547): its cycle, calls, used up */
 .quota-keyline { margin-top: 7px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .quota-keyline.spent { color: var(--red); }
+/* magpie's own requests, apart from the agents' (#1839) */
+.own-badge { display: inline-flex; align-items: center; flex: none; margin-left: 6px; font-size: 9.5px; font-weight: 550; line-height: 16px; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--muted) 30%, transparent); border-radius: 5px; color: var(--muted); background: color-mix(in srgb, var(--muted) 8%, var(--card)); white-space: nowrap; vertical-align: 1px; }
+.led .who .own-badge { margin-left: 0; }
+.quota-own { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 7px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.quota-own .own-badge { margin-left: 0; }
 .subscription-card.several .quota-keyline + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
 .reset-ask .reset-idle { color: var(--amber); }
 /* a WorkBuddy account's daily check-in on its Usage card (#694) */
@@ -912,9 +953,11 @@ body.window .field.solo { grid-column: auto; }
 /* a narrow window, three tabs and the periods beside it: the words after the
    sum give way, never the page sideways */
 .usage-cost span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* how many it couldn't price stays, at every width: a sum never reads as
+   if those cost nothing (#1856) */
 @media (max-width: 640px) {
   .usage-head { gap: 7px; }
-  .usage-cost span:not(.skeleton) { display: none; }
+  .usage-cost span:not(.skeleton):not(.unpriced) { display: none; }
   .usage-cost b { font-size: 14px; }
   /* and the refresh's picker is its figure alone; where the tabs, the periods and
      these are more than a line, the sum goes on a line of its own, at the right */
@@ -928,7 +971,7 @@ body.window .field.solo { grid-column: auto; }
 /* the same, wider, wherever the sum would be cut otherwise (#1599): a
    class app.js sets when the sum runs past its box */
 .usage-head.tight { gap: 7px; flex-wrap: wrap; height: auto; min-height: 34px; row-gap: 2px; }
-.usage-head.tight .usage-cost span:not(.skeleton) { display: none; }
+.usage-head.tight .usage-cost span:not(.skeleton):not(.unpriced) { display: none; }
 .usage-head.tight .usage-cost b { font-size: 14px; }
 .usage-head.tight .usage-cost { margin-left: auto; }
 .usage-head.tight .usage-refresh { margin-right: 0; }
@@ -1128,9 +1171,10 @@ body.window .field.solo { grid-column: auto; }
 /* over the requests: their sum, and at its right the request archive's switch */
 .led-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin: 0 2px 7px; min-width: 0; }
 .led-head .led-sum { margin: 0; min-width: 0; }
-/* the two sources the request page counts and their total, in the same block
-   of cells as the totals above them, each one clickable to filter by it */
-.led-vias { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0 0 9px; }
+/* the sources the request page counts and their total, in the same block
+   of cells as the totals above them, each one clickable to filter by it; a
+   fourth, the calls apps reported (#1874), only once there are some */
+.led-vias { grid-template-columns: repeat(var(--vias, 3), minmax(0, 1fr)); margin: 0 0 9px; }
 .led-vias[hidden] { display: none; }
 .led-vias .blk { cursor: pointer; text-align: left; border: 0; font: inherit; color: inherit; background: none; }
 .led-vias .blk:hover { background: var(--pill-hover); }
@@ -1231,6 +1275,7 @@ body.window .field.solo { grid-column: auto; }
 .led .src.access-api { --badge-ink: var(--tk-f); }
 .led .src.access-subscription { --badge-ink: var(--tk-k); }
 .led .src.proto { --badge-ink: var(--muted); font-weight: 500; }
+.led .src.reported { --badge-ink: var(--tk-o); }
 .led .duration { font-weight: 550; }
 .led .duration-fast { color: var(--tk-s); }
 .led .duration-slow { color: var(--amber); }
@@ -1637,7 +1682,7 @@ body.panel .profiles #save { height: 25px; } /* the field's: the line keeps its 
 .pq-rings { grid-row: 1 / 3; grid-column: 2; display: flex; gap: 12px; }
 .pq-ring { display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; }
 .pq-dial { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: conic-gradient(var(--fg-2) calc(var(--p) * 1%), color-mix(in srgb, var(--fg) 9%, transparent) 0); }
-.pq-dial b { width: 27px; height: 27px; border-radius: 50%; display: grid; place-items: center; background: var(--card); font-size: 9.5px; font-weight: 600; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.pq-dial b { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: var(--card); font-size: 9.5px; font-weight: 600; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 .pq-ring.full .pq-dial { background: conic-gradient(var(--amber) calc(var(--p) * 1%), color-mix(in srgb, var(--amber) 18%, transparent) 0); }
 .pq-ring.full b { color: var(--fg); }
 .pq-rn { max-width: 44px; font-size: 9.5px; line-height: 1.2; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2036,10 +2081,14 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 @media (max-width: 520px) {
   .connect { grid-template-columns: 48px minmax(0, 1fr); column-gap: 8px; padding-left: 10px; padding-right: 10px; }
 }
-.copy { width: 22px; height: 22px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); flex: none; transition: background .12s, color .12s; }
-.copy:hover { background: var(--pill-hover); color: var(--fg); }
+/* Change key (#1869) looks like the copy button beside it, but isn't one */
+.copy, .key-edit { width: 22px; height: 22px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); flex: none; transition: background .12s, color .12s; }
+.copy:hover, .key-edit:hover { background: var(--pill-hover); color: var(--fg); }
 .copy.done { color: var(--green); background: var(--green-soft); animation: copy-pop .36s var(--ease); }
 @keyframes copy-pop { 0% { transform: scale(.55); } 55% { transform: scale(1.16); } 100% { transform: scale(1); } }
+/* the snippet's language, and beside it the shell it is for (#1514);
+   a narrow window puts the shell on a row of its own */
+.snip-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .snip-wrap { position: relative; min-width: 0; }
 .snip { margin: 0; padding: 10px 40px 10px 12px; border-radius: 9px; background: var(--card); border: 1px solid var(--line); overflow-x: auto; line-height: 1.55; }
 .snip code { font-size: 11.5px; color: var(--fg); white-space: pre; user-select: text; -webkit-user-select: text; }
@@ -2274,6 +2323,13 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .accts.weighted .acc .key-weight { display: inline-block; }
 .acc .key-weight-in { width: 64px; flex: none; font-size: 12px; padding: 1px 6px; }
 .acc .key-rest { flex: none; font-size: 11px; padding: 1px 6px; border-radius: 5px; color: var(--amber); background: var(--amber-soft); white-space: nowrap; }
+.acc .key-nourl { flex: none; font-size: 11px; padding: 1px 6px; border-radius: 5px; color: var(--amber); background: var(--amber-soft); white-space: nowrap; }
+/* a resting key's note and Try now (#1869): a line under the key's own,
+   lined up with its name, so the row's controls aren't pushed out of reach */
+.accts .acc.resting { flex-wrap: wrap; row-gap: 3px; }
+.acc .key-rest-line { flex: 1 0 100%; display: flex; align-items: center; gap: 8px; min-width: 0; padding-left: 25px; }
+.acc .key-rest-line .key-rest { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.acc .key-rest-line .key-unrest { flex: none; white-space: nowrap; }
 .acc .proto { flex: none; display: inline-flex; align-items: center; gap: 3px; height: 20px; padding: 0 5px 0 7px; font: inherit; font-size: 11px; color: var(--muted); border: 0; border-radius: 5px; background: var(--pill); white-space: nowrap; cursor: default; transition: opacity .15s, background .12s, color .12s; }
 .acc .proto svg { opacity: .7; transition: transform .15s var(--ease); }
 .acc .proto.open svg { transform: rotate(180deg); }
@@ -2941,8 +2997,8 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 #otelList .otel-stacked .segs { margin-left: 0; max-width: 100%; flex-wrap: wrap; }
 #otelList .otel-env { padding: 12px 14px; border-top: 1px solid var(--line-2); font-size: 11.5px; color: var(--muted); }
 
-.session-terminal-select { max-width: min(230px, 45%); height: 29px; color: var(--fg); }
-.session-terminal-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.session-terminal-select, .pref-pick { max-width: min(230px, 45%); height: 29px; color: var(--fg); }
+.session-terminal-select:focus-visible, .pref-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .row.pref .segs { flex: none; margin-left: auto; }
 .proxy-segs { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
 .proxy-segs input.proxy, input.words { width: 180px; min-width: 0; height: 27px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); font-size: 12.5px; outline: none; transition: border-color .12s, box-shadow .12s; }
@@ -2958,6 +3014,7 @@ input.words.compact-num { flex: none; width: 76px; font-variant-numeric: tabular
 .row.pref.rule-row { flex-wrap: wrap; row-gap: 8px; }
 .row.pref.rule-row .who { flex: 1 1 100%; }
 .row.pref.rule-row .sub { white-space: normal; }
+.row.pref.cors-origin .name { white-space: normal; overflow-wrap: anywhere; }
 /* a kind of personal data, under Mask personal data */
 .row.pref.redact-kind .who { padding-left: 14px; min-width: 0; }
 .row.pref.redact-kind .sub { white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
@@ -3556,6 +3613,42 @@ body.window .row.agent > .ag-conn { margin-left: 12px; align-self: center; curso
 .ag-lead .ag-lead-h { display: block; font-size: 14px; margin-bottom: 4px; }
 .ag-lead p { margin: 0; line-height: 1.55; color: var(--muted); }
 .ag-lead .text.primary { margin-top: 12px; }
+/* Get started (wangye1644294 on X): a new user's steps, in the lead's
+   place, as a grouped list on a card, each step's number turning into a
+   tick as it is done; nothing striped, the tick is the state */
+.ag-lead.guiding { margin: 0 0 12px; }
+.guide { padding: 14px 16px 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.guide-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.guide-h { font-size: 14px; }
+.guide-n { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.guide-x { margin-left: auto; flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 11px; color: var(--muted); }
+.guide-x:hover { background: var(--pill); color: var(--fg); }
+.guide-x:focus-visible, .guide-agent:focus-visible { outline: 1.5px solid var(--accent); outline-offset: 1px; }
+.guide-steps { list-style: none; }
+.guide-step { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; }
+.guide-step + .guide-step { border-top: 1px solid var(--line-2); }
+.guide-tick { flex: none; display: grid; place-items: center; width: 20px; height: 20px; margin-top: 0; border-radius: 10px; border: 1.5px solid var(--faint); color: var(--muted); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.guide-step.done .guide-tick { border-color: var(--green); background: var(--green); color: var(--card); }
+.guide-body { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; line-height: 1.45; }
+.ag-lead .guide-title { font-weight: 550; }
+.guide-step.done .guide-title { color: var(--fg-2); }
+.guide-say { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.guide-step.optional:not(.done) .guide-title { color: var(--fg-2); }
+.ag-lead .guide .text.primary { margin-top: 5px; }
+.guide-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.guide-acts .text { margin-top: 5px; }
+.guide-agents { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; }
+.guide-agent { display: inline-flex; align-items: center; gap: 6px; height: 26px; max-width: 100%; padding: 0 10px 0 7px; border: 1px solid var(--line); border-radius: 13px; background: var(--card); color: var(--fg); font-size: 12px; cursor: pointer; transition: background .12s, border-color .12s; }
+.guide-agent > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guide-agent .ic { width: 15px; height: 15px; flex: none; }
+.guide-agent:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.guide-agent:disabled { cursor: default; color: var(--muted); }
+.guide-agent:disabled .ic { opacity: .55; }
+.guide-agent.busy { color: var(--fg); }
+.guide-more { color: var(--muted); font-size: 12px; }
+body.panel .guide { padding: 10px 12px 4px; border-radius: 10px; }
+body.panel .guide-step { gap: 10px; padding: 8px 0; }
+body.panel:not([data-ptab="agents"]) #agentsLead { display: none; }
 /* the first line keeps its place opened: a line of its own height, the
    row not centring what it holds; no gap between its lines, which the
    opened part couldn't fold away: it starts where the shut row ended */
@@ -3605,10 +3698,14 @@ body.window .row + .row.agent.conn > .who { min-height: 41px; } /* the line abov
 .row.agent.conn.unplugged .ag-handle .ic { opacity: .7; }
 /* opened: the settings as named lines on the row's quieter ground */
 .ag-exp { flex: 0 0 calc(100% + 26px); margin: 7px -12px -7px -14px; padding: 4px 16px 14px 50px; border-top: 1px solid var(--line-2); background: var(--card-2); cursor: default; }
-.ag-kv { display: flex; align-items: flex-start; gap: 16px; padding: 11px 0; border-top: 1px solid var(--line-2); }
-.ag-kv:first-child { border-top: 0; }
-.ag-k { width: 112px; flex: none; padding-top: 3px; font-size: 12px; color: var(--muted); }
-.ag-v { flex: 1; min-width: 0; font-size: 12.5px; color: var(--fg-2); display: grid; gap: 4px; }
+/* the labels and values in one grid, the label column as wide as its longest
+   label (#1169); the space between the columns is the label's own padding,
+   so each line over a row runs unbroken across both */
+.ag-settings { display: grid; grid-template-columns: minmax(128px, max-content) minmax(0, 1fr); }
+.ag-kv { display: contents; }
+.ag-k { padding: 14px 16px 11px 0; border-top: 1px solid var(--line-2); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.ag-v { min-width: 0; padding: 11px 0; border-top: 1px solid var(--line-2); font-size: 12.5px; color: var(--fg-2); display: grid; gap: 4px; }
+.ag-kv:first-child > .ag-k, .ag-kv:first-child > .ag-v { border-top: 0; }
 .ag-vl { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-height: 24px; }
 .ag-vl > .fields { margin-left: 0; }
 /* the opened row has the whole width under the name to lay its settings out
@@ -3677,7 +3774,11 @@ body.window .row + .row.agent.conn > .who { min-height: 41px; } /* the line abov
   /* the name beside its logo; the link and the switch wrap under it when short of room */
   body.window .row.agent.conn > .who { width: auto; flex: 1 1 160px; min-width: 0; }
   .ag-exp { padding-left: 16px; min-width: 0; }
-  .ag-kv { flex-direction: column; gap: 4px; min-width: 0; }
+  .ag-settings { display: block; }
+  .ag-kv { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 11px 0; border-top: 1px solid var(--line-2); }
+  .ag-kv:first-child { border-top: 0; }
+  .ag-k, .ag-v { padding: 0; border-top: 0; }
+  .ag-k { width: auto; padding-top: 3px; }
   /* the pickers take the line, the effort and the squares wrap under them */
   .ag-vl { width: 100%; min-width: 0; }
   #agents .ag-vl > .fields { display: flex; flex-wrap: wrap; width: 100%; min-width: 0; }
@@ -3714,3 +3815,6 @@ input[type="checkbox"]:indeterminate::before { transform: scale(1); -webkit-mask
 input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 input[type="checkbox"]:disabled { opacity: .45; }
 .editor .pair .side .key-count { white-space: nowrap; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+/* a disabled model's pattern, as typed (#1867): an id or a glob */
+.disabled-model .name { font-family: var(--code); font-size: 12px; overflow-wrap: anywhere; }

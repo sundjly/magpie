@@ -202,6 +202,54 @@ const claudeUnknownOutput = 32000
 // model is said to have only the levels magpie knows it has.
 const claudeCapsEnv = "CLAUDE_CODE_MODEL_CAPABILITIES"
 
+// claudeReviewEnv is whether Claude Code's auto mode asks the API to review
+// its actions (the dangerous-tool-use beta and `safeguards`), "0" for no.
+// Behind a gateway whose model doesn't answer, it classifies locally anyway
+// and names the gateway in a notice, "this session isn't eligible because
+// your requests go through 127.0.0.1:3425…" (1EFLOPS on X, Claude Code on
+// Codex). Anthropic's page on it says to set it to 0 for a gateway that
+// can't run the checks: magpie does while none of the models Claude Code
+// can reach through it is reviewed (claudeReviewed), and leaves it unset
+// while one is. One the user set is theirs.
+const claudeReviewEnv = "CLAUDE_CODE_AUTO_MODE_SERVER"
+
+// claudeReviewed reports whether a model Claude Code can reach through
+// magpie has its actions reviewed by Anthropic (gateway.AutoModeReviewed):
+// one shown to the agents in catalogs (Claude Code, Claude Desktop whose
+// Code tab is Claude Code, T3 Code's instance of it), a routing group's
+// member, a provider's fallback, or one of models (those it is set to).
+// Any such keeps the review on, as /model can take a session there.
+func claudeReviewed(catalogs []string, models ...string) bool {
+	var entries []provider.Entry
+	for _, c := range catalogs {
+		shown, _ := provider.CatalogFor(c)
+		entries = append(entries, shown...)
+	}
+	reviewed := func(p provider.Provider, model string) bool {
+		if gateway.AutoModeReviewed(p, model) {
+			return true
+		}
+		return slices.ContainsFunc(p.Fallback, func(id string) bool {
+			fp, fm, ok := provider.Resolve(id)
+			return ok && gateway.AutoModeReviewed(fp, fm)
+		})
+	}
+	find := provider.GroupFinder()
+	for _, e := range entries {
+		if e.Group == "" {
+			if reviewed(e.Provider, e.Model) {
+				return true
+			}
+			continue
+		}
+		_, ms, _ := find(e.ID)
+		if slices.ContainsFunc(ms, func(m provider.Member) bool { return reviewed(m.Provider, m.Model) }) {
+			return true
+		}
+	}
+	return slices.ContainsFunc(models, func(m string) bool { return gateway.AutoModeReviewed(provider.Provider{}, m) })
+}
+
 // claudeCapsMax bounds claudeCapsEnv: the models Claude Code is set to go
 // first, and those that don't fit after them are left as Claude Code takes
 // them.
@@ -616,7 +664,8 @@ func claudeIn(at place) *Agent {
 	// (settings.WorkingWindow) on magpie, unless settings.FullContext or the
 	// main model is one of Anthropic's Claude models: Anthropic runs a [1m]
 	// one to its whole 1M, so it gets its own window (Max on Discord: a
-	// [1m] model stopped at 272K)
+	// [1m] model stopped at 272K), or a routing group made only of
+	// them (provider.ClaudeGroup, #1741)
 	writeCompact := func() error {
 		if env(claudeCompactEnv) != "" && !compactOurs() {
 			forget(compactKey)
@@ -627,12 +676,16 @@ func claudeIn(at place) *Agent {
 		// model (settings.Compact), none under Full window
 		main := mainModel()
 		n := provider.CompactSet(main)
-		if s := settings.Load(); n == 0 && !claudeModel(main) {
+		if s := settings.Load(); n == 0 && !claudeModel(main) && !provider.ClaudeGroup(main) {
 			n = s.Compact()
 			// magpie's default gives way to an autoCompactWindow the user
 			// set in Claude Code (/autocompact, its settings), which the env
-			// would take precedence over; one typed in magpie doesn't (#876)
-			if s.CompactAt == 0 && claudeOwnCompact(path, main) {
+			// would take precedence over; one typed in magpie doesn't (#876).
+			// So does it to a window the user typed for the main model, on
+			// its group or its provider: Claude Code then runs to the window
+			// it is told (claudeContextEnv), as Codex is (provider.CompactFor,
+			// #1809)
+			if s.CompactAt == 0 && (claudeOwnCompact(path, main) || provider.WindowTyped(main)) {
 				n = 0
 			}
 		}
@@ -716,6 +769,40 @@ func claudeIn(at place) *Agent {
 		return edit.SetJSON(path, edit.KV{Path: "env." + claudeCapsEnv, Value: v})
 	}
 	writeCaps := func(models ...string) error { return putCaps(true, models...) }
+	// the auto mode review magpie turned off (claudeReviewEnv), kept apart
+	// from the user's own in the same way
+	reviewKey := at.key("claude.auto_mode_server")
+	reviewOurs := func() bool {
+		cur := rawEnv(claudeReviewEnv)
+		return cur != "" && cur == stashLoad()[reviewKey]
+	}
+	dropReview := func() error {
+		defer forget(reviewKey)
+		if reviewOurs() {
+			return edit.DelJSON(path, "env."+claudeReviewEnv)
+		}
+		return nil
+	}
+	// writeReview turns the review off while no model Claude Code can reach
+	// through magpie runs it, and back on (unset) once one does
+	writeReview := func(models ...string) error {
+		if rawEnv(claudeReviewEnv) != "" && !reviewOurs() {
+			forget(reviewKey)
+			return nil
+		}
+		catalogs := []string{"claude"}
+		if desktopOn() {
+			catalogs = append(catalogs, "claude-desktop")
+		}
+		if claudeReviewed(catalogs, models...) {
+			return dropReview()
+		}
+		stash(map[string]string{reviewKey: "0"})
+		if rawEnv(claudeReviewEnv) == "0" {
+			return nil
+		}
+		return edit.SetJSON(path, edit.KV{Path: "env." + claudeReviewEnv, Value: "0"})
+	}
 	// writeWindow tells Claude Code the window of the models it runs on
 	// (claudeWindow), and while Claude Desktop runs on magpie, of those its
 	// Code tab runs it on too (claudeDesktopWindow): the least of them, as
@@ -748,6 +835,11 @@ func claudeIn(at place) *Agent {
 	// Claude Code's being wired in wrote them before, so a user who wired
 	// in Desktop alone had 200K for every Desktop model (#1458).
 	desktopOnly := func() error {
+		// the review is turned off only for Claude Code's own requests to
+		// magpie
+		if err := dropReview(); err != nil {
+			return err
+		}
 		if !desktopOn() {
 			if err := dropWindow(); err != nil {
 				return err
@@ -1035,6 +1127,9 @@ func claudeIn(at place) *Agent {
 		if err := writePicker(); err != nil {
 			return err
 		}
+		if err := writeReview(models...); err != nil {
+			return err
+		}
 		return writeCaps(models...)
 	}
 
@@ -1118,20 +1213,26 @@ func claudeIn(at place) *Agent {
 			if v == "" {
 				// the model's own default, as /effort auto leaves it: its
 				// level goes, its other keys (maxEffortLevel) stay
+				own := ""
 				if n != "" {
+					own, _ = edit.GetJSON(path, "modelSettings."+n+".effortLevel")
 					if err := claudeDropModelEffort(path, n); err != nil {
 						return err
 					}
 				}
-				if claudeReadsTop(m) {
+				// the top one goes with it when it is the model's level
+				// written beside it below; a level of the user's own
+				// for the other models stays
+				if top := jsonGet(path, "effortLevel")(); claudeReadsTop(m) || top != "" && top == own {
 					return edit.DelJSON(path, "effortLevel")
 				}
 				return nil
 			}
-			var kvs []edit.KV
-			if claudeReadsTop(m) {
-				kvs = append(kvs, edit.KV{Path: "effortLevel", Value: v})
-			}
+			// the top one too for a model that reads only its own: a model
+			// picked in Claude Code later (a routing group, another
+			// vendor's) reads the top one, and starts at the chosen level
+			// rather than its default (Creat.wu on Discord)
+			kvs := []edit.KV{{Path: "effortLevel", Value: v}}
 			if n != "" {
 				kvs = append(kvs, edit.KV{Path: "modelSettings." + n + ".effortLevel", Value: v})
 			}
@@ -1424,6 +1525,9 @@ func claudeIn(at place) *Agent {
 				return err
 			}
 			if err := writePicker(); err != nil {
+				return err
+			}
+			if err := writeReview(models...); err != nil {
 				return err
 			}
 			return writeCaps(models...)

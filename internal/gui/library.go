@@ -216,6 +216,24 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, v)
 	})
+	// Group again: the skills traced to their repositories once more, the
+	// page as it is then with how many joined a group
+	mux.HandleFunc("POST /api/library/skills/regroup", func(rw http.ResponseWriter, r *http.Request) {
+		n, err := library.RegroupSkills()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := libraryView(nil)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, struct {
+			libraryJSON
+			Regrouped int `json:"regrouped"`
+		}{v, n})
+	})
 	// RTK:which agents have its hook, switching one on or off, and
 	// installing rtk when the page is asked to
 	mux.HandleFunc("GET /api/library/rtk", func(rw http.ResponseWriter, r *http.Request) {
@@ -409,6 +427,7 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			Paths  []string
 			Names  []string // the skills to update, of those a check found changed; to bring in, of those found in the agents
 			Server library.Server
+			Hook   library.Hook      // a hook saved (#1790)
 			Agent  string            // the agent whose own skill is in the library's way
 			ID     string            // a market server's, or a market skill's in its repository
 			Values map[string]string // what a market server needs
@@ -454,6 +473,16 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.ImportServer(in.Name)
 		case "servers/remove-found":
 			res, err = library.RemoveFoundServer(in.Name)
+		case "hooks/save":
+			res, err = library.SaveHook(in.Old, in.Hook)
+		case "hooks/agents":
+			res, err = library.HookAgents(in.Name, in.Agents)
+		case "hooks/agents-some":
+			res, err = library.SomeHooksAgents(in.Names, in.Agents, in.On)
+		case "hooks/remove":
+			res, err = library.RemoveHooks([]string{in.Name})
+		case "hooks/remove-all":
+			res, err = library.RemoveHooks(in.Names)
 		case "skills/install":
 			res, err = library.InstallSkills(in.Source, in.Paths, in.Agents)
 		case "skills/update":

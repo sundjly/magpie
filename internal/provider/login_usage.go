@@ -198,8 +198,8 @@ func loginReading(ctx context.Context, l Login) loginUsageEntry {
 		}
 		c.pending[key] = r
 		ctx, _ = quotaReading(ctx)
+		asked := claudeAskGeneration.Load()
 		go func() {
-			start := time.Now()
 			// read for all who wait for it: no one's ctx cuts it short, but
 			// it is bounded as the Usage page's refresh is
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), subscriptionTimeout)
@@ -211,7 +211,7 @@ func loginReading(ctx context.Context, l Login) loginUsageEntry {
 			// (AskClaudeUsage), as SubscriptionUsage reads it: neither is kept
 			if c.pending[key] == r {
 				delete(c.pending, key)
-				if l.Agent != "claude" || claudeAsked.Load() <= start.UnixNano() {
+				if l.Agent != "claude" || claudeAskGeneration.Load() == asked {
 					if c.m == nil {
 						c.m = map[string]loginUsageEntry{}
 					}
@@ -338,6 +338,7 @@ func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
 	if l.Agent == "copilot" {
 		for _, c := range copilotLogins(copilotConfigDir()) {
 			if strings.EqualFold(c.User, l.User) {
+				orig := c.app
 				q := copilotSubscriptionUsage(ctx, c.app.Token, c.app.Host)
 				// an editor's stale token, the CLI signed in to the same
 				// account: read as the requests are sent (#1238)
@@ -348,7 +349,16 @@ func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
 						q = copilotSubscriptionUsage(ctx, cli.Token, cli.Host)
 					}
 				}
+				// GitHub refused the token, with none in its place: the
+				// account is signed out (echo_ts on Discord)
+				if q.Error == http.StatusText(http.StatusUnauthorized) {
+					copilotRefuse(orig.Token, http.StatusUnauthorized)
+					copilotRefuse(c.app.Token, http.StatusUnauthorized)
+					copilotLapse(orig)
+					q.Error = copilotLapsedText
+				}
 				if q.Error == "" {
+					copilotUnlapse(orig)
 					refreshCopilotEntitlement(c.app, q.Plan, q.AccessSKU)
 				}
 				return q

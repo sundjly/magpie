@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -19,6 +18,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
@@ -1072,7 +1072,7 @@ func gooseIn(at place, cfg string) *Agent {
 				return ""
 			}
 			return wiringOff("Goose", provider, func(k string) (string, bool) { return edit.GetJSON(provider, k) },
-				"base_url", at.v1(), "headers.Authorization", "Bearer "+at.gwKey())
+				"base_url", at.v1(), "headers.Authorization", "Bearer "+gooseKey(at))
 		},
 		Sync: func() error { return syncGooseProvider(provider, at) },
 		// goose loads custom_providers when it starts
@@ -1088,7 +1088,7 @@ func gooseIn(at place, cfg string) *Agent {
 			if agentDir(filepath.Dir(path)) {
 				return true
 			}
-			bin, err := exec.LookPath("goose")
+			bin, err := proc.Look("goose")
 			return err == nil && !goProgram(bin)
 		},
 		Fields: []Field{{
@@ -1170,6 +1170,11 @@ func copilot(home string) *Agent {
 		ID: "copilot", Name: "Copilot CLI", Icon: "githubcopilot", Aliases: []string{"gh-copilot"},
 		UA:  []string{"copilot", "github-copilot"},
 		Bin: "copilot", Dir: dir, Path: path,
+		// GitHub Copilot's JetBrains and VS Code plugins write ~/.copilot
+		// too (agents, skills, hooks, instructions, prompts, ide), so the
+		// folder says nothing of the CLI: its settings.json or the copilot
+		// command does (#1495)
+		dirShared: true,
 		Fields: []Field{{
 			Key: "model", Label: "model",
 			Get: jsonGet(path, "model"),
