@@ -555,6 +555,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", keepsSignIn(s.handle(provider.Anthropic)))
 	mux.HandleFunc("POST /messages", keepsSignIn(s.handle(provider.Anthropic)))
 	mux.HandleFunc("POST /v1/systemone", s.serveSystemOne)
+	// Codex's web.run tool (anton on Discord)
+	mux.HandleFunc("POST /v1"+AlphaSearchPath, s.alphaSearch)
+	mux.HandleFunc("POST "+AlphaSearchPath, s.alphaSearch)
 	mux.HandleFunc("POST /v1/messages/count_tokens", keepsSignIn(s.countTokens))
 	mux.HandleFunc("POST /v1/images/generations", s.images(false))
 	mux.HandleFunc("POST /images/generations", s.images(false))
@@ -864,21 +867,37 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 		if prices {
 			st, find = settings.Load(), provider.GroupFinder()
 		}
-		// for another magpie: the tiers its Codex is offered on each
-		// model, as Codex here is (#1234)
-		var tiers map[string][]any
-		if magpie {
-			tiers = codexTiers(shown)
+		// the tiers Codex here is offered on each model (#1234), for every
+		// client: another magpie offers them to its own Codex, and Cindy
+		// shows its Fast switch on a model whose tiers hold priority
+		// (#1914). A model with none says nothing
+		tiers := codexTiers(shown)
+		// each model by its bare id as well, after the provider/model ids,
+		// when the user asked for it (settings.BareModelIDs): a client
+		// moved from another proxy asks for gpt-5.6-sol (love1sbug on X).
+		// Never for another magpie, whose provider would list each twice.
+		// Each row is the entry the bare id reaches, its label that one's.
+		rows, ids := slices.Clip(shown), map[int]string{}
+		if !magpie && provider.BareModelIDs() {
+			labels = slices.Clip(labels)
+			for _, b := range provider.BareEntries(shown) {
+				ids[len(rows)] = b.ID
+				rows = append(rows, shown[b.Of])
+				labels = append(labels, labels[b.Of])
+			}
 		}
-		for i, e := range shown {
+		for i, e := range rows {
 			m := modelObject(e)
+			if id, ok := ids[i]; ok {
+				m["id"] = id
+			}
 			if magpie {
 				if how := webSearchOf(e, searches); how != "" {
 					m["web_search"] = how
 				}
-				if ts := tiers[e.ID]; len(ts) > 0 {
-					m["service_tiers"] = ts
-				}
+			}
+			if ts := tiers[e.ID]; len(ts) > 0 {
+				m["service_tiers"] = ts
 			}
 			if prices {
 				if pr, ok := provider.EntryPriceIn(st, find, e); ok {
@@ -937,8 +956,16 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) model(w http.ResponseWriter, r *http.Request) {
 	id := unprefixed(r.PathValue("id"))
-	for _, e := range keyAllowed(r, provider.Catalog()) {
+	shown := keyAllowed(r, provider.Catalog())
+	for _, e := range shown {
 		if e.ID == id {
+			writeJSON(w, 200, modelObject(e))
+			return
+		}
+	}
+	// by its bare id, as the list gives it with that setting on
+	if provider.BareModelIDs() {
+		if e, ok := provider.BareEntry(shown, id); ok {
 			writeJSON(w, 200, modelObject(e))
 			return
 		}
@@ -1184,6 +1211,10 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 		if from == provider.Responses {
 			if to := codexTitlesTo(r.Header, body, true); to != "" {
 				s.codexTitle(w, r, body, to)
+				return
+			}
+			if to := codexDescriptionsTo(r.Header, body, true); to != "" {
+				s.codexDescription(w, r, body, to)
 				return
 			}
 			// Codex compacts remotely, a compaction_trigger here, on a
@@ -1805,16 +1836,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		cands, pl, leadAccount = leadFirst(leadScope, parent, cands, pl)
 	}
-	if hit != nil && hit.Use != "" && !(hit.Held && aff.Kept) {
+	if hit != nil && hit.Use != "" {
 		// the rule's member first, over whoever answered last, as a turn
-		// begins; within it, whoever answered last stays — the rule's
-		// member, or who took over when it failed
-		was := cands[0]
-		var ok bool
-		cands, pl, ok = applyRule(hit, ms, cands, pl)
-		if ok && aff.Kept && cands[0].rest != was.rest {
-			aff.Kept, aff.Why = false, "rule"
-		}
+		// begins; within it, whoever answered last stays while it is of
+		// the rule's member, the member's others behind it (#1946)
+		cands, pl = ruleOver(hit, ms, cands, pl, aff)
 	}
 	// the rules of the groups in the group, down the one that goes first
 	var nested []NestedRule
@@ -1907,7 +1933,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	if turn {
 		capture.tools = tools
 	}
-	tr := s.trace.begin(Route{turn: turn, dirOf: dirOf(from, plain), tools: tools, imageTurn: drawingTurnID(metadata.Turn), imageCaller: codexTurnKey(r, call.Agent), TitleLink: link, Pinned: pin, Time: start, Agent: call.Agent, Session: sessionOf(r.Header), Conv: convOf(r.Header, body), ParentSession: titleParentSession(r.Header, metadata, call.Kind), Kind: call.Kind, For: call.For, Model: call.Model, Effort: requestEffort(from, body), Provider: p.ID, Group: group, Rule: hit, Nested: nested, SealedTask: sealedTask, LeadAccount: leadAccount, Subagent: subagent, Affinity: shown, Order: pl.order, Left: pl.left})
+	tierAsked := bodyTier(from, body) // the service tier the client asked for (#1784)
+	tr := s.trace.begin(Route{turn: turn, dirOf: dirOf(from, plain), tools: tools, imageTurn: drawingTurnID(metadata.Turn), imageCaller: codexTurnKey(r, call.Agent), TitleLink: link, Pinned: pin, Time: start, Agent: call.Agent, Session: sessionOf(r.Header), Conv: convOf(r.Header, body), ParentSession: titleParentSession(r.Header, metadata, call.Kind), Kind: call.Kind, For: call.For, Model: call.Model, Effort: requestEffort(from, body), Tier: tierAsked, Provider: p.ID, Group: group, Rule: hit, Nested: nested, SealedTask: sealedTask, LeadAccount: leadAccount, Subagent: subagent, Affinity: shown, Order: pl.order, Left: pl.left})
 	if telemetry != nil {
 		telemetry.routeID = tr.ID
 	}
@@ -1922,6 +1949,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	var skipped []string
 	sent := ""       // the reasoning the last try's model was asked for
 	wentAt := ""     // and the level that went, once translated (wireEffort, #1636)
+	wentTier := ""   // the service tier the last try went out at (noteWireTier, #1784)
 	where := ""      // the last try's provider.Where, for the usage
 	again := 0       // times the last one left has been tried again
 	resealed := 0    // what of the conversation another account sealed was taken out: its reasoning, then its compaction
@@ -1954,6 +1982,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	var busyNow []busyTry  // the members of this round that failed so
 	rounds := 0            // the rounds they were asked again in
 	var waitFrom time.Time // when every member had first failed so
+	refusals := 0          // the tries the safety filter refused so
 	for i := 0; i < len(cands); i++ {
 		c := cands[i]
 		if j := s.laneMate(cands, i, isGroup, gaveWay); j > i {
@@ -2314,8 +2343,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		if wentAt = sent; at.set {
 			wentAt = at.effort
 		}
+		wentTier = at.tier
 		try := Try{ID: c.rest, Model: c.model, Effort: wentAt, Picked: picked, Fixed: fixed, Fast: fast, Start: began, Done: true, Status: call.Status, Millis: time.Since(began).Milliseconds(), Error: call.Error, Queued: queued,
-			Served: call.Usage.Served, Upstream: call.Usage.Upstream, Auto: autoPicked()}
+			Served: call.Usage.Served, Upstream: call.Usage.Upstream, Tier: wentTier, TierServed: call.Usage.Tier, Auto: autoPicked()}
 		if resetFirst != nil {
 			// the reset spent for it before it was asked
 			try.Reset, resetFirst = resetFirst, nil
@@ -2425,6 +2455,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				continue
 			}
 		}
+		if hw.failed() && hw.refused {
+			refusals++
+			if !refusalAsksAgain(refusals) {
+				// asked as many times as Settings' RefusalRetries lets a
+				// refusal be: nobody else is, and the agent has it now
+				cands = cands[:i+1]
+				last = true
+			}
+		}
 		if !last && hw.failed() && hw.refused {
 			// another account or model may answer what this one refused;
 			// this one isn't set aside, as nothing is wrong with it, and
@@ -2442,8 +2481,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				rec := usage.Record{RouteID: tr.ID, Time: began, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: c.model,
 					ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: providerAccount,
 					Requested: call.Model, Served: call.Usage.Served, Upstream: call.Usage.Upstream,
-					Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-					CacheWrite: call.Usage.CacheWrite, CacheWrite1h: call.Usage.CacheWrite1h, Reasoning: call.Usage.Reasoning, Effort: wentAt, Millis: time.Since(began).Milliseconds(), Status: call.Status,
+					Input: call.Usage.billed().Input, Output: call.Usage.billed().Output, CacheRead: call.Usage.billed().CacheRead,
+					CacheWrite: call.Usage.billed().CacheWrite, CacheWrite1h: call.Usage.billed().CacheWrite1h, Reasoning: call.Usage.billed().Reasoning, Effort: wentAt, Millis: time.Since(began).Milliseconds(), Status: call.Status,
+					TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
 					TTFT: try.TTFT, FirstText: try.FirstText, FirstReasoning: try.FirstReasoning, ReasoningHidden: try.ReasoningHidden, Flow: try.Flow, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 					RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To, c.p, c.model), Archive: call.archiveName(), HandedOn: true}
 				failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
@@ -2485,8 +2525,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				rec := usage.Record{RouteID: tr.ID, Time: began, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: c.model,
 					ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: providerAccount,
 					Requested: call.Model, Served: call.Usage.Served,
-					Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-					CacheWrite: call.Usage.CacheWrite, CacheWrite1h: call.Usage.CacheWrite1h, Reasoning: call.Usage.Reasoning, Effort: wentAt, Millis: time.Since(began).Milliseconds(), Status: call.Status,
+					Input: call.Usage.billed().Input, Output: call.Usage.billed().Output, CacheRead: call.Usage.billed().CacheRead,
+					CacheWrite: call.Usage.billed().CacheWrite, CacheWrite1h: call.Usage.billed().CacheWrite1h, Reasoning: call.Usage.billed().Reasoning, Effort: wentAt, Millis: time.Since(began).Milliseconds(), Status: call.Status,
+					TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
 					TTFT: try.TTFT, FirstText: try.FirstText, FirstReasoning: try.FirstReasoning, ReasoningHidden: try.ReasoningHidden, Flow: try.Flow, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 					RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To, c.p, c.model), Archive: call.archiveName(), HandedOn: true}
 				failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
@@ -2641,6 +2682,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				continue
 			case <-r.Context().Done():
 				call.Status, call.Error = 499, "the agent canceled the request"
+				try.Gone = true
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			}
 			break
 		}
@@ -2657,6 +2700,20 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			try.Fail = failOther
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
+			continue
+		}
+		if !last && hw.failed() && strings.Contains(call.Error, emptyReply) {
+			// a reply that said nothing is a failure of the model or
+			// request, not the account (#1221): the account doesn't rest,
+			// and mates of the same model, likely to end empty too, are
+			// asked last
+			if other == nil {
+				other = &Try{Status: call.Status, Error: call.Error}
+			}
+			try.Fail = failOther
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			skipped = append(skipped, c.label()+": "+call.Error)
+			matesLast(cands[i+1:], c)
 			continue
 		}
 		if !last && hw.failed() {
@@ -2701,6 +2758,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					continue
 				}
 				call.Status, call.Error = 499, "the agent canceled the request"
+				try.Gone = true
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 				break
 			}
 		}
@@ -2718,6 +2777,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				continue
 			case <-r.Context().Done():
 				call.Status, call.Error = 499, "the agent canceled the request"
+				try.Gone = true
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			}
 			break
 		}
@@ -2756,7 +2817,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
 			}
 		}
-		if hw.refused && !hw.passing {
+		if hw.refused && !hw.passing && from == provider.Anthropic && hw.handBack() {
+			// nobody is left, and the agent speaks Anthropic's Messages:
+			// it has the refusal as the vendor said it, stop_reason
+			// "refusal" and its stop_details, which Claude Code answers by
+			// asking its own fallback model (DD on Discord), where a 400
+			// is only an error to it
+		} else if hw.refused && !hw.passing {
 			// nobody is left: the agent is told it was refused, as a
 			// request it shouldn't send again as it is, not handed an empty
 			// reply it would ask again for, paying for each
@@ -2901,8 +2968,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		rec := usage.Record{RouteID: tr.ID, Time: start, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: model,
 			ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: providerAccount,
 			Requested: call.Model, Served: call.Usage.Served, Upstream: call.Usage.Upstream,
-			Input: call.Usage.Input, Output: call.Usage.Output, CacheRead: call.Usage.CacheRead,
-			CacheWrite: call.Usage.CacheWrite, CacheWrite1h: call.Usage.CacheWrite1h, Reasoning: call.Usage.Reasoning, Effort: wentAt, Millis: call.Millis, Status: call.Status,
+			Input: call.Usage.billed().Input, Output: call.Usage.billed().Output, CacheRead: call.Usage.billed().CacheRead,
+			CacheWrite: call.Usage.billed().CacheWrite, CacheWrite1h: call.Usage.billed().CacheWrite1h, Reasoning: call.Usage.billed().Reasoning, Effort: wentAt, Millis: call.Millis, Status: call.Status,
+			TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
 			TTFT: call.TTFT, FirstText: call.FirstText, FirstReasoning: call.FirstReasoning, ReasoningHidden: call.ReasoningHidden, Flow: call.Flow, Sent: sentMs, Own: ownMs, Retried: retriedMs, Queued: queuedMs, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 			RequestID: call.Usage.RequestID, ResponseID: call.Usage.ResponseID, Endpoint: endpointOf(r, from, call.To, lastTried, model), Stop: call.Usage.Stop, Archive: call.archiveName()}
 		if tries > 1 {
@@ -3234,6 +3302,10 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		// before it is signed
 		body = p.WithExtraBody(body, cmp.Or(sessionOf(in), conversationID(in, body)))
 	}
+	if !countsTokens(path) {
+		// the tier it goes at, the user's own fields in it (#1784)
+		noteWireTier(ctx, to, body)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Base(to)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -3343,6 +3415,13 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		// alone, refusing both (Aloha on Discord): asked again with one
 		res, err = provider.RetryOneAuth(p, req, res, func(r *http.Request) (*http.Response, error) { return p.Do(s.client, r) })
 	}
+	if err == nil && to == provider.Chat {
+		// a GLM Coding Plan's key at Zhipu's or Z.ai's pay-as-you-go
+		// endpoint, refused there for want of a balance (1113): asked at
+		// the plan's endpoint, and the provider moved there when it serves
+		// it; else the refusal says what to change (@cleverpigo on X)
+		res, err = provider.RetryZhipuCoding(p, req, res, func(r *http.Request) (*http.Response, error) { return p.Do(s.client, r) })
+	}
 	if err != nil {
 		return res, err
 	}
@@ -3389,13 +3468,14 @@ func claudeCodeHeader(k string) bool {
 	return false
 }
 
-// fromCodex is a request Codex sent — its CLI, exec, the IDE extension or
-// the desktop app — by the User-Agent (codex_cli_rs/0.159.2 (Mac OS 26.6.0;
-// arm64) kitty, Codex Desktop/0.162.3 …) or the originator it gives
-// (codex_cli_rs, codex_exec, codex_vscode, Codex Desktop).
+// fromCodex is a request Codex sent — its CLI, exec, the IDE extension,
+// desktop app or ACP adapter — by the User-Agent (codex_cli_rs/0.159.2
+// (Mac OS 26.6.0; arm64) kitty, Codex Desktop/0.162.3 …) or the originator it gives
+// (codex_cli_rs, codex_exec, codex_vscode, Codex Desktop, acp-extension-codex).
 func fromCodex(in http.Header) bool {
 	for _, v := range []string{in.Get("User-Agent"), in.Get("originator")} {
-		if strings.HasPrefix(strings.ToLower(v), "codex") {
+		v = strings.ToLower(v)
+		if strings.HasPrefix(v, "codex") || strings.HasPrefix(v, "acp-extension-codex") {
 			return true
 		}
 	}
@@ -3547,6 +3627,14 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		}
 		if effortInOutputConfig.MatchString(model) {
 			body = withOutputEffort(body, p.Efforts(model))
+		}
+		if !s.fits(p.ID, offRefused(model), proto) {
+			// a model that refused thinking turned off before (below):
+			// left to the model from the start, not refused again on
+			// every request (auto mode's classifier asks on every action)
+			if nb, ok := withoutThinkingOff(body); ok {
+				body = nb
+			}
 		}
 	}
 	// the effort as the agent sent it, fitted to the model's levels: Qoder's
@@ -3762,7 +3850,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	}
 	if proto == provider.Anthropic && res.StatusCode == http.StatusBadRequest {
 		// a model that always thinks refuses thinking turned off: asked
-		// again with it left to the model
+		// again with it left to the model, and so from then on
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		res.Body.Close()
 		res.Body = io.NopCloser(bytes.NewReader(b))
@@ -3772,7 +3860,8 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(nb), r.Header); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}
-		} else if nb, ok := withoutThinkingOff(body); ok && (alwaysThinks.Match(b) || mandatoryReasoning.Match(b) || thinkingOffRefused.Match(b)) {
+		} else if nb, ok := withoutThinkingOff(body); ok && refusesThinkingOff(b) {
+			s.markUnfit(p.ID, offRefused(model), proto)
 			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(nb), r.Header); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}
@@ -4250,8 +4339,7 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 			req = &r
 			continue
 		}
-		if to == provider.Anthropic && req.ThinkOff && res.StatusCode == http.StatusBadRequest &&
-			(alwaysThinks.Match(b) || mandatoryReasoning.Match(b) || thinkingOffRefused.Match(b)) {
+		if to == provider.Anthropic && req.ThinkOff && res.StatusCode == http.StatusBadRequest && refusesThinkingOff(b) {
 			// a vendor's model that always thinks (GLM-5.3, #699) refuses
 			// the thinking off a client asked for (#1636): asked again
 			// thinking at its least, as it was before, and so from then on
@@ -4842,10 +4930,8 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	ended := false // the upstream said its reply ended
 	see, held := written(zenSee(zen, col.add))
 	err = readSSE(rd, func(_, data string) error {
-		u.add(Usage{Upstream: upstreamOf([]byte(data))})
-		ended = ended || upstreamStop([]byte(data)) != "" ||
-			(actual == provider.Anthropic || actual == provider.Responses) && upstreamEnds(data) ||
-			geminiKin(actual) && geminiEnds([]byte(data))
+		u.add(Usage{Upstream: upstreamOf([]byte(data)), Tier: upstreamTier([]byte(data))})
+		ended = ended || replyEnds(actual, data, upstreamStop([]byte(data)))
 		return dec(data, see)
 	})
 	held()
@@ -5475,8 +5561,12 @@ var effortLevelsNamed = regexp.MustCompile(`(?i)\blow\b\W+(?:medium|high)\b`)
 // quote comes escaped), so a "None" in a sentence isn't it.
 var otherOffNamed = map[string]*regexp.Regexp{
 	"none":    regexp.MustCompile(`(?i)['"]minimal\\?['"]`),
-	"minimal": regexp.MustCompile(`(?i)['"]none\\?['"]`),
+	"minimal": noneQuoted,
 }
+
+// noneQuoted is reasoning effort none named in an error, quoted, as
+// errors listing levels quote them (in JSON a double quote comes escaped).
+var noneQuoted = regexp.MustCompile(`(?i)['"]none\\?['"]`)
 
 // bodyEffort is the reasoning effort a Chat or Responses request asks for,
 // or an Anthropic one in its output_config.
@@ -5771,7 +5861,8 @@ var tooLongRe = regexp.MustCompile(`(?i)context_length_exceeded|prompt is too lo
 // overflowed says a refused request was too long for the model — a
 // request error (400, 413, 422) whose words say so.
 func overflowed(status int, body []byte) bool {
-	return (status == 400 || status == 413 || status == 422) && tooLong(status, string(body))
+	// the words are matched decoded, too (#1669): 上下文 escaped as \uXXXX
+	return (status == 400 || status == 413 || status == 422) && tooLong(status, string(wordsOf(body)))
 }
 
 // tooLong is whether a vendor's error says the conversation no longer

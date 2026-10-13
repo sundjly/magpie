@@ -76,7 +76,19 @@ type Record struct {
 	// Effort is the reasoning the model was asked for — a routing group's
 	// pick for the turn, or the agent's own — as it takes it; "" for none
 	Effort string `json:"effort,omitempty"`
-	Millis int64  `json:"ms"`
+	// The service tier, as OpenAI's service_tier words it ("priority",
+	// "ultrafast", "flex", "default"; "fast" for Claude's speed "fast"):
+	// TierAsked what the client's request asked for, TierSent what went
+	// out to the vendor on this try, after a fast pick or a group member
+	// set Fast asked for priority and an account whose plan doesn't offer
+	// Ultrafast was asked for priority in its place, and TierServed what
+	// the vendor's reply said it ran at. Each is "" when there was none:
+	// TierServed is never taken from what was asked or sent, only from a
+	// reply that names it (#1784)
+	TierAsked  string `json:"tier_asked,omitempty"`
+	TierSent   string `json:"tier_sent,omitempty"`
+	TierServed string `json:"tier_served,omitempty"`
+	Millis     int64  `json:"ms"`
 	// TTFT: ms from the request to its reply's first content — text,
 	// reasoning or a tool call — and FirstText to its first text, counted
 	// as Millis is, so Millis-TTFT is how long the reply took to write;
@@ -558,7 +570,12 @@ func FormatCost(amountUSD float64, currency string, rate float64) string {
 	}
 }
 
-func (t *Totals) add(r Record, price *catalog.Price) {
+func (t *Totals) add(r Record, price *catalog.Price) { t.addFrom(Row{Record: r}, price) }
+
+// addFrom is add for a ledger row, whose speed is told as Row.Decode tells
+// it (a Codex turn of one call read from its session file, by its own rule).
+func (t *Totals) addFrom(row Row, price *catalog.Price) {
+	r := row.Record
 	t.count(r)
 	t.Input += r.Input
 	t.Output += r.Output
@@ -569,7 +586,7 @@ func (t *Totals) add(r Record, price *catalog.Price) {
 	if r.TTFT > 0 && !r.Failed() {
 		t.Timed++
 		t.TTFT += r.TTFT
-		if n, w := r.Decode(); w > 0 {
+		if n, w := row.Decode(); w > 0 {
 			t.DecodeMs += w
 			t.DecodeOut += n
 			t.DecodeN++

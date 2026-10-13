@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
@@ -183,6 +184,11 @@ type Settings struct {
 	// on or off, by the plugin's provider id; one not set follows its
 	// vendor's switch above, which the plugin took over, else is off.
 	PluginCheckins map[string]bool `json:"pluginCheckins,omitempty"`
+	// CheckinOff are the accounts left out of their vendor's daily
+	// check-in while it is on (#1902), each by its entry in the vendor's
+	// check-in file: "<site or provider>|<account id>" ("workbuddy|<uid>",
+	// "trae-cn|<uid>", a plugin's "<provider>|<account>").
+	CheckinOff []string `json:"checkinOff,omitempty"`
 	// MemberModel has a reply's model name the routing group's member
 	// that answered, as magpie's provider/model id (workbuddy/glm-5.3-flash),
 	// rather than the vendor's own name for it, for agents that count
@@ -193,6 +199,13 @@ type Settings struct {
 	// is stuck in a loop of the same few lines (#1359). Off, as by
 	// default, the gateway ends such a reply with an error.
 	NoLoopGuard bool `json:"noLoopGuard,omitempty"`
+	// RefusalRetries is how many more times a request the vendor's safety
+	// filter refused, with nothing said, is asked of another account or
+	// routing group member (#248), unset for every one left. 0 hands the
+	// refusal straight back: to an agent on Anthropic's Messages API as
+	// the vendor's own reply, stop_reason "refusal", which Claude Code
+	// answers by switching to its fallback model itself (DD on Discord).
+	RefusalRetries *int `json:"refusalRetries,omitempty"`
 	// NoAccountDiscovery leaves every agent's sign-in unread (#1535,
 	// MaxHaiCom): no credential file, Keychain item or agent CLI is asked
 	// who is signed in, and no subscription is offered; API-key providers
@@ -229,6 +242,11 @@ type Settings struct {
 	// it: a model's id (provider/model, group/<id>), "off" to turn such an
 	// image away, or empty for one magpie picks (see gateway.seer).
 	Vision string `json:"vision,omitempty"`
+	// VisionEffort is how hard the Image recognition model thinks as it
+	// reads an image (MOMO on Discord): a level of catalog.EffortRank,
+	// fitted to the model's own levels when it is asked, or empty for
+	// magpie's choice, the least the model has (gateway.visionEffort).
+	VisionEffort string `json:"visionEffort,omitempty"`
 	// ImageGen is the model magpie's generate_image tool draws with (the
 	// gateway's /v1/images/generations when a request names no model): a
 	// model's id, "off", or empty for one magpie picks (gateway.drawer).
@@ -241,6 +259,11 @@ type Settings struct {
 	// (gateway.searcher). "off" allows only configured search APIs.
 	// One that is gone, off or can't search gives way to magpie's pick.
 	Searcher string `json:"searcher,omitempty"`
+	// SearcherEffort is how hard the searcher's model thinks as it searches
+	// (MOMO on Discord): a level of catalog.EffortRank, fitted to the
+	// model's own levels when it is asked, or empty to send none, the
+	// model's own default (gateway.searchEffort).
+	SearcherEffort string `json:"searcherEffort,omitempty"`
 	// SearchFirst is what a model that can't search the web is searched
 	// for with first, when both a provider and a search API can (#928):
 	// SearchFirstAPI for the search APIs, the provider's search after them
@@ -329,12 +352,21 @@ type Settings struct {
 	// it (#92: "Opus 5.5", not "Opus 5.5 · Claude Code"), the vendor's names
 	// keeping their provider's after them (see provider.Labels).
 	PlainOwnNames bool `json:"plainOwnNames,omitempty"`
+	// BareModelIDs has the gateway's /v1/models list each model by its id
+	// without the provider as well ("gpt-5.6-sol" beside
+	// "codex/gpt-5.6-sol"), for clients moved from another proxy that ask
+	// for bare ids (love1sbug on X; provider.BareEntries). Off by default.
+	BareModelIDs bool `json:"bareModelIDs,omitempty"`
 	// CodexAgentsV1 has the OpenAI models magpie hands Codex — the ChatGPT
 	// account's own, their codex/ ids and the groups one is in — say
 	// multi_agent_version "v1" (#141): their subagents are then handed
 	// their tasks as text, which a magpie-served subagent can read, where
-	// V2's are sealed by OpenAI's server. Codex's features.multi_agent_v2
-	// still wins, and a thread keeps the version it started with.
+	// V2's are sealed by OpenAI's server, and it is V1 that a ChatGPT
+	// lead's subagent on a magpie-served model needs (a V2 task to a
+	// non-ChatGPT model fails). Codex's own features.multi_agent_v2 would
+	// still win: where it is on in the config magpie routes, magpie says so
+	// (internal/agent/codex.go, and the Settings row) and leaves it to the
+	// user to turn off. A thread keeps the version it started with.
 	CodexAgentsV1 bool `json:"codexAgentsV1,omitempty"`
 	// CodexTitles is where the requests Codex makes for a thread's title
 	// (thread_title, thread_title_reconsideration: a hidden turn of their
@@ -342,6 +374,12 @@ type Settings struct {
 	// as Codex sends them, "off" answered by magpie with no title and sent
 	// nowhere, or a model's id (provider/model, group/<id>) that writes it.
 	CodexTitles string `json:"codexTitles,omitempty"`
+	// CodexDescriptions is where the request Codex makes for a thread's
+	// description (thread_description: its own hidden turn, on Codex's own
+	// model through its ChatGPT sign-in) goes: "" as Codex sends it, or a
+	// model's id (provider/model, group/<id>) that writes it. It is not
+	// CodexTitles: a description asks for {"description"} alone.
+	CodexDescriptions string `json:"codexDescriptions,omitempty"`
 	// CodexAutoReview is the model Codex's auto-review (approvals_reviewer
 	// = "auto_review": the guardian that decides an approval in the user's
 	// place) runs on (#938): a model's id (provider/model, group/<id>) put
@@ -520,6 +558,12 @@ type Settings struct {
 	// than by its own id, for an id no rule of magpie's matches up
 	// (kyzhouxu, #583). Absent leaves it to its id.
 	ModelSameAs map[string]string `json:"modelSameAs,omitempty"`
+	// ModelKinds is what the user said a model makes, by "<provider
+	// id>/<model id>": "image" or "video", for a provider set up with a
+	// base URL whose own model list doesn't say so (shen-joe, #1399).
+	// Absent leaves it to the vendor's list and the model's name (see
+	// provider.SetModelKind).
+	ModelKinds map[string]string `json:"modelKinds,omitempty"`
 	// The main window's size as it last settled, width and height, so it
 	// opens at it again after a restart: the size it is restored to, kept as
 	// it was while it is maximised, and a side fitted to a smaller screen
@@ -907,7 +951,9 @@ func loadChecked() (Settings, error) {
 		}
 		return s.normal(), fmt.Errorf("could not read settings at %s: %w", Path(), err)
 	}
-	// parsed once: this runs for every model of every agent
+	// parsed on every call: a caller that asks many times in one look holds
+	// what it read (provider.Hold's heldSettings) rather than asking again
+	parses.Add(1)
 	if perr := json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &s); perr != nil {
 		// one left all zero by a crash (#1505) is its last good generation
 		bak, ferr := lastgood.Fallback(Path(), b, validSettings)
@@ -920,6 +966,14 @@ func loadChecked() (Settings, error) {
 	}
 	return s.normal(), err
 }
+
+// parses counts settings.json's parses (Parses).
+var parses atomic.Int64
+
+// Parses is how many times settings.json has been parsed in this process,
+// for a test that a look holding the settings doesn't read them again for
+// each thing it looks at.
+func Parses() int64 { return parses.Load() }
 
 // validSettings is settings.json's contents read as Settings.
 func validSettings(b []byte) bool {
@@ -942,7 +996,7 @@ func CheckProxy(p string) error {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
-		return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", p)
+		return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080")
 	}
 	return nil
 }
@@ -1087,6 +1141,10 @@ func save(s Settings, recording bool) error {
 	if s.CodexTitles != "" && s.CodexTitles != "off" && !strings.Contains(s.CodexTitles, "/") {
 		return fmt.Errorf("the model for Codex's titles must be a model's id such as openai/gpt-5-mini, or off, not %q", s.CodexTitles)
 	}
+	s.CodexDescriptions = strings.TrimSpace(s.CodexDescriptions)
+	if s.CodexDescriptions != "" && !strings.Contains(s.CodexDescriptions, "/") {
+		return fmt.Errorf("the model for Codex's descriptions must be a model's id such as openai/gpt-5-mini, not %q", s.CodexDescriptions)
+	}
 	s.CodexAutoReview = strings.TrimSpace(s.CodexAutoReview)
 	if s.CodexAutoReview != "" && !strings.Contains(s.CodexAutoReview, "/") {
 		return fmt.Errorf("the model for Codex's auto-review must be a model's id such as openai/gpt-5-mini, not %q", s.CodexAutoReview)
@@ -1096,6 +1154,11 @@ func save(s Settings, recording bool) error {
 		return fmt.Errorf("the model for Codex's subagents must be a model's id such as codex/gpt-5.5, not %q", s.CodexSubagentModel)
 	}
 	s.Searcher = strings.TrimSpace(s.Searcher)
+	for _, e := range []*string{&s.VisionEffort, &s.SearcherEffort} {
+		if *e = strings.ToLower(strings.TrimSpace(*e)); *e != "" && !slices.Contains(catalog.EffortRank, *e) {
+			return fmt.Errorf("a model's reasoning must be one of %s, or empty for the default, not %q", strings.Join(catalog.EffortRank, ", "), *e)
+		}
+	}
 	if s.SearchFirst = strings.TrimSpace(s.SearchFirst); s.SearchFirst == SearchFirstModel {
 		s.SearchFirst = ""
 	}

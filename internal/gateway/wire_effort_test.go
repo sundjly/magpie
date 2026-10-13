@@ -25,6 +25,12 @@ var chatHi = sse(
 	`data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 	`data: [DONE]`)
 
+// responsesHi is the same reply from a Responses API, which reads its own
+// events only: a Chat stream from it is no reply (#1933).
+var responsesHi = sse(
+	`data: {"type":"response.output_text.delta","item_id":"m1","output_index":0,"content_index":0,"delta":"hi"}`,
+	`data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"input_tokens":7,"output_tokens":1}}}`)
+
 // A user-added provider whose model's levels no one lists (#1636,
 // jswysnemc): a client asking reasoning off or minimal on another API
 // than the provider's went at another level, while the request log and
@@ -50,8 +56,11 @@ func TestTranslatedEffortLoggedAsSent(t *testing.T) {
 		{provider.Chat, "/v1/chat/completions", `{"model":"m1","stream":true,"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`, "none", "none", "reasoning_effort=none"},
 	} {
 		f := &fake{t: t, reply: chatHi}
-		if c.up == provider.Anthropic {
+		switch c.up {
+		case provider.Anthropic:
 			f.reply = anthropicHi
+		case provider.Responses:
+			f.reply = responsesHi
 		}
 		setup(t, c.up, f)
 		s := New()
@@ -98,6 +107,11 @@ func TestTranslatedThinkingOffRefused(t *testing.T) {
 		// MiniMax's and Volcengine Ark's wordings (#1141)
 		`invalid params, model \"MiniMax-M3.1-Flash-Preview\" requires adaptive thinking; thinking.type=\"disabled\" (including reasoning.effort=none) is not allowed (2013)`,
 		"thinking.type `disabled` is not supported by this model Request id: 0217",
+		// Sub2API's gpt-6.1-sol reads disabled as reasoning effort none (#1465)
+		`gpt-6.1-sol does not support reasoning effort \"none\"; use low, medium, high, xhigh or max`,
+		// #699's Chinese, escaped as \uXXXX the way a relay's
+		// json.dumps sends it (#1669)
+		`\u8be5\u6a21\u578b\u59cb\u7ec8\u652f\u6301\u601d\u8003\uff0c\u4e0d\u53ef\u5173\u95ed`,
 	} {
 		t.Run(fmt.Sprint(i), func(t *testing.T) { translatedThinkingOffRefused(t, refusal) })
 	}

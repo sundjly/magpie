@@ -418,11 +418,41 @@ var refreshing sync.WaitGroup
 // host left running: for tests that watch the providers' list on disk.
 func Refreshed() { refreshing.Wait() }
 
-// Settle waits for Cached's refreshes to end, then stops the host: for
-// tests, whose folders the host runs in go when they end. Each ask is
-// bounded and the retries are few, so this waits a bounded time even for
-// a host that never answers.
+// Told waits for the hooks told of a change or a sign-in (OnChange,
+// OnSignIn) to end: for tests, so that a change one test made is not told
+// in the next, nor written into its folder as it goes.
+func Told() {
+	telling.Lock()
+	for telling.n > 0 {
+		telling.Wait()
+	}
+	telling.Unlock()
+}
+
+// Answered is whether what Cached gives now is the plugins' own answer,
+// rather than what was kept from before they were last asked. A page that
+// would otherwise read "signs in to nothing" out of an empty list can say
+// so only when this holds: an empty list before the answer arrives means
+// "not asked yet", not "none" (#1112).
+func Answered() bool {
+	provMu.Lock()
+	defer provMu.Unlock()
+	return provGood
+}
+
+// Settle waits for Cached's refreshes to end, stops the host, waits for
+// the hooks told of a change (Told) and forgets the plugins (UseCached
+// nil): for tests, whose folders the host runs in go when they end, so
+// the next test starts with nothing of this one's running or seen. Each
+// ask is bounded and the retries are few, so this waits a bounded time
+// even for a host that never answers.
 func Settle() {
+	refreshing.Wait()
+	Restart()
+	// what the host said of a sign-in is written before the folder goes
+	// (#1935); a hook that read the providers to know the account's
+	// started a host again, which goes too
+	Told()
 	refreshing.Wait()
 	Restart()
 	// and no host goes on finishing its calls in a folder going away
@@ -435,6 +465,12 @@ func Settle() {
 	for _, h := range hs {
 		h.stop()
 	}
+	// nor is the restart, or a sign-in a host saved, told in the next test
+	Told()
+	// and the plugins go with the folder: the next test's, in a folder of
+	// its own, are not taken for the plugins changed (checkList), nor
+	// answered with these
+	UseCached(nil)
 }
 
 // Cached is the plugins' providers as last asked, without starting the

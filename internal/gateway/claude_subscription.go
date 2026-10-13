@@ -2499,9 +2499,11 @@ func renderClaudePrompt(req *Request) ([]map[string]any, error) {
 		// instructions) found nothing cached past Claude Code's own prompt.
 		// The mark's TTL is the one Claude Code uses (claudeCacheTTL, pinned
 		// in cleanClaudeEnv): Anthropic refuses a 1h mark after a 5m one.
-		blocks = append(blocks, map[string]any{"type": "text", "text": text.String(), "cache_control": map[string]string{"type": "ephemeral", "ttl": "1h"}})
+		blocks = append(blocks, map[string]any{"type": "text", "text": text.String(), "cache_control": cacheMark1h()})
 		text.Reset()
 	}
+	instructions := len(blocks) - 1
+	chunk := -1
 	offered := offeredTools(req.Tools)
 	// A conversation with replies in it is told in two parts: the turns
 	// already answered, and the one to answer now (from the user message
@@ -2509,6 +2511,17 @@ func renderClaudePrompt(req *Request) ([]map[string]any, error) {
 	// as one stretch of Human:/Assistant: text, the images of earlier turns
 	// read as just sent, and the model answered them again (#1365).
 	split := historyEnd(req.Messages)
+	// The history is told in chunks, each a block of its own (historyChunk).
+	// A conversation with no reply that calls no tool, as a sub-agent's
+	// loop of tool calls (Claude Code's AgentSummary asks a summary of one
+	// with its last results), has no history: its every message but the
+	// last is chunked instead, which a later request of the same loop
+	// repeats. One with a history later is told it wrapped, from its first
+	// message on, so nothing is lost there either.
+	chunked := split
+	if split == 0 {
+		chunked = len(req.Messages) - 1
+	}
 	for i, m := range req.Messages {
 		if split > 0 && i == 0 {
 			text.WriteString(historyOpen)
@@ -2523,11 +2536,43 @@ func renderClaudePrompt(req *Request) ([]map[string]any, error) {
 		text.WriteString(label + ": ")
 		blocks = renderParts(blocks, &text, m.Parts, offered)
 		text.WriteString("\n\n")
+		if i+1 <= chunked && (i+1)%historyChunk == 0 {
+			blocks = append(blocks, map[string]any{"type": "text", "text": text.String()})
+			text.Reset()
+			chunk = len(blocks) - 1
+		}
 	}
 	if split > 0 {
 		text.WriteString("</current_turn>")
 	}
+	// The one mark a run's first message may have (Claude Code keeps three
+	// of Anthropic's four) moves from the instructions to the history's
+	// last whole chunk, which holds them too: a later run started anew for
+	// the same conversation, as after a change of tools or a turn that
+	// missed its run, reads the history this one wrote, found within
+	// Anthropic's 20-block lookback, instead of writing all of it again.
+	// The turn to answer is never chunked when there is a history: a later
+	// run whose history ends further on tells those messages in it.
+	if chunk >= 0 {
+		if instructions >= 0 {
+			delete(blocks[instructions], "cache_control")
+		}
+		blocks[chunk]["cache_control"] = cacheMark1h()
+	}
 	return closeBlocks(blocks, &text), nil
+}
+
+// historyChunk is how many messages of the history renderClaudePrompt puts
+// in a block. Blocks end at the same messages in every run told the same
+// conversation, so their text is the same; 20 blocks back from a run's
+// mark reach a mark 320 messages earlier.
+const historyChunk = 16
+
+// cacheMark1h is the prompt-cache mark on what magpie gives a run: an
+// hour's, as Claude Code's own (claudeCacheTTL, pinned in cleanClaudeEnv),
+// since Anthropic refuses a 1h mark after a 5m one.
+func cacheMark1h() map[string]string {
+	return map[string]string{"type": "ephemeral", "ttl": "1h"}
 }
 
 // historyOpen and historyClose wrap the turns a run started anew is told
@@ -3814,7 +3859,7 @@ func relay(w http.ResponseWriter, r *http.Request, from provider.Protocol, name 
 				// the status Claude Code got, else a guess from the words
 				if head[n-1].Status >= 400 {
 					code = head[n-1].Status
-				} else if quotaWords.MatchString(msg) {
+				} else if quotaSaid(msg) {
 					code = 429
 				}
 			}
@@ -3875,7 +3920,7 @@ func relay(w http.ResponseWriter, r *http.Request, from provider.Protocol, name 
 		usage.add(Usage{ErrType: col.errCode})
 		if col.errStatus >= 400 {
 			code = col.errStatus
-		} else if quotaWords.MatchString(col.err) {
+		} else if quotaSaid(col.err) {
 			code = 429
 		}
 		return writeError(w, from, code, name+": "+col.err), col.err

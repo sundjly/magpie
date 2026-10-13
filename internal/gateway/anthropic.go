@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -356,6 +357,19 @@ var anthropicModel = regexp.MustCompile(`(?i)(?:^|[/.:-])claude-`)
 // glm-5.3 "thinking.type `disabled` is not supported by this model"
 // (#1141).
 var alwaysThinks = regexp.MustCompile(`(?i)always engages in thinking|thinking (?:can ?not|can't) be (?:disabled|turned off)|enable_thinking[^"]{0,60}restricted to true|始终(?:支持|开启|启用)?思考|思考[^"]{0,20}(?:不可|无法|不能)关闭|requires adaptive thinking\W+thinking\.type\W+disabled\W+\(including reasoning\.effort=none\) is not allowed|thinking\.type \x60disabled\x60 is not supported by this model`)
+
+// refusesThinkingOff is an Anthropic endpoint turning away a request
+// with thinking turned off (thinking.type disabled): a model that always
+// thinks (alwaysThinks), OpenRouter's mandatory reasoning, a Claude that
+// takes no disabled (thinkingOffRefused), or a relay reading disabled as
+// reasoning effort none and turning that level away by naming the ones
+// it takes: Sub2API's gpt-6.1-sol, "gpt-6.1-sol does not support reasoning
+// effort \"none\"; use low, medium, high, xhigh or max" (#1465).
+func refusesThinkingOff(b []byte) bool {
+	// alwaysThinks' words are matched decoded, too (#1678): 思考 escaped as \uXXXX
+	return alwaysThinks.Match(wordsOf(b)) || mandatoryReasoning.Match(b) || thinkingOffRefused.Match(b) ||
+		effortLevelsNamed.Match(b) && noneQuoted.Match(b)
+}
 
 // ThinksOnlyWhenAsked is a model that takes thinking turned off on the
 // Messages API whatever its levels: one of Anthropic's own (anthropicModel,
@@ -1147,7 +1161,12 @@ func decodeAnthropic(data string, emit func(Event)) error {
 		} `json:"error"`
 	}
 	if err := decodeJSON([]byte(data), &ev); err != nil {
-		return nil // keep going: pings and unknown shapes are harmless
+		// keep going: pings and unknown shapes are harmless, but an
+		// error in a shape of its own is still the reply's end (#1933)
+		if e, ok := carriedError(data); ok {
+			emit(e)
+		}
+		return nil
 	}
 	switch ev.Type {
 	case "message_start":
@@ -1200,7 +1219,7 @@ func decodeAnthropic(data string, emit func(Event)) error {
 		}
 		emit(Event{Kind: KUsage, Usage: ev.Usage.usage(), SafeguardResults: review, StopDetails: stopDetails(ev.Delta.StopDetails)})
 	case "error":
-		emit(Event{Kind: KError, Text: ev.Error.Message, Code: refusedCode(data)})
+		emit(Event{Kind: KError, Text: cmp.Or(ev.Error.Message, ev.Error.Type, streamErrorText(data)), Code: refusedCode(data)})
 	}
 	return nil
 }

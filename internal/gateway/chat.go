@@ -36,7 +36,9 @@ type cRequest struct {
 	Messages []struct {
 		Role             string          `json:"role"`
 		Content          json.RawMessage `json:"content"`
-		ReasoningContent string          `json:"reasoning_content,omitempty"`
+		ReasoningContent json.RawMessage `json:"reasoning_content,omitempty"`
+		Reasoning        json.RawMessage `json:"reasoning,omitempty"`
+		ReasoningDetails json.RawMessage `json:"reasoning_details,omitempty"`
 		ToolCalls        []cToolCall     `json:"tool_calls,omitempty"`
 		ToolCallID       string          `json:"tool_call_id,omitempty"`
 	} `json:"messages"`
@@ -94,8 +96,15 @@ func parseChat(body []byte) (*Request, error) {
 			r.Messages = append(r.Messages, Message{Role: "user", Parts: chatParts(m.Content)})
 		case "assistant":
 			msg := Message{Role: "assistant"}
-			if m.ReasoningContent != "" {
-				msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: m.ReasoningContent})
+			// an earlier turn's thinking comes back in any of
+			// messageReasoning's spellings, and every upstream that
+			// thinks wants it as the thinking part
+			if think := reasoningText(map[string]json.RawMessage{
+				"reasoning_content": m.ReasoningContent,
+				"reasoning":         m.Reasoning,
+				"reasoning_details": m.ReasoningDetails,
+			}); think != "" {
+				msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: think})
 			}
 			msg.Parts = append(msg.Parts, chatParts(m.Content)...)
 			for _, tc := range m.ToolCalls {
@@ -762,6 +771,16 @@ type cUsage struct {
 	CachedTokens             int `json:"cached_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	// what a plugin's step collected of its conversation's earlier steps,
+	// which their own replies couldn't count (the Cursor plugin's usage
+	// events that showed late, yetone/magpie#1053): billed with the step,
+	// never its prompt, which a client reads as how full its context is
+	MagpieDeferred *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
+	} `json:"magpie_deferred,omitempty"`
 }
 
 func (u cUsage) usage() Usage {
@@ -787,6 +806,10 @@ func (u cUsage) usage() Usage {
 	}
 	if u.CompletionTokensDetails != nil {
 		out.Reasoning = u.CompletionTokensDetails.ReasoningTokens
+	}
+	if d := u.MagpieDeferred; d != nil && d.PromptTokens+d.CompletionTokens > 0 {
+		out.Deferred = &Usage{Input: max(d.PromptTokens-d.CachedTokens-d.CacheWriteTokens, 0), Output: d.CompletionTokens,
+			CacheRead: d.CachedTokens, CacheWrite: d.CacheWriteTokens}
 	}
 	return out
 }
@@ -920,15 +943,28 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		} `json:"error"`
 	}
 	if err := decodeJSON([]byte(data), &ch); err != nil {
+		// an error in a shape of its own, {"error":"…"}, is still the
+		// reply's end, not a chunk to pass over (#1933)
+		if e, ok := carriedError(data); ok {
+			emit(e)
+		}
 		return nil
 	}
 	if ch.Error != nil {
-		emit(Event{Kind: KError, Text: ch.Error.Message, Code: refusedCode(data)})
+		emit(Event{Kind: KError, Text: cmp.Or(ch.Error.Message, streamErrorText(data)), Code: refusedCode(data)})
 		return nil
 	}
 	if !d.started {
 		d.started, d.tool = true, -1
-		emit(Event{Kind: KStart, MsgID: ch.ID, Model: ch.Model})
+		// most streams count the prompt only at their end, but one that
+		// counts it on its first chunk tells it at the start, as
+		// Anthropic's message_start does (#1887)
+		var prompt Usage
+		if ch.Usage != nil && ch.Usage.PromptTokens > 0 {
+			u := ch.Usage.usage()
+			prompt = Usage{Input: u.Input, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite}
+		}
+		emit(Event{Kind: KStart, MsgID: ch.ID, Model: ch.Model, Usage: prompt})
 	}
 	for _, c := range ch.Choices {
 		// Translation has one reply: lock onto the first readable choice
@@ -993,7 +1029,7 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 			emit(Event{Kind: KStop, Stop: stopFromChat(c.FinishReason)})
 		}
 	}
-	if ch.Usage != nil && (ch.Usage.PromptTokens > 0 || ch.Usage.CompletionTokens > 0) {
+	if ch.Usage != nil && (ch.Usage.PromptTokens > 0 || ch.Usage.CompletionTokens > 0 || ch.Usage.MagpieDeferred != nil) {
 		emit(Event{Kind: KUsage, Usage: ch.Usage.usage()})
 	}
 	return nil

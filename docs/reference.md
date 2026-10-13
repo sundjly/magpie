@@ -2,6 +2,8 @@
 
 The full manual: every agent magpie wires, every provider option, the gateway, routing, plugins, the CLI, Docker, sync and the files magpie keeps. For the overview, see the [README](../README.md).
 
+Renamed a project folder? See [relocating Claude Code sessions](session-relocation.md).
+
 One place to pick every agent's model: Codex on DeepSeek, Claude Code
 on Kimi, Gemini CLI on GLM, from the menu bar. [usemagpie.ai](https://usemagpie.ai)
 
@@ -12,6 +14,7 @@ the model it is set to. Click a value, pick a model. That is the whole app.
 
 It lives in the menu bar: click the icon and a panel drops down; the same
 screen also opens as a normal window (`magpie`, or *Open magpie* in the tray menu),
+which opens on the page you last left, as a Mac app comes back as it was,
 and there is a terminal version (`magpie tui`) and a plain CLI. The
 terminal version serves the gateway while it is open when no other magpie
 (the app, `magpie web`, `magpie serve`) does, and says so on its status
@@ -93,6 +96,7 @@ line; agents connected to magpie lose it when it quits.
 | OpenCode     | `~/.config/opencode/opencode.json(c)` (`$OPENCODE_CONFIG_DIR`) | model, small |
 | OpenChamber  | `~/.config/openchamber/preferences.json` (`$OPENCHAMBER_DATA_DIR`; magpie's provider in OpenCode's config) | model, small (its own defaults, over OpenCode's) |
 | MiMo Code    | `~/.config/mimocode/mimocode.json(c)` | model, small |
+| DevEco Code  | `~/.config/deveco/deveco.json(c)` (`$DEVECO_CONFIG_DIR`; its key is `magpie-deveco`, as parts of it send OpenCode's User-Agent) | model, small |
 | Pi           | `~/.pi/agent/settings.json`       | model           |
 | StepCode     | `~/.stepcode/config.toml` (+ `models.json`; `$STEP_CODING_AGENT_DIR`, `$STEPCODE_CONFIG_DIR`) | model |
 | Aside        | `~/.aside/u/0/settings.json` (+ `models.json`; the first account, the only one magpie wires) | model, effort, fast, standard, deep, visual, image |
@@ -140,7 +144,7 @@ line; agents connected to magpie lose it when it quits.
 | Snow CLI     | `~/.snow/profiles/magpie.json` (`$SNOW_CONFIG_DIR`), made the active profile and copied to `config.json` | model (the user's other profiles' models too; Snow App takes the profile in with "Sync Snow CLI API config") |
 | Alma         | Alma's local API (`localhost:23001`, while Alma runs; alma-server's data in `$ALMA_DATA_DIR`, `$XDG_DATA_HOME/alma` or `~/.local/share/alma` on Linux) | model (Alma's default; magpie's models as a provider), and Image Generation's model when it is Auto: the one magpie draws with |
 
-Provider-scoped agents (OpenCode, MiMo Code, Pi, OmO, StepCode, Aside, Goose, Crush, omp, Hermes Agent) take `provider/model`.
+Provider-scoped agents (OpenCode, MiMo Code, DevEco Code, Pi, OmO, StepCode, Aside, Goose, Crush, omp, Hermes Agent) take `provider/model`.
 Only agents that are installed or configured are shown.
 
 ### Notes on some agents
@@ -301,8 +305,18 @@ card each count is a button for its requests in the list below (the
 Failed and Retried filters, `failed=1` and `retried=1`). A try a vendor
 refused or turned away keeps its own row, for what it billed and why, marked
 handed on, and isn't counted as a request. The CSV's last columns are
-`tries` (on the final row, when the request took more than one) and
-`handed_on`.
+`tries` (on the final row, when the request took more than one),
+`handed_on`, then `tier_asked`, `tier_sent` and `tier_served`: the
+service tier the client asked for (Claude's fast speed reads `fast`), the
+one that try went out at (a fast pick sends `priority`; Ultrafast becomes
+`priority` on an account whose plan doesn't offer it), and the one the
+vendor's reply said it ran at, empty when the reply doesn't say. The JSON
+log keeps them as `tier_asked`, `tier_sent` and `tier_served`, and each
+try in `/v1/magpie/route` has `tier` and `tier_served`. The last column,
+`upstream_stop`, is why the upstream said its reply ended, in its own
+words (`stop`, `tool_calls`, `end_turn`, a Responses reply's
+`completed`), empty when it said none. A request's row on the Requests
+page shows it as Upstream stop reason.
 
 **Output speed** (tok/s on the Usage and Routing pages, `magpie usage`) is
 output tokens over the time after the first token, summed per request: the
@@ -338,27 +352,38 @@ item to its last, never from the output of a tool the call itself ran,
 which an older rollout writes before the call's token count. OpenCode's rows
 show none.
 A call whose session file timed it (a Codex turn of one call) shows its own
-speed as before. When that call reasoned, the file has its first token but
-not its first text, so no speed is measured; it shows the least its answer
-wrote at instead: its output less the reasoning, all written after the first
-token, over the time from the first token to its end. Its whole output over
-that time would count reasoning written before the first token and read
-high. A floor never mixes into a measured speed: the Speed trend and
+speed when the time after its first token is a second or more and it wrote
+100 tokens or more in it (`usage.CodexWindowMs`, `usage.CodexBodyTokens`).
+That time can be one network push rather than the writing: a reply whose
+first token came at 6.8 s and the rest 0.2 s later read 1,900 tok/s. When
+that call reasoned, the file has its first token but not its first text, so
+no speed is measured; it shows the least its answer wrote at instead: its
+output less the reasoning, all written after the first token, over the time
+from the first token to its end, held to the same second and 100 tokens. Its
+whole output over that time would count reasoning written before the first
+token and read high. A Codex turn of one call that tells neither shows the
+least it wrote at over the whole turn, the wait for the first token in it
+(`≥120 tok/s` for 1,200 tokens in 10 s), by the same rule as any floor over
+a whole time: 1,000 tokens or more over a second or more. Under that the
+wait is too much of the time to tell anything, so an 11-token answer in
+2.75 s shows none, as an 815-token Claude Code reply does. Gateway rows and other agents' keep their own
+speed. A floor never mixes into a measured speed: the Speed trend and
 `magpie usage` count timed calls only.
 
 A group's speed (a row of the Usage page's ranking, by model, provider or
 agent, its Output speed card, and the overview's lists) says how many
 replies it is of, by one rule: with replies whose speed was measured, their
-speed and how many they are (`125 tok/s (1)`, not beside "260 requests"
-alone); with rows that tell a floor, the least those wrote at and how many
-(`≥100 tok/s (30)`); with both, both, the measured first
-(`125 tok/s (1) · ≥50 tok/s (259)`), as a few measured replies may not
-stand for the rest and a floor is no measure; with neither, nothing. The
-Output speed card shows the measured speed as its figure and the floor
-under it. The tooltip says what each is of. A ranking by speed orders and
-bars a group by its measured speed, or its floor when it has none
-(`usage.Totals` `decode_n`, `floor_out`, `floor_ms`, `floor_n`;
-`usage.Row.Floor`).
+speed and how many they are (`62 tok/s · 2 timed replies`, not beside "260
+requests" alone); with rows that tell a floor, the least those wrote at and
+how many (`≥100 tok/s · 30 replies`); with both, both, the one of more
+replies first (`≥50 tok/s · 259 replies; 125 tok/s · 1 timed reply`), as a
+few measured replies may not stand for the rest; with neither, nothing.
+Counts are words, never a bare number in parentheses. The Output speed card
+shows the first as its figure, its count beside it, the other under it, and
+the mean wait for the first token on a line of its own with how many timed
+replies it is of. The tooltip says what each is of. A ranking by speed
+orders and bars a group by the figure it shows first (`usage.Totals`
+`decode_n`, `floor_out`, `floor_ms`, `floor_n`; `usage.Row.Floor`).
 
 It lists **accounts** too: each Codex, Claude or other subscription account's
 tokens and cost, by the account that actually answered — the one that took
@@ -423,6 +448,15 @@ WorkBuddy (China)'s daily check-in (签到) is pressed from the app's Usage card
 which checks in every account signed in on this computer at once; its
 WorkBuddy lines say how today's went. A shared magpie's accounts are checked
 in on that magpie, from its own app, TUI or CLI.
+
+A vendor with two or more accounts lists each under its Daily check-in in
+**Settings → Usage**, with its own Off/On (#1902). An account turned off is
+left out of the daily check-in and of *Check in now*, the CLI's and the
+TUI's too, while the vendor's other accounts are checked in; its Usage card
+says its auto check-in is off. The choice is kept in `checkinOff` in
+`settings.json`, by the account's entry in the vendor's check-in file
+(`workbuddy|<uid>`), and set with `POST /api/settings/checkin-account
+{key, on}`.
 
 A plugin whose `auth` hook has `checkin` checks its own accounts in the same
 way: once a day while its switch under **Settings → Usage → Plugins** is on,
@@ -1130,6 +1164,7 @@ magpie group add "Opus anywhere" models=claude/claude-opus-5-5,copilot/claude-op
 magpie group opus-anywhere              # one group, its models in order
 magpie group set opus-anywhere models+=openrouter/anthropic/claude-opus-5.5 routing=usage
 magpie group set opus-anywhere models-=copilot/claude-opus-5.5
+magpie group set opus-anywhere routing=weight weight=claude/claude-opus-5-5=3,copilot/claude-opus-5.5=1
 magpie group copy opus-anywhere "Opus test"  # the same models, routing and rules, to change on its own
 magpie group rm opus-anywhere           # one magpie found is hidden; magpie group restore <id> brings it back
 magpie claude group/opus-anywhere       # use it
@@ -1140,14 +1175,18 @@ spare, the one whose allowance renews soonest first), `order` (the first
 model until it can't answer, then the next), `rotate` (each turn to the next
 member), `usage` (least used first) or `pace` (weekly pace: the account with
 the most of its week left per hour until it renews first, so less of a week
-is lost at its reset). A key has no allowance to weigh, so it goes by its
+is lost at its reset) or `weight` (each model takes its share of the
+requests by its weight, smoothly interleaved: `weight=claude/claude-opus-5-5=3`
+gives it three requests for every one a model left at weight 1 takes; a
+weight is 1 to 1000, `weight=` alone clears them all, and a group in the
+group counts as one member, `weight=group/fast=2`). A key has no allowance to weigh, so it goes by its
 order or by what magpie sent it lately — except a sub2api key its owner gave
 a 5-hour, day or 7-day limit: with the provider's Balance URL set to the
 relay's `/v1/usage`, its card shows those windows and routing weighs it by
 them as it does a subscription, resting it till the window renews once the
 relay says `api key 7天限额已用完` — or till its windows are next read short
 of full, its limit raised or its usage reset. A key bought as a plan — Kimi Code, GLM Coding Plan
-or Z.ai, MiniMax Coding Plan, OpenCode Go, Command Code — is weighed by its
+or Z.ai, MiniMax Coding Plan, OpenCode Go, Command Code, Ollama Cloud — is weighed by its
 plan's windows the same way. With one key or account, the Routing page still
 shows what it has left. `stays=` is how long a conversation
 stays with the key or account that answered it: `auto` (the default, while
@@ -1342,6 +1381,18 @@ minutes. Out of credit rests half an hour. Any other failure rests a minute, lon
 again, up to 10 minutes; a subscription that fails with a window used up
 rests until that window renews.
 
+**When the safety filter refuses.** A reply the vendor's safety filter
+refuses before any of it is said rests nobody: it is about what was asked,
+not the account. By default the same request is asked of the model's other
+accounts, then the routing group's other members, until one answers.
+Settings › Models › Replies › *Ask again after a refusal* sets how many more
+are asked: 1, 2 or 3, or *Never ask again*. When nobody else is asked, an
+agent on Anthropic's Messages API (Claude Code) gets the refusal as the
+vendor said it, `stop_reason` `refusal` with its category, which Claude Code
+answers by switching to its own fallback model, as it does on Anthropic's
+API. Codex and Chat clients get a 400 saying the model refused the request,
+which they don't ask again for. Any other 400 is never asked again.
+
 **Through the gateway, or on its own.** Everything above is the gateway's,
 for requests sent through magpie. Claude Code or Codex used on its own
 talks to the vendor with the account it is signed in to, and routing
@@ -1354,6 +1405,18 @@ nothing of yet (see below) is not moved to. Once the account it moved the
 agent off has every window under 90% again, it signs the agent back in to
 it. *Keep … signed in to* turns this off: the agent stays on the first
 account, or on the account you picked, whatever it has left. It changes nothing in the gateway's routing.
+
+With more than one Codex account on, magpie also sets `openai_base_url`
+in Codex's config.toml, so a request the signed-in account has no
+allowance for goes on to the others through the gateway. *Only switch
+Codex's sign-in* under Providers › Codex (or `magpie accounts switch-only
+codex on`) leaves that out: magpie only moves Codex's own sign-in
+(`auth.json`) as above, and Codex's requests go straight to OpenAI, never
+through magpie (#1907). An `openai_base_url` you wrote yourself stays. The
+Codex app and a running `codex app-server` read the sign-in when they
+start, so one already open stays on its account until it is opened again;
+a new `codex` session takes the new one. Connected to magpie, Codex's
+requests go through it as before.
 
 **How often an allowance is read.** Routing uses what was read last and
 never waits for a reading, except the first one after magpie starts (3
@@ -1878,7 +1941,8 @@ expose it publicly without gateway-key authentication.
 Such a page is in **gateway mode**: it shows Providers, Gateway, Routing,
 Usage, Plugins and Settings, with no Agents, Sessions or Library tab, and
 Settings leaves out what is written into this machine's agents (provider in
-model names, Codex subagents, long conversations, Codex thread titles) and
+model names, Codex subagents, long conversations, Codex thread titles,
+Codex thread descriptions) and
 the desktop's alerts and tray. `magpie web` is in it by itself when it finds
 no agents on its machine, as in the container, and with
 `magpie web --gateway`. *Settings › General › Gateway mode* picks Automatic,
@@ -1954,6 +2018,7 @@ magpie ls                       # list every agent and its current settings
 magpie claude opus              # set a model (agent names accept prefixes: cc, oc, gem …)
 magpie codex gpt-5.6-sol
 magpie codex effort high        # other fields
+magpie codex effort             # one field, as it is now
 magpie codex xhigh              # bare effort levels are recognised too
 magpie codex deepseek/deepseek-chat   # any catalog model, through the gateway
 magpie claude moonshot/kimi-k2.5
@@ -2040,19 +2105,31 @@ passphrase with PBKDF2-SHA256); nothing in it can be read without the
 passphrase. Restoring replaces providers with the same id and adds the rest;
 one that came without a key keeps the key already there. Agent models are set
 only for agents installed on that machine. Subscriptions are not in it: sign
-in to them on each machine. Piped in, the passphrase is the first line of
-stdin.
+in to them on each machine. Their model picks and settings come along, and
+show once signed in; the restore, and a sync's status on the other machine,
+name the ones still to sign in to. The plugins added from npm or git come
+along too and are installed where it is put back (one added from a folder
+stays on its machine; without keys, an option whose name looks like a key
+is left out); a plugin's sign-in is not carried, a plugin already there is
+left as it is, and one removed on one machine stays on the others. Piped
+in, the passphrase is the first line of stdin.
 
 ### Keeping machines in sync
 
-*Settings → Sync and backup → WebDAV or S3 sync* keeps the same backup on a
-server and brings every machine up to date with it, every 3 minutes while the
-gateway runs. Choose one of these:
+*Settings → Sync and backup → WebDAV, S3 or GitHub sync* keeps the same backup
+on a server and brings every machine up to date with it, every 3 minutes while
+the gateway runs. Choose one of these:
 
 - **WebDAV**: a folder on a WebDAV server such as 坚果云, Nextcloud or a
   Synology.
 - **S3**: a bucket on AWS S3, Cloudflare R2, Backblaze B2, MinIO, Garage, a
   NAS or any other S3-compatible server.
+- **GitHub**: an existing repository, using a fine-grained token
+  with Contents read and write permission. The repository must be private:
+  sync refuses a public one, whose history would give anyone every sealed version.
+  The address can include a folder, such as `github://owner/repo/magpie-sync`.
+  Each update is a commit to that branch, so the repository also provides a
+  history of the encrypted backup.
 
 The file is sealed on your machine with the passphrase, so the server only
 ever stores ciphertext. Each machine writes only over the version it read (a
@@ -2064,6 +2141,8 @@ magpie webdav on https://dav.jianguoyun.com/dav/ user=me@example.com
 magpie s3 on s3://my-bucket/magpie endpoint=https://<account>.r2.cloudflarestorage.com access-key-id=…
 magpie s3 on s3://backups endpoint=http://nas.local:9000 path-style=yes access-key-id=…
 magpie s3                       # where it syncs to and how the last sync went; magpie s3 now, off
+magpie github on github://owner/private-backups/settings branch=main
+magpie github                   # where it syncs to and how the last sync went; magpie github now, off
 ```
 
 For S3:
@@ -2088,6 +2167,24 @@ For S3:
 - Shared usage is reconciled only after a complete S3 listing. A missing or
   repeated continuation token, or a listing still truncated after 100 pages,
   reports a sync error and keeps previously downloaded usage days in place.
+
+For GitHub:
+
+- Create the repository before enabling sync. Leaving Branch empty uses its
+  default branch. For an empty repository, the first encrypted backup creates
+  the initial commit on that default branch. A selected branch other than the
+  default must already exist.
+- Give a fine-grained token access to this repository with Contents read and
+  write permission. It is asked for by the CLI, never accepted in a command
+  line, and is saved separately from the library's GitHub token.
+- Folder is optional. Files go in `<folder>/magpie/`; every changed backup
+  creates a commit. Unchanged setup creates no backup commit.
+- Use the same encryption passphrase on every computer. It must differ from
+  the GitHub token. The token and sync connection settings stay on each computer.
+- The file limit is 64 MiB. Repository history retains encrypted old versions,
+  including usage files if sharing is enabled.
+- Switching between WebDAV, S3 and GitHub keeps the other services' settings
+  and credentials for switching back; one service syncs at a time.
 
 ## OTLP export
 

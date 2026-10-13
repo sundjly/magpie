@@ -128,7 +128,7 @@
     <p>キーは <code>~/.config/magpie/providers.json</code> に保存され、あなただけが読めます。magpie はシェルの環境変数からキーを読みません。追加したものだけが使われます。</p>
 
     <h2 id="agents"><a class="anchor" href="#agents">2 · エージェントごとにモデルを選ぶ</a></h2>
-    <p><span class="ui">Agents</span> タブには、このマシンにインストールまたは設定されているエージェントごとに行があります。magpie が対応しているのは Claude Code、Codex、Gemini CLI、OpenCode、MiMo Code、Pi、Goose、Cursor、Copilot CLI、Crush、DeepSeek Harness、Command Code、omp、OmO、Devin、Hermes Agent、MiniMax Code、Grok Build、ZCode、OpenHanako、Alma です。</p>
+    <p><span class="ui">Agents</span> タブには、このマシンにインストールまたは設定されているエージェントごとに行があります。magpie が対応しているのは Claude Code、Codex、Gemini CLI、OpenCode、MiMo Code、DevEco Code、Pi、Goose、Cursor、Copilot CLI、Crush、DeepSeek Harness、Command Code、omp、OmO、Devin、Hermes Agent、MiniMax Code、Grok Build、ZCode、OpenHanako、Alma です。</p>
 
     <figure class="figure">
       <img class="for-light" src="/img/agents-ja-light.png" width="2080" height="1290" loading="lazy" alt="エージェントタブ：エージェントごとに使用中のモデルを示す行と、下部に保存済みのプロファイル">
@@ -145,7 +145,7 @@
       <tr><th>エージェント</th><th>magpie 経由のモデルで書き込まれる内容</th></tr>
       <tr><td>Claude Code</td><td><code>~/.claude/settings.json</code>：<code>env</code> ブロック内の <code>ANTHROPIC_BASE_URL</code>、<code>ANTHROPIC_AUTH_TOKEN</code> とモデル関連の変数</td></tr>
       <tr><td>Codex</td><td><code>~/.codex/config.toml</code>：<code>[model_providers.magpie]</code> テーブルとモデル、一覧は <code>magpie-models.json</code>。ChatGPT のサインインには手を加えません</td></tr>
-      <tr><td>OpenCode、MiMo Code、Pi、Crush</td><td><code>magpie</code> プロバイダのエントリと <code>magpie/provider/model</code></td></tr>
+      <tr><td>OpenCode、MiMo Code、DevEco Code、Pi、Crush</td><td><code>magpie</code> プロバイダのエントリと <code>magpie/provider/model</code></td></tr>
       <tr><td>AtomCode</td><td><code>~/.atomcode/config.toml</code>：<code>magpie</code> プロバイダアカウントと、カタログ内の各モデルのエントリ</td></tr>
       <tr><td>Snow CLI</td><td><code>~/.snow/profiles/magpie.json</code>：<code>magpie</code> プロファイルを作り、使用中のプロファイルにする（Snow App は「Sync Snow CLI API config」で取り込む）</td></tr>
       <tr><td>Gemini CLI</td><td>ゲートウェイを指す <code>GOOGLE_GEMINI_BASE_URL</code>、API キー認証、そしてモデル</td></tr>
@@ -175,6 +175,7 @@
       <tr><td>持ち回り <code>rotate</code></td><td>各会話の次のターンを、次のメンバーのアカウントやキーに送り、負荷を分散します。</td></tr>
       <tr><td>使用量の少ない順 <code>usage</code></td><td>利用枠の残りが最も多いアカウントやキー。</td></tr>
       <tr><td>週のペース <code>pace</code></td><td>更新までの 1 時間あたりの週の枠の残りが最も多いアカウント、つまりリセット時に失う分が最も多いもの。これにより各メンバーの週の枠がリセットで無駄になりにくくなります。週の枠がなく 5 時間枠だけのアカウント（Claude Enterprise）は、更新までの 1 時間あたりの 5 時間枠の残りで判断されるので、ほぼ常に最初になります。使用率が 90% 以上のものは、他が応答できなくなるまで待ちます。キーは最近送ったトークン数で判断します。</td></tr>
+      <tr><td>重み順 <code>weight</code></td><td>グループ編集画面で各モデルの横に設定した重み（1〜1000、未設定は 1）に応じてリクエストを分けます。重み 3 のモデルは重み 1 のモデルが 1 件受けるごとに 3 件受け、まとめてではなく均等に散らします。各モデルは自分のプロバイダーのルーティングで自分のアカウントやキーを使い、グループ内のグループは 1 つとして数えます。失敗して休んでいるものはその回から外れ、失敗したときは次のモデルが代わりに答えます。</td></tr>
     </table></div>
     <div class="table-wrap"><table>
       <tr><th>維持</th><th>会話が、応答したアカウントやキーに留まる期間</th></tr>
@@ -217,6 +218,7 @@
       <pre id="ex-group">magpie groups                        <span class="c"># 自分のグループ、次に magpie が見つけたもの</span>
 magpie group add <span class="s">"Opus anywhere"</span> models=claude/claude-opus-5-5,copilot/claude-opus-5.5 routing=order stays=session
 magpie group set opus-anywhere models+=openrouter/anthropic/claude-opus-5.5
+magpie group set opus-anywhere routing=weight weight=claude/claude-opus-5-5=3  <span class="c"># 4 件に 3 件をこれに</span>
 magpie group rule add opus-anywhere use=openrouter/anthropic/claude-opus-5.5 tokens=150k  <span class="c"># 長いターンはまずこれへ</span>
 magpie group rule add opus-anywhere use=copilot/claude-opus-5.5 intent=<span class="s">"ちょっとした質問"</span> classifier=groq/llama-3.1-8b-instant
 magpie group rule add opus-anywhere use=deepseek/deepseek-v4-flash compact  <span class="c"># /compact の要約は安いモデルへ</span>

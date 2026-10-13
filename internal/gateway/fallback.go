@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 const fallbackCooldown = time.Minute
@@ -53,6 +54,10 @@ type candidate struct {
 	// provider has no URL for (#1702): the provider is tried whole, on the
 	// URLs it has, and the routing trace says why
 	noURL provider.Protocol
+	// seats are its places in the rounds of the groups routed by weight
+	// it is in (weightedUnits), for affinity to charge the member that
+	// keeps a conversation (weightedKept)
+	seats []wrrSeat
 }
 
 // capHold is how an account is held at its usage cap: the cap of the
@@ -415,10 +420,14 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 		// and each group in it as one — planned by its own routing, put
 		// where the one it would try first is, the rest of it after
 		type unit struct {
-			m     provider.Member // the model, for one of its keys
-			cs    []candidate     // a group in g, or a provider routed its own way: its own order
-			order []Weighed
+			m      provider.Member // the model, for one of its keys
+			cs     []candidate     // a group in g, or a provider routed its own way: its own order
+			order  []Weighed
+			member string // as g spells it, for a unit of a group routed by weight
 		}
+		// a group routed by weight weighs its members, each whole: a
+		// model's keys in its provider's order, a group in it in its own
+		byWeight := g.Routing == provider.Weighted
 		var units []unit
 		var heads []candidate
 		at := map[string][]int{} // a head's seat → its units, in turn
@@ -438,12 +447,12 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 				pl.left = append(pl.left, sub.left...)
 				pl.capped = append(pl.capped, sub.capped...)
 				if len(cs) > 0 {
-					add(unit{cs: cs, order: sub.order}, firstAwake(cs))
+					add(unit{cs: cs, order: sub.order, member: m.Path[depth]}, firstAwake(cs))
 				}
 				i = j
 				continue
 			}
-			if ownRouting(m.Provider, g) {
+			if ownRouting(m.Provider, g) || byWeight {
 				// a provider routed its own way keeps it, as a group
 				// in the group does: weighed as one by the first it
 				// would try, and tried whole in its own order (kchen0x
@@ -457,7 +466,7 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 					order = append(order, w)
 				}
 				if len(cs) > 0 {
-					add(unit{cs: cs, order: order}, firstAwake(cs))
+					add(unit{cs: cs, order: order, member: m.Path[depth]}, firstAwake(cs))
 				}
 				i++
 				continue
@@ -466,6 +475,27 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 				add(unit{m: m}, c)
 			}
 			i++
+		}
+		if byWeight {
+			members := make([]string, len(units))
+			for i, u := range units {
+				members[i] = u.member
+			}
+			var out []candidate
+			for i, k := range weightedUnits(g, members, heads) {
+				u := units[k]
+				seat := wrrSeat{round: provider.GroupPrefix + g.ID, member: u.member}
+				for _, c := range u.cs {
+					c.seats = append(slices.Clip(c.seats), seat)
+					out = append(out, c)
+				}
+				order := slices.Clone(u.order)
+				if i == 0 && len(units) > 1 && len(order) > 0 {
+					order[0].Turn = true
+				}
+				pl.order = append(pl.order, order...)
+			}
+			return out
 		}
 		routing := g.Routing
 		if routing == provider.Manual {
@@ -901,6 +931,14 @@ func restOf(id string) (Rest, bool) {
 // status code doesn't: some answer 400 or 403 with it.
 var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billing|out of budget|budget (exceeded|exhausted)|exceeded|rate.?limit|usage.?limit|limit.?reached|hit your .*limit|limit.{0,24}resets|too many requests|overloaded|余额|额度|欠费|限流|频率|套餐|用量|上限`)
 
+// quotaSaid is whether an error's words, with no status to go by, say
+// out of quota or slow down: quotaWords, unless they say the conversation
+// is too long for the model, whose "context_length_exceeded" or "exceeds
+// the maximum" holds quotaWords' "exceeded" (#1944).
+func quotaSaid(msg string) bool {
+	return quotaWords.MatchString(msg) && !tooLong(http.StatusBadRequest, msg)
+}
+
 // unservedWords are how a vendor says the model isn't one it serves this
 // key, or this way — words another provider, or key, may not answer with.
 var unservedWords = regexp.MustCompile(`(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|模型.{0,12}(不存在|不支持|无权|未开通)`)
@@ -921,6 +959,8 @@ func modelRefused(status int, body []byte) bool {
 	default:
 		return false
 	}
+	// the words are matched decoded, too (#1669)
+	body = wordsOf(body)
 	return unservedWords.Match(body) && !quotaWords.Match(body) && !refusedWords.Match(body)
 }
 
@@ -945,6 +985,8 @@ func modelRetired(status int, body []byte) bool {
 	default:
 		return false
 	}
+	// the words are matched decoded, too (#1669)
+	body = wordsOf(body)
 	return retiredWords.Match(body) && !quotaWords.Match(body)
 }
 
@@ -984,6 +1026,8 @@ var shapeWords = regexp.MustCompile(`(?i)failed to deserialize|unknown (item |co
 // shapeRefused says a request failed over its shape alone: the next
 // member is asked, and this one doesn't rest, as nothing is wrong with it.
 func shapeRefused(status int, body []byte) bool {
+	// the words are matched decoded, too (#1669)
+	body = wordsOf(body)
 	return (status == 400 || status == 422) && shapeWords.Match(body) &&
 		!quotaWords.Match(body) && !unservedWords.Match(body) && !refusedWords.Match(body)
 }
@@ -1037,6 +1081,8 @@ func elsewhere(left []candidate, c candidate) []candidate {
 // that failed this way: the vendor was busy, out of quota or failing, or
 // this key or provider can't serve it — not the request itself at fault.
 func retryable(status int, body []byte) bool {
+	// the words are matched decoded, too (#1669)
+	body = wordsOf(body)
 	switch {
 	case overflowed(status, body):
 		// a conversation too long for the model is as long on every
@@ -1061,9 +1107,10 @@ func retryable(status int, body []byte) bool {
 // error, was the vendor failing (#733): unreachable, overloaded, out of
 // quota. A conversation grown too long for the model, or a request the
 // vendor turned away as it reads, would fail the same at the next asked:
-// nobody rests for it.
+// nobody rests for it. Nor does an account rest when a model generated
+// empty output (#1221).
 func lateRests(msg string) bool {
-	return !tooLong(http.StatusBadRequest, msg) && !refusedWords.MatchString(msg) && !protectionWords.MatchString(msg)
+	return !tooLong(http.StatusBadRequest, msg) && !refusedWords.MatchString(msg) && !protectionWords.MatchString(msg) && !strings.Contains(msg, emptyReply)
 }
 
 // unsaidMargin is how far past a model's window a request's estimate
@@ -1088,6 +1135,8 @@ func tooLongUnsaid(p provider.Provider, model string, tokens, status int, body [
 	default:
 		return "", false
 	}
+	// the words are matched decoded, too (#1669)
+	body = wordsOf(body)
 	if overflowed(status, body) || failure(status, body) != failOther || quotaWords.Match(body) ||
 		unservedWords.Match(body) || refusedWords.Match(body) || provider.EdgeBlocked(body) || regionRefused(status, body) {
 		return "", false
@@ -1894,6 +1943,27 @@ func (h *holdWriter) mayAskAgain() bool {
 	return h.hold && !h.passing
 }
 
+// handBack sends a refusal held with nothing said as the vendor's own
+// reply, a 200 that ends with its stop reason, and says whether it could:
+// not a refusal said as an error status or event, which is no reply.
+func (h *holdWriter) handBack() bool {
+	if !h.refused || h.passing || h.status == 0 || h.status >= 400 || h.held.Len() == 0 {
+		return false
+	}
+	h.failure, h.failMsg = 0, ""
+	h.release()
+	return true
+}
+
+// refusalAsksAgain says whether a request refused n times by the vendor's
+// safety filter is asked of the next account or member left: as many
+// times as Settings' RefusalRetries says, every one left when it is unset
+// (#248).
+func refusalAsksAgain(n int) bool {
+	retries := settings.Load().RefusalRetries
+	return retries == nil || *retries < 0 || n <= *retries
+}
+
 // release sends a held reply after all: nobody else is left to try.
 func (h *holdWriter) release() {
 	if h.passing || h.status == 0 {
@@ -2680,11 +2750,17 @@ func refusedReply(b []byte) (string, bool) {
 func streamStatus(msg string) int {
 	l := strings.ToLower(msg)
 	switch {
+	case tooLong(http.StatusBadRequest, msg):
+		// before the quota words: the ChatGPT backend's response.failed
+		// for a Codex conversation past the model's window says
+		// "context_length_exceeded", whose "exceeded" read as a rate
+		// limit, and the same request was sent again and again (#1944)
+		return 400
 	case strings.Contains(l, "overloaded"):
 		return 529
 	case creditWords.MatchString(msg) && !strings.Contains(l, "rate"):
 		return 402
-	case strings.Contains(l, "rate_limit"), strings.Contains(l, "rate limit"), strings.Contains(l, "too many"), quotaWords.MatchString(msg):
+	case strings.Contains(l, "rate_limit"), strings.Contains(l, "rate limit"), strings.Contains(l, "too many"), quotaSaid(msg):
 		return 429
 	case unservedWords.MatchString(msg):
 		return 400

@@ -732,12 +732,31 @@ func claudeIn(at place) *Agent {
 				}
 			}
 		}
+		// each row's label is the model's name as every agent's list calls
+		// it, by the Provider in model names setting (provider.Labels): the
+		// picker took the name alone, so none of the setting's three ways
+		// changed /model (love1sbug on X). A description that would say the
+		// provider the label already says is left "via magpie".
+		labels := listLabels("claude")
 		rows := []any{}
 		for _, o := range viaMagpie("claude", "") {
 			if slices.ContainsFunc(onTier, func(v string) bool { return claudeSameModel(v, o.Value) }) {
 				continue
 			}
-			rows = append(rows, map[string]any{"model": spell(mark1M(o.Value)), "label": cmp.Or(o.Label, o.Value), "description": o.Note})
+			label, note := cmp.Or(labels[o.Ref], o.Label, o.Value), o.Note
+			// a subscription's note is its account alone, so a label left
+			// without its provider (Off, or a name the user gave) named
+			// neither in /model; the provider goes before the account then,
+			// as an API key's note says it (#1136, cjyrainbow)
+			if by, ok := strings.CutSuffix(note, " · via magpie"); ok {
+				switch {
+				case label != o.Label && strings.HasSuffix(label, " · "+by):
+					note = "via magpie"
+				case o.Group != "" && o.Group != RoutingGroups && by != o.Group && !strings.HasSuffix(label, " · "+o.Group):
+					note = o.Group + " · " + note
+				}
+			}
+			rows = append(rows, map[string]any{"model": spell(mark1M(o.Value)), "label": label, "description": note})
 		}
 		if len(rows) == 0 {
 			return dropPicker()
@@ -1456,7 +1475,8 @@ func claudeIn(at place) *Agent {
 		ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Aliases: []string{"cc", "claude-code"},
 		UA:  []string{"claude-cli", "claude-code"},
 		Bin: "claude", Dir: filepath.Dir(path), Path: path,
-		Fields: fields,
+		Fields:       fields,
+		ModelAliases: claudeAliases,
 		// Claude Code as it was before magpie: its default puts it back as
 		// installed, on Anthropic's endpoint, where this brings back the
 		// endpoint, token and model the user had

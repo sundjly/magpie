@@ -175,6 +175,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-problems-sep { color: var(--muted); }
 .lib-problems-err { display: block; color: var(--fg-2); font: var(--code-style, normal) var(--code-weight, 400) 11px var(--code-font, var(--code)); font-stretch: var(--code-stretch, 100%); margin-top: 1px; }
 .lib-problems-fix { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.lib-problems-away { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0 15px; }
 
 /* agents a server or skill is given to: an icon each, lit when it has it */
 .lib-agents { display: flex; flex-wrap: wrap; gap: 3px; flex: none; justify-content: flex-end; max-width: 50%; }
@@ -527,8 +528,16 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-ag.some .ic.baked > img:not(.grey) { display: block; }
 .lib-ag.some .ic.baked > img.grey { display: none; }
 /* the skills' heading has the most on it: in a narrow window it goes on
-   to a second line rather than past the page's side */
-#view-library .row-head.lib-skillshead, #view-library .row-head.lib-serverhead { flex-wrap: wrap; row-gap: 6px; }
+   to a second line rather than past the page's side. Its first line's
+   buttons sit 1px down with one line or two: one line was centred in the
+   26px and two began at the top, so a click that unwrapped it (German's
+   Select turned Fertig) moved the button 1px, and the page was scrolled to
+   hold it there */
+#view-library .row-head.lib-skillshead, #view-library .row-head.lib-serverhead { flex-wrap: wrap; row-gap: 6px; padding-block: 1px; }
+/* Select is as wide as the Done it turns into, and Done as Select: in a
+   heading on two lines the narrower word fitted on the first, and the
+   button left the pointer for the line above (German at 420) */
+#view-library .lib-select[data-alt]::after { content: attr(data-alt); display: block; height: 0; overflow: hidden; visibility: hidden; }
 #view-library .row-head.lib-skillshead .lib-skillq { flex: 1 1 90px; max-width: 190px; }
 #view-library .row-head .lib-skillq { width: 190px; height: 24px; margin: 0; flex: 0 1 auto; min-width: 90px; }
 .lib-skillq::-webkit-search-cancel-button { -webkit-appearance: none; }
@@ -567,6 +576,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-pickbox { margin: 0; flex: none; }
 .lib-vl > .row.lib-skill.picked { background: var(--accent-soft); }
 .lib-list > .row.lib-server.picked { background: var(--accent-soft); }
+.lib-list > .row.lib-found.picked { background: var(--accent-soft); }
 .lib-pickbar { position: sticky; bottom: 12px; z-index: 3; margin-top: 8px; min-height: 44px; flex-wrap: wrap; row-gap: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: var(--shadow); }
 .lib-pickall { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-2); white-space: nowrap; }
 .lib-pickn { font-size: 12px; font-weight: 500; color: var(--fg); white-space: nowrap; }

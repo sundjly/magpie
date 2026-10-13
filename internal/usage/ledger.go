@@ -386,9 +386,6 @@ func ledgerMatched(since, until time.Time, f Filter, recs []Record, logs []sessi
 		if !f.keepsRow(Row{Record: r, Source: source}) {
 			return
 		}
-		if !r.IsRejected() {
-			sum.add(r, pr)
-		}
 		sent := r.Model
 		if source == "" {
 			sent = provider.SentNameIn(wires, r.Provider, r.Model, r.Effort)
@@ -398,6 +395,9 @@ func ledgerMatched(since, until time.Time, f Filter, recs []Record, logs []sessi
 			row.Cost, row.Priced = r.CostAt(*pr), true
 		}
 		row.Agent = AgentOf(r.Agent)
+		if !r.IsRejected() {
+			sum.addFrom(row, pr)
+		}
 		rows = append(rows, row)
 	}
 	for i := len(recs) - 1; i >= 0; i-- {
@@ -506,7 +506,7 @@ var CSVHeader = []string{"time", "agent", "requested_model", "provider", "host",
 	"effort", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "reasoning_tokens",
 	"cost_usd", "duration_ms", "ttft_ms", "status", "error", "session", "kind", "provider_key_id", "provider_key_name", "provider_account", "route_id",
 	"request_id", "endpoint", "error_message", "error_type", "source", "rejected", "session_provider", "session_account", "session_official_login", "caller_key_id", "caller_key_name", "response_id", "upstream",
-	"cache_write_5m_tokens", "cache_write_1h_tokens", "tries", "handed_on"}
+	"cache_write_5m_tokens", "cache_write_1h_tokens", "tries", "handed_on", "tier_asked", "tier_sent", "tier_served", "upstream_stop"}
 
 // WriteCSV writes rows as CSV, a header first (cache_write_tokens is every
 // cache write, as it always was, and the last two columns split it into
@@ -517,6 +517,9 @@ var CSVHeader = []string{"time", "agent", "requested_model", "provider", "host",
 // gateway made at the request the row ends, when more than one, and
 // handed_on "true" for the row of a try that failed and handed the request
 // on: the request's outcome is the row with the same route_id after it.
+// tier_asked, tier_sent and tier_served are the service tier the client
+// asked for, the one sent on the row's try and the one the reply said it
+// ran at, each empty when there was none (Record.TierAsked).
 func WriteCSV(w io.Writer, rows []Row) error {
 	cw := csv.NewWriter(w)
 	cw.Write(CSVHeader)
@@ -542,7 +545,8 @@ func WriteCSV(w io.Writer, rows []Row) error {
 			strconv.FormatBool(r.Swapped), r.Effort, n(r.Input), n(r.Output), n(r.CacheWrite), n(r.CacheRead), n(r.Reasoning),
 			cost, strconv.FormatInt(r.Millis, 10), ttft, n(r.Status), strconv.FormatBool(r.Failed()), r.Session, r.Kind, r.ProviderKeyID, r.ProviderKeyName, r.Account(), routeID,
 			r.RequestID, r.Endpoint, r.Error, r.ErrType, r.Source, strconv.FormatBool(r.IsRejected()), r.SessionProvider, r.SessionAccount, strconv.FormatBool(r.SessionOfficialLogin), r.CallerKeyID, r.CallerKeyName, r.ResponseID, r.Upstream,
-			n(r.CacheWrite - min(r.CacheWrite1h, r.CacheWrite)), n(min(r.CacheWrite1h, r.CacheWrite)), tries, strconv.FormatBool(r.HandedOn)})
+			n(r.CacheWrite - min(r.CacheWrite1h, r.CacheWrite)), n(min(r.CacheWrite1h, r.CacheWrite)), tries, strconv.FormatBool(r.HandedOn),
+			r.TierAsked, r.TierSent, r.TierServed, r.Stop})
 	}
 	cw.Flush()
 	return cw.Error()
@@ -669,6 +673,36 @@ func (t *Totals) addRow(r Row) {
 // app.js's LED_FLOOR_AGENTS has the same.
 var FloorAgents = map[string]bool{"claude": true, "claude-desktop": true, "codex": true}
 
+// A Codex turn of one call read from its session file is timed by the
+// turn's time_to_first_token_ms and its end, and that window can be one
+// network push, not the writing: Fallmonkey on Discord had a reply whose
+// first token came at 6.8 s, the model working, and the rest 0.2 s later
+// in one go, read as thousands of tok/s. Such a row's window after the first
+// token tells a speed only when it is CodexWindowMs or more and its tokens
+// (its answer, for one that reasoned) CodexBodyTokens or more; else it tells
+// the least it wrote at over the whole turn (Row.Floor). app.js's ledDecode
+// and ledFloor_ have the same.
+const (
+	CodexWindowMs   = 1000
+	CodexBodyTokens = 100
+)
+
+// codexTurn is whether r is a Codex turn of one call read from its session
+// file, the turn's first token known.
+func (r Row) codexTurn() bool {
+	return r.Source == "log" && r.Agent == "codex" && r.TTFT > 0
+}
+
+// Decode is the row's DecodeOf, a Codex turn of one call from its session
+// file held to CodexWindowMs and CodexBodyTokens.
+func (r Row) Decode() (tokens int, w int64) {
+	n, w := r.Record.Decode()
+	if w > 0 && r.codexTurn() && (w < CodexWindowMs || n < CodexBodyTokens) {
+		return 0, 0
+	}
+	return n, w
+}
+
 // Floor is the tokens and ms a row read from a session file tells the least
 // its reply wrote at by, when its speed wasn't measured. 0, 0 when it tells
 // none. app.js's ledFloorSpeed is the same rule for one row.
@@ -689,7 +723,17 @@ var FloorAgents = map[string]bool{"claude": true, "claude-desktop": true, "codex
 // its time. Its output over that time, as Fallmonkey asked, would count the
 // reasoning written before the first token too and read high: a gateway
 // reply of 496 tokens, 224 of them reasoning, 827 ms after a 10.2 s first
-// token, reads 600 tok/s so, its measured answer 415, and this 329.
+// token, reads 600 tok/s so, its measured answer 415, and this 329. That
+// window is held to what a measured one is (CodexWindowMs, CodexBodyTokens):
+// 827 ms can be one push as well.
+//
+// A Codex turn of one call that tells neither, its window after the first
+// token too short or its body too small, tells its output over the whole
+// turn, the wait for the first token in it, by the same rule as any other
+// such floor: 1,000 tokens or more over a second or more. It is the same
+// formula, so it has the same gate: under 1,000 tokens the wait is too much
+// of the time to tell anything (Fallmonkey on Discord: 11 tokens in 2.75 s
+// read ≥4 tok/s while an 815-token Claude Code reply told nothing).
 func (r Row) Floor() (tokens int, ms int64) {
 	if r.Source != "log" || !FloorAgents[r.Agent] || r.Failed() {
 		return 0, 0
@@ -697,15 +741,12 @@ func (r Row) Floor() (tokens int, ms int64) {
 	if _, w := r.Decode(); w > 0 {
 		return 0, 0
 	}
-	if r.Agent == "codex" && r.TTFT > 0 {
-		if r.Reasoning <= 0 {
-			return 0, 0
+	if r.codexTurn() {
+		if n := r.Output - r.Reasoning; r.Reasoning > 0 && n >= CodexBodyTokens {
+			if w := DecodeWindow(n, r.Millis, r.TTFT); w >= CodexWindowMs {
+				return n, w
+			}
 		}
-		n := r.Output - r.Reasoning
-		if w := DecodeWindow(n, r.Millis, r.TTFT); w > 0 {
-			return n, w
-		}
-		return 0, 0
 	}
 	if r.Output < 1000 || r.Millis < 1000 || int64(r.Output)*1000 > MaxDecodeSpeed*r.Millis {
 		return 0, 0
