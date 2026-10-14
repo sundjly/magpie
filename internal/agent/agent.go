@@ -90,6 +90,11 @@ type Field struct {
 	// Quiet fields are left out of listings while empty: they follow
 	// another field until set (Claude Code's per-tier models).
 	Quiet bool
+	// Live fields are magpie's own settings, read by the gateway on each
+	// request (Claude Desktop's subagent model): a change to one needs no
+	// restart of the agent, so its Notice isn't shown after it, unless
+	// the pick connected the agent to magpie as well.
+	Live bool
 	// Follows is the key of the field a Quiet one takes after while empty
 	// ("model" for Claude Code's tiers and subagents): a profile's details
 	// say so, and Drift reads the field as on that one's model (#1050).
@@ -270,6 +275,10 @@ type Agent struct {
 	// not one another tool wrote there first: a JetBrains plugin's
 	// settings.json in Qoder CN's folder (#1495).
 	pathOwn func() bool
+	// sign, when set, is one more sign the agent is here, for a folder
+	// that is dirShared: a file only the agent (or its own app) writes
+	// there (the Qoder app's status file, #2138).
+	sign func() bool
 }
 
 // Running reports whether a process whose command line matches any pattern
@@ -308,6 +317,9 @@ func (a *Agent) Detected() bool {
 		return true
 	}
 	if a.Dir != "" && !a.dirShared && agentDir(a.Dir) {
+		return true
+	}
+	if a.sign != nil && a.sign() {
 		return true
 	}
 	if a.Bin != "" && binAt(a.Bin) != "" {

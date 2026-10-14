@@ -280,6 +280,13 @@ method's questions (a pick, then a text the plugin checks), then takes the
 code the browser page shows; an API-key way opens the account. English and
 Chinese, Chromium and WebKit, with the API faked.
 
+`plugin-options.test.cjs` checks the switches a plugin declares for its
+provider (#2038), in its editor: the plugin's words shown as text, wrapped
+inside the editor; a confirm asked before one is turned on, and Cancel
+leaving it off; Save posting each changed one by the plugin's provider id
+before the provider, and none switched back. Chromium and WebKit, 1100 and
+420 wide, every language.
+
 `plugin-move-overflow.test.cjs` checks a Plugins card that offers a
 built-in's accounts: the button is one word beside the name, as Install is
 ("Move", its title saying whose accounts and how many), on one line, and it
@@ -399,6 +406,17 @@ model and "unless the lead names another" beside it. Picking a model posts
 `subagent`, and the square still carries the hint. Clicking the first entry
 unsets it again. A click doesn't scroll the page. Claude Code's subagents
 still say "same as model".
+
+`desktop-subagent-model.test.cjs` checks Claude Desktop's gateway-applied
+subagent model in its row opened from the agent link: one square, hidden
+when unwired with no options or value, opening the app's model picker (no
+native select), translated title and Default note, a model posted as
+`subagent_model` and Default as "". No click scrolls, no square or picker
+row has a coloured left border, and the picker fits at 1100px and 560px.
+Desktop routing stories with no kind explain the moved model or the kept
+model with a translated disabled reason. Chromium and WebKit, English,
+Chinese, Traditional Chinese, Japanese and German; all APIs are faked.
+Run with `node --test internal/gui/tests/desktop-subagent-model.test.cjs`.
 
 `tier-effort.test.cjs` draws Claude Code's per-tier effort (#536) in Chromium
 and WebKit, English and Chinese: no tier's effort is a field of its own; the
@@ -941,7 +959,7 @@ Chinese.
 `old-webkit.test.cjs` holds the page to Safari 15.0, the WebKit macOS 12 can
 have (#220: a regex lookbehind in app.js, a syntax error before Safari 16.4,
 left the panel with its headings and nothing working). Every script in
-`assets/` is parsed (with the Babel parser Playwright bundles) and may have
+`assets/`, the built-in plugins' under `assets/plugins/` among them, is parsed (with the Babel parser Playwright bundles) and may have
 no regex lookbehind, v flag or modifiers, class static block, decorator,
 import attributes or `using`, in a literal or `new RegExp("…")`; no built-in
 newer than 15.0 (`.at`, `findLast`, `structuredClone`, `Object.hasOwn`,
@@ -1610,13 +1628,18 @@ names the subscription, and reopening the menu shows it ticked. No click
 moves the page. The checks run in English and Chinese, in Chromium and
 WebKit.
 
-`codex-auto-reset.test.cjs` checks the Auto-use toggle beside a Codex
-account's resets, on the Usage page's card and on the menu bar panel's. It is
-off until turned on; a click posts `settings/codex-auto-reset` for that
-account, shows it pressed and says so, and a second click turns it off. A GLM
-team's resets get no toggle. No click moves the page, and nothing has a
-left-border accent. The checks run in English and Chinese, in Chromium and
-WebKit.
+`codex-auto-reset.test.cjs` checks a Codex account's resets used by
+themselves, on the Usage page's card and on the menu bar panel's: the two
+times one is used, its week used up and one about to expire, each on its own
+line with its own switch (#2078). Each is off until turned on; a click posts
+`settings/codex-auto-reset` for that account and that time (`when`), turns
+that switch alone, and says what the account does now; the resets-held line
+says the one about to expire is kept only while that time is on. An account
+in brief has one switch for both, posted without `when`, its title naming
+each time. A GLM team's resets get no switch. No click moves the page, the
+switches fit the card, nothing has a left-border accent and there is no
+native select. The checks run in English, Chinese, Traditional Chinese,
+Japanese and German, 1100 and 420 wide, in Chromium and WebKit.
 
 `library-all.test.cjs` opens the Library with an All chip ahead of each
 server's and skill's agent chips (Discord: MCP 服务器 SKILL 都得一个个选):
@@ -2376,3 +2399,33 @@ and de. English and Chinese, Chromium and WebKit.
 node --test internal/gui/tests/tencent-access-key.test.cjs
 go test -tags nogui ./internal/gui -run TestProviderListTellsTencentAccessKey
 ```
+
+`plugin-kernel.test.cjs` holds the window's plugin kernel (`kernel.js`) to
+its error boundary, with the Gateway page, the first page a plugin draws
+(`assets/plugins/gateway/`). With the page's drawing made to throw, the page
+says "This page stopped working", the error and Try again (role alert,
+translated, no sideways scroll); nothing escapes as a page error, Providers
+still opens, and back on the page nothing half drawn shows. Fixed, Try again
+draws the page whole, translated, with its Connect fold working. The page's
+`callsPage` setting shows 10 calls at a time from boot.js's `pluginConfig`,
+and 50 once Plugins › Built-in sets it. Chromium and WebKit, every language,
+1100 and 420 points.
+
+```sh
+node --test internal/gui/tests/plugin-kernel.test.cjs internal/gui/tests/builtins.test.cjs
+```
+
+`quota-curve.test.cjs` also checks per-account historical cycle selection in
+all five languages and both engines at 440px: natural expiry, an early
+manual reset and an unscheduled refill with an unchanged deadline. The
+historical legend and pace use the selected readings; other accounts stay
+on their own cycle, missing short-window history is not invented, and
+selecting a cycle does not scroll. `MAGPIE_QUOTA_ASSETS` selects an older
+assets directory to verify the regression fails before the picker existed.
+
+Historical quota selections also update the 5-hour and weekly meters from
+the last readings inside the selected interval. The cycle menu describes
+observed duration rather than the nominal window name. Regression checks
+cover missing windows, historical end and sampling dates, Used/Left,
+restoring live values on 2 days/current cycle, and hiding live account
+controls while inspecting history.

@@ -13,6 +13,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -279,6 +280,13 @@ func failure(status int, body []byte) string {
 		// Kimi's "exceeded model token limit" is the conversation's
 		// length, not the plan's
 		return failOther
+	case status == 402 && usedUpWords.Match(body) && !creditWords.Match(body) && !strings.Contains(string(body), "insufficient_quota"):
+		// a 402 that says a usage limit and nothing of money is out of
+		// quota, not of credit: Factory's "You've reached your weekly
+		// standard usage limit (resets in …). Switch to Droid Core …" is
+		// Standard's pool, which counts some models only, and read as the
+		// account out of credit it rested Droid Core with it (#1979)
+		return failQuota
 	case status == 402, creditWords.Match(body) && (status != 429 || brokeWords.Match(body)) || strings.Contains(string(body), "insufficient_quota"):
 		return failCredit
 	case status == 429 && resetsWhen.Match(body):
@@ -377,6 +385,12 @@ type Rest struct {
 	Failures int    `json:"failures,omitempty"` // in a row, for a backoff
 	// Key is what it rests by, for the app to lift the rest (Unrest)
 	Key string `json:"key,omitempty"`
+	// Model: the one model resting, when the account or key still
+	// answers its others (a pooled allowance, a model it doesn't serve);
+	// "" for the account or key as a whole. The app shows the rest on
+	// that model's rows only (#1960: Antigravity's Claude & GPT pool used
+	// up showed gemini-3.8-flash, in a pool of its own, as out too).
+	Model string `json:"model,omitempty"`
 	// Link: where the vendor said to verify the account, for failVerify
 	Link string `json:"link,omitempty"`
 
@@ -410,6 +424,45 @@ func init() { provider.OnRenewed(renewed) }
 
 // staleAllowance is provider.StaleAllowance, swapped in tests.
 var staleAllowance = provider.StaleAllowance
+
+// awaitAllowance is provider.AwaitAllowance, swapped in tests.
+var awaitAllowance = provider.AwaitAllowance
+
+// allowanceWait is how long a quota rest made before the account's
+// windows were read waits for a reading to narrow it (narrowWhenRead).
+const allowanceWait = time.Minute
+
+// narrowing counts the narrowWhenRead still waiting, for a test to wait on.
+var narrowing sync.WaitGroup
+
+// narrowWhenRead narrows an account's quota rest, made while its windows
+// were unknown (a start, or a reading that failed), to the model alone
+// once a reading says the model's pool is the one used up (#2036,
+// Ziqi-Cui): Factory's Standard pool used up leaves Droid Core's models
+// in. A reading that says nothing of pools, or none in time, leaves the
+// account's rest as it is, and so does a rest lifted or made again since.
+// It waits off the request, which has failed over already.
+func narrowWhenRead(c candidate, r Rest) {
+	defer narrowing.Done()
+	ctx, done := context.WithTimeout(context.Background(), allowanceWait)
+	defer done()
+	if !awaitAllowance(ctx, r.agent, r.user) || !c.pooled(time.Now()) {
+		return
+	}
+	id, rid := c.restKey(), c.restID()
+	restingUntil.Lock()
+	defer restingUntil.Unlock()
+	if now, ok := restingUntil.note[id]; !ok || now.Why != failQuota || !restingUntil.m[id].Equal(r.Until) {
+		return
+	}
+	delete(restingUntil.m, id)
+	delete(restingUntil.note, id)
+	r.Key, r.Model = rid, c.model
+	if until, ok := restingUntil.m[rid]; !ok || until.Before(r.Until) {
+		restingUntil.m[rid] = r.Until
+		restingUntil.note[rid] = r
+	}
+}
 
 // keyAllowance and staleKeyAllowance are provider.KeyAllowance and
 // provider.StaleKeyAllowance, swapped in tests.
@@ -493,7 +546,35 @@ func resetsAt(body []byte, now time.Time) time.Duration {
 	if d := resetsIn(body, now); d > 0 {
 		return d
 	}
-	return resetsWritten(body, now)
+	if d := resetsWritten(body, now); d > 0 {
+		return d
+	}
+	return resetsAfter(body)
+}
+
+// resetsInWords: a refusal that says how long until it is back in days,
+// hours and minutes, as Factory's 402 does: "You've reached your weekly
+// standard usage limit (resets in 0h 19min)" (#1979). At least one of
+// them, each a number and its unit, and nothing else between.
+var resetsInWords = regexp.MustCompile(`(?i)\bresets? in (?:(\d+)\s*d(?:ays?)?\b\s*)?(?:(\d+)\s*h(?:ours?|rs?)?\b\s*)?(?:(\d+)\s*m(?:in(?:utes?|s)?)?\b)?`)
+
+// resetsAfter is how long the refusal says until it is back (resetsInWords),
+// held to longestWritten. Zero when it doesn't say.
+func resetsAfter(body []byte) time.Duration {
+	m := resetsInWords.FindSubmatch(wordsOf(body))
+	if m == nil || len(m[1])+len(m[2])+len(m[3]) == 0 {
+		return 0
+	}
+	var d time.Duration
+	for i, unit := range []time.Duration{24 * time.Hour, time.Hour, time.Minute} {
+		if n, err := strconv.Atoi(string(m[i+1])); err == nil {
+			d += time.Duration(n) * unit
+		}
+	}
+	if d > longestWritten {
+		return 0
+	}
+	return d
 }
 
 // longestWritten is the furthest off a reset time written in words is
@@ -550,9 +631,11 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	// counts some models only, the account's others are still in theirs
 	// (Cursor's Auto with Other Models used up)
 	pooled := why == failQuota && c.pooled(now)
+	// and none to tell from: the account rests, narrowed once read (#2036)
+	unread := why == failQuota && c.p.Account != nil && len(allowances(c.p.Account.UsageAgent())[c.p.Account.User]) == 0
 	// a model the key's plan doesn't serve rests alone, counted by itself
 	// (#1235): the key's other models are still served
-	unserved := why == failOther && modelRefused(status, body)
+	unserved := why == failOther && (modelRefused(status, body) || codeAssistModelMissing(c.p, status, body))
 	r := Rest{Why: why, Status: status, By: "cooldown"}
 	if why == failProxy {
 		// the account is as good as it was; the proxy is the user's to start
@@ -575,9 +658,12 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		// "in 59 minutes", the resets_at turned Retry-After and cut to an
 		// hour, then was tried, refused and benched again)
 		d, r.By = quotaRest, "quota"
-		if own := c.p.QuotaRestFor(); own > 0 {
-			// as long as the user set for this provider (#1772: Ollama
-			// Cloud's weekly limit says nothing of when it renews)
+		// as long as the user set for this provider (#1772: Ollama
+		// Cloud's weekly limit says nothing of when it renews), or until
+		// the time of day they said its allowance comes back (#2008: a
+		// free tier's daily quota)
+		own := c.p.OwnQuotaRest(now)
+		if own > 0 {
 			d = own
 		}
 		if w := resetsAt(body, now); w > 0 {
@@ -586,7 +672,11 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 			d, r.By = w, "resets"
 		} else if t := c.full(now); !t.IsZero() {
 			d, r.By = t.Sub(now), "window"
-		} else if w := retryAfter(header, now); w > 0 {
+		} else if w := retryAfter(header, now); w > 0 && (w < longestWait || own <= w) {
+			// a "try again in" cut to the longest wait asked for longer
+			// still: the user's own longer rest stands then (#2008: a
+			// daily quota's Retry-After of an hour or more had the seat
+			// asked again every hour, whatever rest the user set)
 			d, r.By = w, "retry-after"
 		}
 		d = min(d, longestQuota)
@@ -617,7 +707,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		routed.failures[counted]++
 		n := routed.failures[counted]
 		routed.Unlock()
-		d, r.By, r.Failures = min(fallbackCooldown<<min(n-1, 10), longestRetry), "backoff", n
+		d, r.By, r.Failures = min(fallbackCooldown<<min(n-1, 10), c.p.RestCapOr(longestRetry)), "backoff", n
 		// a subscription that failed with a window full is out of it,
 		// whatever it said; a key isn't: a relay out of accounts for
 		// everyone (sub2api's 503) says nothing of the key's own windows.
@@ -665,12 +755,38 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	if (why == failCredit || why == failQuota) && c.p.PaidBesideFree(c.model) {
 		id = c.restID()
 	}
+	if remoteModelRest(c, why, header) {
+		id = c.restID()
+	}
 	r.Key = id
+	if id == c.restID() {
+		r.Model = c.model
+	}
 	restingUntil.Lock()
 	restingUntil.m[id] = r.Until
 	restingUntil.note[id] = r
 	restingUntil.Unlock()
+	if unread && id == c.restKey() && id != c.restID() {
+		narrowing.Add(1)
+		go narrowWhenRead(c, r)
+	}
 	return r
+}
+
+// remoteModelRest says a refusal for want of quota, credit or rate rests
+// only the model it was about, when it came from another computer's magpie
+// (a Remote magpie provider, LAN share): that magpie serves each of its
+// models from its own providers and rests them itself, so one of them out
+// of quota there says nothing of the others (bigsteven on Discord: the
+// remote's 429 for one model rested every model on it for the 3 hours it
+// named). Its key refused, or the computer unreachable, still rests it
+// whole, and so does the key's own limit there (keyLimited's 429, with
+// remoteKeyLimitHeader), which refuses every model alike (#2077).
+func remoteModelRest(c candidate, why string, header http.Header) bool {
+	if !c.p.IsRemoteMagpie() || header.Get(remoteKeyLimitHeader) != "" {
+		return false
+	}
+	return why == failQuota || why == failCredit || why == failRate
 }
 
 // rateRest is how long a rate-limited candidate sits out: as long as the
@@ -684,7 +800,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 // count where it is, so one request's own retries don't stretch it.
 func (s *Server) rateRest(c candidate, header http.Header, body []byte, sharedPool bool, now time.Time) (time.Duration, string, int) {
 	id := c.restKey()
-	if c.isOpenRouterFree() && sharedPool {
+	if c.isOpenRouterFree() && sharedPool || remoteModelRest(c, failRate, header) {
 		id = c.restID()
 	}
 	n := 1
@@ -699,7 +815,7 @@ func (s *Server) rateRest(c candidate, header http.Header, body []byte, sharedPo
 		}
 	}
 	restingUntil.Unlock()
-	d, by := min(fallbackCooldown<<min(n-1, 10), longestRateRest), "cooldown"
+	d, by := min(fallbackCooldown<<min(n-1, 10), c.p.RestCapOr(longestRateRest)), "cooldown"
 	if n > 1 {
 		by = "backoff"
 	}

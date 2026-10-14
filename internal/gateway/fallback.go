@@ -964,6 +964,23 @@ func modelRefused(status int, body []byte) bool {
 	return unservedWords.Match(body) && !quotaWords.Match(body) && !refusedWords.Match(body)
 }
 
+// codeAssistModelMissing says a Google account's Code Assist — the
+// Antigravity or Gemini CLI built-in's — answered 404 NOT_FOUND
+// ("Requested entity was not found."). Its endpoint is the same for every
+// model, so what isn't there is the model: one fetchAvailableModels lists
+// that the account's plan doesn't serve (Packing1 on Discord: Argon on
+// Google AI Pro). Only that model rests, on that account; its others are
+// asked as before.
+func codeAssistModelMissing(p provider.Provider, status int, body []byte) bool {
+	if status != http.StatusNotFound || p.Account == nil || p.IsPlugin() {
+		return false
+	}
+	if p.Account.Agent != "antigravity" && p.Account.Agent != "gemini" {
+		return false
+	}
+	return bytes.Contains(body, []byte("NOT_FOUND")) || bytes.Contains(bytes.ToLower(body), []byte("not found"))
+}
+
 // retiredWords are how a vendor says the model is retired, though its
 // list may still name it: OpenCode Zen's 410 {"type":"error","error":
 // {"type":"ModelDeprecated","message":"Model exo-free has been
@@ -1158,9 +1175,11 @@ func tooLongUnsaid(p provider.Provider, model string, tokens, status int, body [
 }
 
 // windowOf is the tokens a provider's model takes, where known: the
-// user's (Provider.ContextOf), else its catalog entry's.
+// user's for the model, else its catalog entry's (Provider.WindowOf, where
+// the one set for all the provider's models is no larger than the model's
+// own, #2112), else the one set for all of them.
 func windowOf(p provider.Provider, model string) int {
-	if n := p.ContextOf(model); n > 0 {
+	if n := p.Contexts[model]; n > 0 {
 		return n
 	}
 	for _, e := range provider.Served() {
@@ -1168,7 +1187,7 @@ func windowOf(p provider.Provider, model string) int {
 			return e.Context
 		}
 	}
-	return 0
+	return p.ContextOf(model)
 }
 
 const (
@@ -1570,12 +1589,18 @@ func sseStart(head []byte) (sse, sure bool) {
 	return false, true
 }
 
-// streamEnds are how each protocol's stream says it is over, as they can
-// only appear outside a quoted string: text that says so is escaped.
+// streamEnds are how each protocol's stream says it is over, in every
+// spelling a relay sends: SSE makes the space after "data:" and "event:"
+// optional, and JSON the one after a colon (data:[DONE] from a relay was
+// logged 499 when the agent hung up on it, #1978). A JSON marker can only
+// appear outside a quoted string, as text that says so is escaped; an SSE
+// one starts a line, which text inside the JSON can't.
 var streamEnds = [][]byte{
-	[]byte(`"type":"response.completed"`), []byte(`"type":"response.incomplete"`), // Responses
-	[]byte(`"type":"message_stop"`), []byte("event: message_stop"), // Anthropic
-	[]byte("data: [DONE]"), // Chat Completions
+	[]byte(`"type":"response.completed"`), []byte(`"type": "response.completed"`), // Responses
+	[]byte(`"type":"response.incomplete"`), []byte(`"type": "response.incomplete"`),
+	[]byte(`"type":"message_stop"`), []byte(`"type": "message_stop"`), // Anthropic
+	[]byte("\nevent: message_stop"), []byte("\nevent:message_stop"),
+	[]byte("\ndata: [DONE]"), []byte("\ndata:[DONE]"), // Chat Completions
 }
 
 // see notes a stream's last event going by. An agent may hang up as soon as
@@ -1585,6 +1610,9 @@ func (h *holdWriter) see(b []byte) {
 		return
 	}
 	buf := append(h.tail, b...)
+	if len(h.tail) == 0 {
+		buf = append([]byte{'\n'}, b...) // the stream starts a line
+	}
 	for _, m := range streamEnds {
 		if bytes.Contains(buf, m) {
 			h.ended = true

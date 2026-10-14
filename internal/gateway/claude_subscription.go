@@ -652,16 +652,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	} else if hasReply(req.Messages) {
 		// no run had the conversation: this one is told it whole, in one
 		// message, its earlier turns marked as such (renderClaudePrompt)
-		images := 0
-		for _, m := range req.Messages {
-			for _, p := range m.Parts {
-				if p.Kind == Image {
-					images++
-				}
-				images += len(p.Images)
-			}
-		}
-		log.Printf("claude: a new Claude Code is told the whole conversation: %d messages, %d images, the last turn marked as the one to answer", len(req.Messages), images)
+		log.Printf("claude: a new Claude Code is told the whole conversation: %d messages, %d images, the last turn marked as the one to answer", len(req.Messages), countImages(req.Messages))
 	}
 	cmd := binary.command(context.Background(), args...)
 	cmd.Dir = work
@@ -2527,7 +2518,7 @@ func renderClaudePrompt(req *Request) ([]map[string]any, error) {
 			text.WriteString(historyOpen)
 		}
 		if split > 0 && i == split {
-			text.WriteString(historyClose)
+			text.WriteString(currentTurnOpen(req.Messages, split))
 		}
 		label := "Human"
 		if m.Role == "assistant" {
@@ -2582,6 +2573,40 @@ const (
 		"Images and files in it were sent with those earlier messages: none of them is new, and none needs answering again.\n\n"
 	historyClose = "</conversation_history>\n\n<current_turn>\nThe turn to answer now:\n\n"
 )
+
+// currentTurnOpen is historyClose for the turn of msgs from split on. Claude
+// Code notes each image of the message it is given ("[Image: source:
+// …/images/1.png]", where it keeps them, or the size it showed one at) in a
+// note of its own after the message, so after the turn to answer: told
+// nothing of them, the model took the history's images for ones sent with
+// that turn, said they were attached and opened them again (#1751). Where
+// the history has images, the turn says whose the notes are.
+func currentTurnOpen(msgs []Message, split int) string {
+	earlier, now := countImages(msgs[:split]), countImages(msgs[split:])
+	switch {
+	case earlier == 0:
+		return historyClose
+	case now == 0:
+		return "</conversation_history>\n\n<current_turn>\nThe turn to answer now. Any \"[Image: …]\" notes after it are about " +
+			"the images in the conversation history above, not images sent with this turn.\n\n"
+	}
+	return "</conversation_history>\n\n<current_turn>\nThe turn to answer now. Any \"[Image: …]\" notes after it are about " +
+		"the images above in their order: the conversation history's first, then this turn's.\n\n"
+}
+
+// countImages is how many images msgs carry, their tool results' among them.
+func countImages(msgs []Message) int {
+	n := 0
+	for _, m := range msgs {
+		for _, p := range m.Parts {
+			if p.Kind == Image {
+				n++
+			}
+			n += len(p.Images)
+		}
+	}
+	return n
+}
 
 // historyEnd is where the turn to answer begins in msgs: the message after
 // the last reply that calls no tool. 0 when there is no such reply, or
@@ -2673,6 +2698,12 @@ func renderClaudeTurn(msgs []Message, tools []Tool) []map[string]any {
 func renderParts(blocks []map[string]any, text *strings.Builder, parts []Part, offered map[string]bool) []map[string]any {
 	open := "" // the tool result told last, not closed yet
 	for _, p := range parts {
+		if open != "" && p.Kind == Text && agentNotice(p.Text) {
+			// the agent's notice (a hook's output, a token count) closes
+			// the result but is not the user's (#2060)
+			fmt.Fprintf(text, "\n[end of tool result id=%s]\n\n", open)
+			open = ""
+		}
 		if open != "" && (p.Kind == Text || p.Kind == File) {
 			fmt.Fprintf(text, "\n[end of tool result id=%s]\n\n[user message]\n", open)
 			open = ""
@@ -2962,6 +2993,17 @@ func (r *subscriptionRun) offers(tools []Tool) bool {
 // or what a request forked from the conversation asks (Claude Code's
 // AgentSummary, #1878). The words of a message with images go with the
 // results (match), as before. "" when there are no results, or no words.
+//
+// What the client's agent put in beside the results is not the user's
+// (#2060): Claude Code's hooks' notices ("PreToolUse:Read hook additional
+// context: …"), its <total_tokens> count, its other notices (agentNotice).
+// Told to the run as the user's, the model was told after nearly every
+// call that the user had sent a message, of a hook's output or of nothing
+// (the run's Claude Code doesn't show a bare <total_tokens>). Claude Code
+// 2.1.296 sends them as one {role: "system"} message after the results,
+// with a message the user sent mid-turn among them (midTurnSaid): only
+// those words are the user's. A system message is never the user's
+// otherwise.
 func saidWithResults(msgs []Message) string {
 	i := len(msgs)
 	for i > 0 && msgs[i-1].Role != "assistant" {
@@ -2975,7 +3017,11 @@ func saidWithResults(msgs []Message) string {
 			switch {
 			case p.Kind == ToolResult:
 				results = true
-			case p.Kind == Text && results && !captions && strings.TrimSpace(p.Text) != "":
+			case p.Kind != Text || !results || captions:
+			case midTurnHead.MatchString(p.Text):
+				said = append(said, midTurnSaid(p.Text)...)
+			case m.Role == "system" || m.Role == "developer":
+			case !agentNotice(p.Text):
 				said = append(said, p.Text)
 			}
 		}
@@ -2984,6 +3030,64 @@ func saidWithResults(msgs []Message) string {
 		return ""
 	}
 	return strings.Join(said, "\n\n")
+}
+
+var (
+	// midTurnHead heads a message the user sent while a tool ran, as
+	// Claude Code tells its model one: "The user sent a new message while
+	// you were working:" (2.1.296), "The user sent the following message:"
+	// (older).
+	midTurnHead = regexp.MustCompile(`The user sent (?:a new message while you were working|the following message):[ \t]*\n`)
+	// midTurnEnd is where the user's words after midTurnHead end: Claude
+	// Code's ask to address them, the reminder's end, or a notice of its
+	// own after them.
+	midTurnEnd = regexp.MustCompile(`\n\n(?:This is how Claude Code surfaces messages the user sends mid-turn|IMPORTANT: After completing your current task, you MUST address the user's message above|Please address this message and continue with your tasks)|</system-reminder>|\n\n<total_tokens>|\n\n` + hookNoticeLead)
+	// hookNotice is a Claude Code hook's output told to the model:
+	// "PreToolUse:Read hook additional context: …", "SessionStart hook
+	// success: …", "Stop hook blocking error from command: …". Only
+	// these kinds: "Stop hook is broken: …" may be the user's.
+	hookNoticeLead = `[A-Z][A-Za-z]+(?::\S+)? hook (?:additional context|success|blocking error(?: from command)?|stopped continuation|feedback):`
+	hookNotice     = regexp.MustCompile(`^` + hookNoticeLead)
+	// tokenCount is Claude Code's count of the tokens left, or used.
+	tokenCount = regexp.MustCompile(`^(?:<total_tokens>[^<]*</total_tokens>|Token usage: \S+; \S+ remaining)$`)
+	// reminderTag is a <system-reminder> tag, open or close.
+	reminderTag = regexp.MustCompile(`</?system-reminder(?:\s[^>]*)?>`)
+)
+
+// midTurnSaid is the user's words in each message they sent mid-turn
+// that text tells, without what Claude Code tells its model around them.
+func midTurnSaid(text string) []string {
+	var said []string
+	at := midTurnHead.FindAllStringIndex(text, -1)
+	for k, h := range at {
+		rest := text[h[1]:]
+		if k+1 < len(at) {
+			rest = text[h[1]:at[k+1][0]]
+		}
+		if e := midTurnEnd.FindStringIndex(rest); e != nil {
+			rest = rest[:e[0]]
+		}
+		if w := strings.TrimSpace(rest); w != "" {
+			said = append(said, w)
+		}
+	}
+	return said
+}
+
+// agentNotice says a text after tool results is the agent's, not words
+// of the user's: empty within its reminder tags, or a hook's notice, a
+// token count, or a notice userWords knows (injected).
+func agentNotice(text string) bool {
+	t := strings.TrimSpace(reminderTag.ReplaceAllString(text, ""))
+	if t == "" || hookNotice.MatchString(t) || tokenCount.MatchString(t) {
+		return true
+	}
+	for _, lead := range injected {
+		if strings.HasPrefix(t, lead) {
+			return true
+		}
+	}
+	return false
 }
 
 // withImages says m has an image of its own, not in a tool result.

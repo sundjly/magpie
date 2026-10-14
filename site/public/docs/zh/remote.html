@@ -48,6 +48,7 @@
     <a href="/docs/zh/plugins">插件开发</a>
     <a class="toc-only" href="/docs/zh/remote">远程 magpie</a>
     <a class="toc-only" href="/docs/zh/docker">Docker</a>
+    <a class="toc-only" href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
@@ -121,12 +122,12 @@ magpie provider refresh office   <span class="c"># 重新获取列表</span></pr
       <li><b>所有 API。</b>请求按 Agent 使用的 API 原样转发（Anthropic Messages 和 token 计数、Responses、Chat Completions）。共享 magpie 的供应商只用另一种 API 提供的模型，只转换一次，不会在两台电脑上各转一次。Responses 走 HTTP（包括 SSE），不走 WebSocket。</li>
       <li><b>图像和视频。</b>它的图像和视频模型会被自动识别，经由它的图像生成、编辑和视频 API 提供。</li>
       <li><b>System One。</b>它的决策模型（Jev、Clef，以及你自己命名的模型）接到它的 <code>/v1/systemone</code>，作为决策模型而不是对话模型出现。刷新供应商列表可以发现新的。只写 <code>office</code> 时使用列表里的第一个决策模型。</li>
-      <li><b>Embeddings 和 rerank</b> 发往它对应的 API。它们在 Agent 列表里保持远程上的样子；出现在列表里并不代表能用来对话。</li>
+      <li><b>Embeddings、rerank 和语音转文字</b>发往它对应的 API。它们在 Agent 列表里保持远程上的样子；出现在列表里并不代表能用来对话。</li>
       <li><b>价格。</b>每个模型在本机按共享 magpie 的计价（那边手动设的价格，否则是供应商的标价），两台电脑算出来一样。在本机设的价格优先。</li>
     </ul>
 
     <h2 id="quotas"><a class="anchor" href="#quotas">额度与用量</a></h2>
-    <p>用量页、菜单栏和 <code>magpie quota</code> 会显示共享 magpie 的订阅卡片，带上它的名字（<code>Codex · office</code>，id <code>office/codex</code>），内容是那边最近一次读取的结果：只有保存登录的电脑去问厂商。在本机刷新卡片会让那边再读一次，最多每 30 秒一次。Codex 重置或 WorkBuddy 签到要在那台电脑上，用它自己的应用、TUI 或 CLI 来做。</p>
+    <p>用量页、菜单栏和 <code>magpie quota</code> 会显示共享 magpie 的订阅卡片，带上它的名字（<code>Codex · office</code>，id <code>office/codex</code>），内容是那边最近一次读取的结果：只有保存登录的电脑去问厂商。在本机刷新卡片会让那边再读一次，最多每 30 秒一次。Codex 重置或 WorkBuddy 签到要在那台电脑上，用它自己的应用、TUI 或 CLI 来做。那边限了额度、模型或账号的密钥看不到它的任何卡片：本机只显示这把密钥自己的卡片和它的限额。</p>
     <p>共享的 magpie 把本机的请求记在本机所用网关密钥的名字下，并记下应答的账号。</p>
 
     <h2 id="trouble"><a class="anchor" href="#trouble">出问题时</a></h2>
@@ -153,6 +154,7 @@ magpie provider refresh office   <span class="c"># 重新获取列表</span></pr
     <a href="/docs/zh/plugins">插件开发</a>
     <a href="/docs/zh/remote">远程 magpie</a>
     <a href="/docs/zh/docker">Docker</a>
+    <a href="/docs/zh/privacy">隐私</a>
     <a href="/docs/zh/import">Add to magpie</a>
     <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>

@@ -10,9 +10,9 @@
 <script src="omarchy.js"></script>
 <link rel="stylesheet" href="app.css">
 <link rel="stylesheet" href="routing.css">
-<link rel="stylesheet" href="library.css">
+<link rel="stylesheet" href="plugins/library/library.css">
 <link rel="stylesheet" href="plugins.css">
-<link rel="stylesheet" href="sessions.css">
+<link rel="stylesheet" href="plugins/sessions/sessions.css">
 <link rel="stylesheet" href="context.css">
 <link rel="stylesheet" href="omarchy.css">
 </head>
@@ -27,7 +27,7 @@
   <div class="side-top" style="--wails-draggable:drag"></div>
   <div class="side-scroll"></div>
   <div class="side-foot">
-    <button type="button" class="side-gw" id="sideGw" hidden><i></i><span></span></button>
+    <button type="button" class="side-gw" id="sideGw" data-feature="gateway" hidden><i></i><span></span></button>
   </div>
   <!-- its edge, dragged to make it wider or narrower (app.js sideDrag) -->
   <div class="side-edge" id="sideEdge" role="separator" aria-orientation="vertical" tabindex="0" style="--wails-draggable:no-drag"></div>
@@ -52,7 +52,7 @@
     <span class="nav-gl" data-t>Models</span>
     <button data-view="providers"><svg class="nav-ic" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="10" r="3"/><path d="M10 10h7M14 10v3M16.5 10v2"/></g></svg><span data-t>Providers</span></button>
     <button data-view="routing"><svg class="nav-ic" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10h5l4-5h5M8 10l4 5h5M14.5 3l2.5 2-2.5 2M14.5 13l2.5 2-2.5 2"/></g></svg><span data-t>Routing</span></button>
-    <button data-view="gateway"><svg class="nav-ic" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="5" rx="1.5"/><rect x="3" y="11" width="14" height="5" rx="1.5"/><path d="M6 6.5h.01M6 13.5h.01"/></g></svg><span data-t>Gateway</span></button>
+    <button data-view="gateway" data-feature="gateway"><svg class="nav-ic" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="5" rx="1.5"/><rect x="3" y="11" width="14" height="5" rx="1.5"/><path d="M6 6.5h.01M6 13.5h.01"/></g></svg><span data-t>Gateway</span></button>
     <span class="nav-gl" data-t>Insights</span>
     <button data-view="usage"><svg class="nav-ic" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16V9M8 16V5M12 16v-5M16 16V7"/></g></svg><span data-t>Usage</span></button>
     <span class="nav-gl" data-t>Extend</span>
@@ -121,23 +121,8 @@
   <section class="sheet" id="addSheet" hidden></section>
 </main>
 
-<main class="view" id="view-gateway" hidden>
-  <div class="list gwcard">
-    <div class="row gw" id="gateway"></div>
-  </div>
-  <section id="gatewayKeysBlock" hidden>
-    <div class="row-head"><span class="label" data-t>Gateway keys</span><span class="grow"></span><button class="text" id="addGatewayKey" data-t>Add gateway key</button></div>
-    <p class="usage-note" data-t>Create a gateway key for each client. Usage is counted separately for each key.</p>
-    <section id="gatewayKeys"></section>
-  </section>
-  <p class="usage-note gw-keys-off" id="gatewayKeysOff" hidden><span data-t>Gateway keys are for other computers, and for a tunnel to this one such as Cloudflare Tunnel: they are added here once Share on local network is on. Agents on this computer need none.</span> <button class="text" id="openLanSettings" data-t>Network and sharing</button></p>
-  <div class="row-head"><button class="fold" id="foldConnect" aria-expanded="true" aria-controls="connect"><span class="label" data-t>Connect</span></button><span class="grow"></span><span class="note" id="connectNote"></span></div>
-  <section class="list connect" id="connect"></section>
-  <div class="row-head"><button class="fold" id="foldModels" aria-expanded="true" aria-controls="gwModels"><span class="label" data-t>Models</span><span class="note" id="modelsCount"></span></button><span class="grow"></span><button class="text" id="copyModels" data-t>Copy all ids</button></div>
-  <div class="list" id="gwModels"></div>
-  <div class="row-head"><span class="label" data-t>Recent calls</span><span class="grow"></span><span class="note" id="callsNote"></span></div>
-  <div class="list activity" id="activity"></div>
-</main>
+<!-- the pages plugins add (kernel.js) go here, in the order they register -->
+<template data-slot="page"></template>
 
 <main class="view" id="view-routing" hidden>
   <div class="row-head"><span class="label" data-t>Routing</span><span class="rt-livedot" aria-hidden="true"></span><span class="note" data-t>live, as the gateway decides</span><span class="grow"></span>
@@ -259,9 +244,7 @@
   </div>
 </main>
 
-<main class="view" id="view-sessions" hidden></main>
 
-<main class="view" id="view-library" hidden></main>
 
 <main class="view" id="view-plugins" hidden></main>
 
@@ -282,6 +265,10 @@
       <div class="row pref">
         <div class="who"><div class="name" data-t>Appearance</div><div class="sub om-only" data-t>Follows the Omarchy theme, as picked in Omarchy's menu</div></div>
         <div id="themeSegs" class="om-hide"></div><span class="om-only om-theme-name"></span>
+      </div>
+      <div class="row pref" id="colorblindRow">
+        <div class="who"><div class="name" data-t>Colorblind mode</div></div>
+        <div id="colorblindSegs"></div>
       </div>
       <div class="row pref">
         <div class="who"><div class="name" data-t>Language</div></div>
@@ -339,6 +326,10 @@
         <div class="who"><div class="name" data-t>Codex thread descriptions</div></div>
         <div class="val" id="codexDescriptionsPick"></div>
       </div>
+      <div class="row pref" id="codexPredictionsRow">
+        <div class="who"><div class="name" data-t>Codex composer predictions</div></div>
+        <div class="val" id="codexPredictionsPick"></div>
+      </div>
       <div class="row pref" id="codexAutoReviewRow">
         <div class="who"><div class="name" data-t>Codex auto-review model</div></div>
         <div class="val" id="codexAutoReviewPick"></div>
@@ -347,7 +338,7 @@
         <div class="who"><div class="name" data-t>Codex memories model</div></div>
         <div class="val" id="codexMemoriesPick"></div>
       </div>
-      <div class="row pref">
+      <div class="row pref" id="loginRow">
         <div class="who"><div class="name" data-t>Open at login</div></div>
         <div id="loginSegs"></div>
       </div>
@@ -356,7 +347,7 @@
         <div id="dockSegs"></div>
       </div>
       <div class="row pref" id="lightweightRow" hidden>
-        <div class="who"><div class="name" data-t>Lightweight mode</div><div class="sub" data-t>A closed panel or window frees about 100 MB after a minute; opening it loads it again</div></div>
+        <div class="who"><div class="name" data-t>Lightweight mode</div><div class="sub" data-t>A closed window frees about 100 MB after a minute; the gateway and tasks keep running, only the page reloads</div></div>
         <div id="lightweightSegs"></div>
       </div>
       <div class="row pref" id="keepAwakeRow">
@@ -391,6 +382,10 @@
         <div class="who"><div class="name" data-t>Menu bar magpie icon</div><div class="sub" data-t>magpie's icon before the allowances; off, the allowances alone, and a click on one still opens the panel</div></div>
         <div id="trayBirdSegs"></div>
       </div>
+      <div class="row pref" id="trayPaceRow" hidden>
+        <div class="who"><div class="name" data-t>Menu bar pace</div><div class="sub" data-t>Each window's Pace number beside its figure, as on the Usage page: +12% is 12% more of the window used than an even pace would have used by now, −8% that much less</div></div>
+        <div id="trayPaceSegs"></div>
+      </div>
       <div class="row pref">
         <div class="who"><div class="name" data-t>Allowance display</div><div class="sub" data-t>How much of each window is used, or how much is left, on the Usage page, the panel and the menu bar</div></div>
         <div id="quotaLeftSegs"></div>
@@ -418,6 +413,9 @@
       <div class="row pref" id="resetReminderRow">
         <div class="who"><div class="name" data-t>Reset reminder</div><div class="sub" id="resetReminderSub"></div></div>
         <div id="resetReminderSegs"></div>
+      </div>
+      <div class="row pref" id="codexAutoResetRow" hidden>
+        <div class="who"><div class="name" data-t>Codex: auto-use resets</div><div class="sub wraps" data-t>A ChatGPT account uses one of its resets by itself when its week is used up and no other account can answer, or before one expires unused. Off until turned on, account by account; each account's card on the Usage page has the same switch.</div></div>
       </div>
       <div class="row pref" id="turnDoneRow">
         <div class="who"><div class="name" data-t>Task done alert</div><div class="sub" id="turnDoneSub"></div></div>
@@ -561,13 +559,18 @@
 </div>
 
 <script src="i18n.js"></script>
-<script src="caller-keys.js"></script>
+<script src="kernel.js"></script>
+<!-- the built-in plugins' own scripts (pluginrt.Manifest.Client) -->
+<script src="plugins/gateway/keys.js"></script>
+<script src="plugins/gateway/client.js"></script>
+<script src="plugins/sessions/i18n.js"></script>
+<script src="plugins/sessions/client.js"></script>
+<script src="plugins/library/i18n.js"></script>
+<script src="plugins/library/client.js"></script>
 <script src="purposes.js"></script>
 <script src="app.js"></script>
 <script src="routing.js"></script>
-<script src="library.js"></script>
 <script src="plugins.js"></script>
-<script src="sessions.js"></script>
 <script src="context.js"></script>
 </body>
 </html>

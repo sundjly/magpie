@@ -62,7 +62,7 @@ type RequestPage struct {
 
 type packedRow struct {
 	Time                           time.Time
-	Text                           [34]uint32
+	Text                           [35]uint32
 	Tokens                         [6]int64
 	Millis, TTFT, FirstText, Order int64
 	Sent, Flow, FirstReasoning     int64
@@ -104,16 +104,19 @@ type rowChunk struct {
 // rowMsg is the Text of a row's Claude message id, after rowText's, and
 // rowError its error's
 const (
-	rowMsg   = 33
+	rowMsg   = 34
 	rowError = 9
+	// rowClient is the Text of the client's own name, when the user counts
+	// it as another agent (Row.Client, #1958)
+	rowClient = 33
 )
 
 // rowText is every string of a row's record, the upstream's own stop
 // reason ("Upstream stop reason", #1927) and the service tiers (#1784)
 // among them: a string left out comes back empty from the cache, in the
 // page and in /v1/magpie/usage/requests (TestRowTextHoldsEveryString)
-func rowText(r *Row) [33]*string {
-	return [33]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed}
+func rowText(r *Row) [34]*string {
+	return [34]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed, &r.Client}
 }
 func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	if c.dict == nil {
@@ -299,7 +302,7 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 	cfg := settings.Load()
 	prices, _ := json.Marshal(cfg.ModelPrices)
 	wires, _ := json.Marshal(cfg.ModelWires)
-	meta := fmt.Sprintf("%s|%s|%s|%s|%s|%s", ids, renamed, prices, wires, statKey(provider.Path()), statKey(catalog.CachePath()))
+	meta := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s", ids, renamed, prices, wires, statKey(provider.Path()), statKey(catalog.CachePath()), clientAgentsKey())
 	h := sha256.New()
 	for _, current := range provider.All() {
 		fmt.Fprintf(h, "%q:%q:%v:%t:%t:%t;", current.ID, current.Where(), current.Catalogs(), current.IsPlugin(), current.Account == nil, current.Key != "")
@@ -383,7 +386,7 @@ func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.C
 			row.Priced = true
 			row.Cost = r.CostAt(*pr)
 		}
-		row.Agent = AgentOf(r.Agent)
+		row.Agent, row.Client = reportedAs(r.Agent)
 		return row
 	}
 	since := p.Since(now)
@@ -613,6 +616,17 @@ type matchGroup struct {
 	counts []int
 }
 
+// agyMatchSession stands for the session of an Antigravity CLI (agy) call
+// on both sides: agy sends the gateway no session header, so its gateway
+// records name none, and its transcript's steps are matched to them by
+// their tokens and time alone (#2097).
+const agyMatchSession = "\x00agy"
+
+// agyStepLongest is how long after an agy step began its gateway call may
+// have ended: a transcript's created_at is when the step began, to the
+// second, where every other session file's time is when its call ended.
+const agyStepLongest = 30 * time.Minute
+
 func matchedLocal(gateway *rowChunk, chunks []*rowChunk, skip map[rowRef]bool, since time.Time) map[rowRef]bool {
 	return matchedBlocks([]*rowChunk{gateway}, chunks, skip, since, true)
 }
@@ -678,6 +692,9 @@ func matchedBlocks(gateways []*rowChunk, chunks []*rowChunk, skip map[rowRef]boo
 			if session == "" {
 				session = gateway.Strings[p.Text[13]]
 			}
+			if session == "" && gateway.Strings[p.Text[0]] == "agy" {
+				session = agyMatchSession
+			}
 			if session == "" {
 				continue
 			}
@@ -707,6 +724,10 @@ func matchedBlocks(gateways []*rowChunk, chunks []*rowChunk, skip map[rowRef]boo
 				continue
 			}
 			key := matchKey{session: c.Strings[p.Text[13]], tokens: matchTokens(p.Tokens), failed: failed}
+			from, to := p.Time.Add(-2*time.Second), p.Time.Add(2*time.Second)
+			if c.Strings[p.Text[0]] == "agy" {
+				key.session, to = agyMatchSession, p.Time.Add(agyStepLongest)
+			}
 			count, candidate := 0, (rowRef{})
 			// Without a local ID either gateway partition can match. With an ID,
 			// only an unnamed gateway call can match (different IDs stay distinct).
@@ -719,8 +740,8 @@ func matchedBlocks(gateways []*rowChunk, chunks []*rowChunk, skip map[rowRef]boo
 				if g == nil {
 					continue
 				}
-				lo := sort.Search(len(g.ends), func(i int) bool { return !g.ends[i].at.Before(p.Time.Add(-2 * time.Second)) })
-				hi := sort.Search(len(g.ends), func(i int) bool { return g.ends[i].at.After(p.Time.Add(2 * time.Second)) })
+				lo := sort.Search(len(g.ends), func(i int) bool { return !g.ends[i].at.Before(from) })
+				hi := sort.Search(len(g.ends), func(i int) bool { return g.ends[i].at.After(to) })
 				if hi > lo {
 					count += hi - lo
 					candidate = g.ends[lo].index

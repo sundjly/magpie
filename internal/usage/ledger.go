@@ -33,6 +33,10 @@ type Row struct {
 	// which the gateway never saw: no status, no provider, no model asked
 	// for, but what the file says of the call. "" for one the gateway logged.
 	Source string `json:"source,omitempty"`
+	// Client is the client's own name when the user counts it as another
+	// agent (settings.ClientAgents, #1958): Agent is the one it is
+	// counted as, this what the ledger recorded it as
+	Client string `json:"client,omitempty"`
 }
 
 // Failed is whether the call failed: the agent was answered an error status,
@@ -146,7 +150,7 @@ func (f Filter) keeps(r Record) bool {
 	if f.Model != "" && r.Model != f.Model {
 		return false
 	}
-	if f.Agent != "" && AgentOf(r.Agent) != f.Agent {
+	if f.Agent != "" && ReportedAs(r.Agent) != f.Agent {
 		return false
 	}
 	if f.Provider != "" && r.Provider != f.Provider {
@@ -179,6 +183,10 @@ func (f Filter) keeps(r Record) bool {
 func (p Period) Since(now time.Time) time.Time {
 	if first, _, ok := p.days(now.Location()); ok {
 		return first
+	}
+	// a rolling window ends now, so it began that long ago (#2075)
+	if d := p.Last(); d > 0 {
+		return now.Add(-d)
 	}
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	switch p {
@@ -338,7 +346,7 @@ func logRecord(c sessions.Call) Record {
 func gatewayMatches(recs []Record, logs []sessions.Call) map[int]bool {
 	gateway, local := &rowChunk{}, &rowChunk{}
 	for i, r := range recs {
-		r.Agent = AgentOf(r.Agent)
+		r.Agent = ReportedAs(r.Agent)
 		gateway.add(Row{Record: r}, "", int64(i), false)
 	}
 	for i, c := range logs {
@@ -377,7 +385,7 @@ func ledgerMatched(since, until time.Time, f Filter, recs []Record, logs []sessi
 	agents, providers = []string{}, []string{}
 	identities := newSessionResolver(logs)
 	add := func(r Record, pr *catalog.Price, source string) {
-		if a := AgentOf(r.Agent); !slices.Contains(agents, a) {
+		if a := ReportedAs(r.Agent); !slices.Contains(agents, a) {
 			agents = append(agents, a)
 		}
 		if r.Provider != "" && !slices.Contains(providers, r.Provider) {
@@ -394,7 +402,7 @@ func ledgerMatched(since, until time.Time, f Filter, recs []Record, logs []sessi
 		if pr != nil && r.Input+r.Output > 0 {
 			row.Cost, row.Priced = r.CostAt(*pr), true
 		}
-		row.Agent = AgentOf(r.Agent)
+		row.Agent, row.Client = reportedAs(r.Agent)
 		if !r.IsRejected() {
 			sum.addFrom(row, pr)
 		}
@@ -560,6 +568,25 @@ func timeline(p Period, now, first time.Time) (since time.Time, bucket string, p
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	bucket, pts = "day", []Point{}
 	var n int
+	// a rolling window ends now: an hour each of two days or less, else a
+	// day each from when it began (#2075)
+	if d := p.Last(); d > 0 {
+		since = now.Add(-d)
+		if d <= 48*time.Hour {
+			bucket = "hour"
+			for h := 0; h <= int(d.Hours()); h++ {
+				t := since.Add(time.Duration(h) * time.Hour)
+				pts = append(pts, Point{Label: t.Format("15"), Time: t})
+			}
+		} else {
+			n = int(d.Hours())/24 + 1
+			for i := 0; i < n; i++ {
+				t := since.AddDate(0, 0, i)
+				pts = append(pts, Point{Label: t.Format("Jan 2"), Time: t})
+			}
+		}
+		return since, bucket, pts
+	}
 	if first, last, ok := p.days(now.Location()); ok {
 		// a picked range: an hour each of a single day, else a day each,
 		// a week each (from a Monday) past 60 days as All has

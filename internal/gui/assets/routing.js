@@ -443,6 +443,13 @@
     return { c: 0, k: -1 };
   }
 
+  // restModel is the one model a rest is for, "" when it is the account's
+  // or key's as a whole (#1960): an account out of a pool that counts some
+  // models only (Antigravity's Claude & GPT) still answers its others
+  // (gemini-3.8-flash, in a pool of its own). The gateway names it; a kept
+  // request from before it did has it on the end of the key it rests by,
+  // after the model of the seat that carried it.
+  const restModel = (rest, m) => rest.model || (m && rest.key?.endsWith("/" + m) ? m : "");
   // how long a rest is from a moment: now for a row, the moment it was
   // decided for the story of a request
   function restWhen(rest, from = now()) {
@@ -475,7 +482,7 @@
   }
 
   // the model a request went on: the one asked for, or the one set for
-  // Codex's subagents that magpie put a subagent on in its place
+  // an agent's subagents that magpie put a subagent on in its place
   const wentOn = (r) => (r.subagent && !r.subagent.kept ? r.subagent.to : r.model);
 
   // why routing put the first where it did
@@ -1072,7 +1079,13 @@
   // provider's in its own order — so the column holds still while the one
   // put first moves.
   // One whose vendor doesn't list the model to it is never asked, so it
-  // isn't drawn — only told of, among why it went where it did.
+  // isn't drawn — only told of, among why it went where it did. One held
+  // at its usage cap, or used up and set not to spend credits, is drawn,
+  // faded and saying so, as a resting one is: it is the user's own and
+  // comes back when its window renews, and a group member held so would
+  // otherwise vanish from the stage (#2129, wyq0x55: d-task's gpt-sol-6.1,
+  // used up, wasn't shown while a used-up Claude was).
+  const heldOut = (w) => !w.held && !!(w.capped || w.noCredits);
   function seated(r) {
     const members = r.group?.members || [];
     const key = (w) => {
@@ -1085,7 +1098,8 @@
       for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return typeof x[i] === "number" ? x[i] - y[i] : String(x[i]).localeCompare(String(y[i]));
       return 0;
     };
-    return [...r.order].sort(cmp);
+    const on = new Set(r.order.map(seat));
+    return [...r.order, ...(r.left || []).filter((w) => heldOut(w) && !on.has(seat(w)))].sort(cmp);
   }
 
   // a seat is one of a route's keys or accounts for one model: two of a
@@ -1146,6 +1160,10 @@
     return SPARE[h % SPARE.length];
   }
 
+  // foldersOf: the folders routes say, each once, in their order;
+  // lastLevel, a folder's last level ("workspace/magpie" → "magpie")
+  const foldersOf = (rs) => [...new Set(rs.map((r) => r.folder).filter(Boolean))];
+  const lastLevel = (f) => f.split("/").pop();
   function agentNode(id) {
     let a = agents.get(id);
     if (a) return a;
@@ -1320,7 +1338,13 @@
       const a = agents.get(id), r = rs.filter((x) => x.agent === id).pop(), ag = agentOf(id);
       if (a.icon !== (ag?.icon || "generic")) { a.icon = ag?.icon || "generic"; a.ic.replaceChildren(icon(a.icon)); }
       a.name.textContent = agentName(id);
-      a.sub.textContent = r.model;
+      // one agent working in more than one folder at once: which, by
+      // their last level (#1068). The stage holds an agent's latest
+      // request alone, so its others still going, or just done, count too.
+      const n = now(), going = pinned ? [] : [...src().values()].filter((x) => x.agent === id && (!x.done || at(x.time) + (x.ms || 0) > n - LINGER));
+      const fs = foldersOf([...new Set([...going, ...rs.filter((x) => x.agent === id)])].sort((x, y) => x.id - y.id));
+      a.sub.textContent = fs.length > 1 ? fs.map(lastLevel).join(", ") : r.model;
+      a.node.title = [agentName(id), r.model, ...fs.map((f) => t("Folder") + ": " + f)].join("\n");
     }
     // the account sets, the latest of each
     const latest = new Map();
@@ -1447,7 +1471,10 @@
     const on = r.order.filter((x) => !x.fallback).length;
     const pool = !g && f ? poolOf(f.provider) : null;
     const lone = !g && on <= 1 && !pool;
-    chip.textContent = t(m[0]);
+    // the head is told again every second: a chip whose text node is
+    // swapped while it is pressed gets no click in WebKit (#2151), so
+    // only what changed is written
+    setText(chip, t(m[0]));
     chip.hidden = lone;
     goTo(chip, g ? "group:" + g.id : pool ? "pool:" + f.provider : "", g ? g.name : f?.name || r.provider);
     hubText();
@@ -1460,12 +1487,13 @@
   // goTo makes what names a routing a way to where it is set: a provider's
   // own under Several accounts or keys, a group's its card
   function goTo(e, go, name) {
-    e.dataset.go = go;
     e.classList.toggle("rt-go", !!go);
     if (go) {
-      e.tabIndex = 0;
-      e.setAttribute("role", "button");
-      e.title = t("Change how {name} routes", { name });
+      const title = t("Change how {name} routes", { name });
+      if (e.dataset.go !== go) e.dataset.go = go;
+      if (e.tabIndex !== 0) e.tabIndex = 0;
+      if (e.getAttribute("role") !== "button") e.setAttribute("role", "button");
+      if (e.title !== title) e.title = title;
     } else for (const a of ["data-go", "tabindex", "role", "title"]) e.removeAttribute(a);
   }
   function goRouting(e, go) {
@@ -1500,15 +1528,21 @@
     for (const f of flying.values()) { onWire.add(f.id); busy.add(f.agent); }
     for (const [id, row] of rows) {
       // each row as the latest staged request that weighed it found it
+      // rests by key or account, and by key or account and model for a
+      // rest of one model only: the account's other models' rows don't
+      // rest with it (#1960)
       const r = src().get(row.rid) || pinned || cur, answered = new Set(), rests = new Map(), gave = new Map();
-      for (const w of r.order) if (w.rest) rests.set(w.id, w.rest);
+      const restAt = (id, m, rest) => { const rm = restModel(rest, m); rests.set(rm ? id + "\u0000" + rm : id, rest); };
+      const modelOf = (tr) => tried(r, tr)?.model || tr.model || "";
+      for (const w of r.order) if (w.rest) restAt(w.id, w.model, w.rest);
       for (const tr of r.tries) {
         if (tr.done && tryOk(tr)) answered.add(tryseat(r, tr));
         else if (tr.done && !tr.rest && !tr.again) gave.set(tryseat(r, tr), tr); // the error the agent got
-        if (tr.rest) rests.set(tr.id, tr.rest);
+        if (tr.rest) restAt(tr.id, modelOf(tr), tr.rest);
       }
-      for (const tr of r.tries) if (tr.done && tryOk(tr)) rests.delete(tr.id); // it answered: whatever rest it began in is over
-      const w = row.w, rest = rests.get(w.id), resting = rest && at(rest.until) > n;
+      // it answered: whatever rest it began in is over
+      for (const tr of r.tries) if (tr.done && tryOk(tr)) { rests.delete(tr.id); rests.delete(tr.id + "\u0000" + modelOf(tr)); }
+      const w = row.w, rest = rests.get(w.id) || rests.get(w.id + "\u0000" + (w.model || "")), resting = rest && at(rest.until) > n;
       let s;
       if (w.unlisted) s = unlistedWord(w);
       else if (resting) s = `${failWord(rest.why)} · ${restWhen(rest)}`;
@@ -1554,15 +1588,17 @@
     const together = (f, ms) => {
       const has = (m, c) => m.li.classList.contains(c);
       const on = ms.find((m) => has(m, "on")), resting = ms.filter((m) => has(m, "rest")).length;
+      const held = ms.filter((m) => !has(m, "rest") && has(m, "left")).length; // at a cap, or used up (#2129)
       const parts = [];
       if (on) parts.push(`${who(on.w)}: ${on.st.textContent}`);
-      if (resting < ms.length) parts.push(t("{n} available", { n: ms.length - resting }));
+      if (resting + held < ms.length) parts.push(t("{n} available", { n: ms.length - resting - held }));
       if (resting) parts.push(t("{n} resting", { n: resting }));
+      if (held) parts.push(t("{n} held", { n: held }));
       setText(f.st, parts.join(" · "));
       f.li.classList.toggle("on", !!on);
       f.wire.classList.toggle("live", !!on);
       if (on) f.wire.style.setProperty("--agent", on.wire.style.getPropertyValue("--agent"));
-      return !!ms.length && resting === ms.length;
+      return !!ms.length && resting + held === ms.length;
     };
     for (const f of folds.values()) {
       const ms = (f.ids || []).map((id) => rows.get(id)).filter(Boolean);
@@ -1742,6 +1778,7 @@
       ? t("{agent} asked for {model}: {name} serves it, and the vendor is asked for {sent}", { agent: agentName(r.agent), model: r.model, name: main.name, sent: main.model })
       : t("{agent} asked for {model}", { agent: agentName(r.agent), model: r.model }) + " → " + (main?.name || r.provider), ""]);
     if (r.kind) items.push([kindWhy(r), "aside kind"]);
+    else if (r.subagent) items.push([subagentWhy(r), "aside"]);
     if (r.sealedTask) items.push([t(r.group
       ? "This subagent task is encrypted. Only ChatGPT accounts can read it; other providers (such as Claude) are excluded regardless of quota."
       : "This subagent task is encrypted. Only ChatGPT accounts can read it."), "aside"]);
@@ -1892,17 +1929,22 @@
     return k;
   }
   const upstreamWhy = (tr) => t("The aggregator passed the request on to {upstream}, as its reply says: the provider that actually answered it.", { upstream: tr.upstream });
-  function kindWhy(r) {
+  // the model set for an agent's subagents in place of the lead's pick,
+  // or why the lead's pick stood
+  function subagentWhy(r) {
     const agent = agentName(r.agent);
-    // the model set for Codex's subagents in place of the lead's pick, or
-    // why the lead's pick stood
-    if (purposeOf(r.kind) === "kind:collab_spawn" && r.subagent) return r.subagent.kept
+    return r.subagent.kept
       ? t("{agent} requested a subagent on {model} and it stayed there: its subagents are set to {to}, but {why}.", { agent, model: r.subagent.asked, to: r.subagent.to, why: t(r.subagent.kept) })
       : t("{agent} requested a subagent on {model}; magpie put it on {to}, the model set for its subagents.", { agent, model: r.subagent.asked, to: r.subagent.to });
+  }
+  function kindWhy(r) {
+    const agent = agentName(r.agent);
+    if (purposeOf(r.kind) === "kind:collab_spawn" && r.subagent) return subagentWhy(r);
     if (purposeOf(r.kind) === "kind:collab_spawn") return r.group
       ? t("{agent} requested a subagent; magpie selects its model within this routing group.", { agent })
       : t("{agent} requested a subagent on {model}.", { agent, model: r.model });
     if (purposeOf(r.kind) === "kind:ambient_suggestions") return t("{agent} drafted the suggested prompts on its home page by itself, in the background, searching the project's files and connected apps, and checked them for safety. Not a turn of the conversation; Codex's Settings › Configuration › Suggested prompts turns it off.", { agent });
+    if (purposeOf(r.kind) === "kind:composer_predictions") return t("{agent} guessed your next message for its composer by itself, reading the whole conversation again. Not a turn of the conversation; Settings › General › Codex composer predictions picks its model, and Codex's Settings › General › Show predictions turns it off.", { agent });
     if (r.kind === "luna_reserve") return t("{agent} sent this turn on Luna Reserve, which it turns to once the plan's own allowance is used up; it picks the model itself.", { agent });
     // the searcher asked first failed or found nothing, and this one
     // searched in its place: say which and why, not just who searched
@@ -1962,11 +2004,13 @@
   // the row no longer says (#337)
   function reqTitle(r, how, tr) {
     const head = `${agentName(r.agent)} · ${r.model} → `;
+    // the folder its agent works in, the last two levels of it (#1068)
+    const folder = r.folder ? "\n" + t("Folder") + ": " + r.folder : "";
     const w = how !== "bad" && r.tries.length > 1 && tr && tried(r, tr);
-    if (!w) return head + r.provider;
+    if (!w) return head + r.provider + folder;
     const first = r.tries[0], f = tried(r, first);
     const from = f && seat(f) !== seat(w) ? "\n" + t("rerouted from {from}", { from: `${where(f)} · ${first.model || f.model}` }) : "";
-    return head + `${where(w)} · ${tr.model || w.model}` + from;
+    return head + `${where(w)} · ${tr.model || w.model}` + from + folder;
   }
 
   // the requests the gateway keeps, newest first: pick one to see how it was routed
@@ -2178,11 +2222,14 @@
       const memory = g.r.agent === "codex" && g.rows.every((r) => purposeOf(r.kind) === "kind:memory_consolidation");
       const suggestions = g.r.agent === "codex" && g.rows.every((r) => purposeOf(r.kind) === "kind:ambient_suggestions");
       const name = g.rows.find((r) => r.sessionTitle)?.sessionTitle || otherTitles.get(ownKey(g.r)) || (memory ? t("Background memory task") : suggestions ? t("Background prompt suggestions") : "");
-      setText(x.name, g.key ? agentName(g.r.agent) + " · " + (name || groupSession(g.r)) : t("No session ID"));
+      // the folder the session works in, as its latest request said it
+      // (#1068): it tells two runs of one agent apart before their titles
+      const folder = g.key ? g.rows.find((r) => r.folder)?.folder || "" : "";
+      setText(x.name, g.key ? [agentName(g.r.agent), folder, name || (folder ? "" : groupSession(g.r))].filter(Boolean).join(" · ") : t("No session ID"));
       const purpose = memory ? t("Codex is organizing memories from earlier chats in the background. This can continue after a chat finishes.") + "\n"
         : suggestions ? kindWhy(g.r) + "\n"
         : g.rows.some((r) => r.parentMatched) ? t("Title requests were automatically matched using the prompt and the applied chat title.") + "\n" : "";
-      x.name.title = g.key ? (name ? name + "\n" : "") + purpose + t("Session id") + ": " + groupSession(g.r) : t("These requests did not provide a session ID; they are not treated as one conversation.");
+      x.name.title = g.key ? (name ? name + "\n" : "") + purpose + (folder ? t("Folder") + ": " + folder + "\n" : "") + t("Session id") + ": " + groupSession(g.r) : t("These requests did not provide a session ID; they are not treated as one conversation.");
       const bits = [t(g.rows.length === 1 ? "{n} request" : "{n} requests", { n: g.rows.length })];
       if (visibleMetrics.includes("tokens") && total.tokens) bits.push(t("{n} tokens", { n: tokens(total.tokens) }));
       if (total.running) bits.push(t("{n} in progress", { n: total.running }));
@@ -2384,6 +2431,11 @@
 
   // when each rest was lifted by hand, by the key it rests by (#1869)
   const liftedAt = new Map();
+  // modelRest keeps the latest word of one of an account's models resting
+  // alone (#1960)
+  function modelRest(a, m, rest, when) {
+    if ((a.mrests.get(m)?.at || 0) <= when) a.mrests.set(m, { rest, at: when });
+  }
   // each account or key the kept requests weighed: how often it was
   // tried, answered and failed in them, and how the latest found it
   function renderActs(rs) {
@@ -2397,10 +2449,15 @@
       const candidates = new Map();
       r.order.forEach((w, i) => {
         const key = keyOf(w);
-        const a = by.get(key) || { w, tried: 0, ok: 0, fails: {}, last: 0, rest: null, restAt: 0, seen: 0, pos: 0, models: new Set() };
+        const a = by.get(key) || { w, tried: 0, ok: 0, fails: {}, last: 0, rest: null, restAt: 0, seen: 0, pos: 0, models: new Set(), mrests: new Map() };
         a.w = w; a.seen++; a.pos = i; a.at = r.time;
-        // a later request found it resting, or not
-        if (at(r.time) >= a.restAt) { a.rest = w.rest || null; a.restAt = at(r.time); }
+        // a later request found it resting, or not: the account as a
+        // whole, or one of its models alone (#1960), which leaves the
+        // account and its other models as they are
+        const rm = w.rest ? restModel(w.rest, w.model) : "", T = at(r.time);
+        if (rm) modelRest(a, rm, w.rest, T);
+        else if (T >= a.restAt) { a.rest = w.rest || null; a.restAt = T; }
+        if (!w.rest && w.model && (a.mrests.get(w.model)?.at || 0) <= T) a.mrests.delete(w.model);
         by.set(key, a);
         candidates.set(w.id, a);
       });
@@ -2411,12 +2468,17 @@
         const end = at(tr.start) + (tr.ms || 0);
         if (tryOk(tr)) { a.ok++; a.last = Math.max(a.last, end); const m = tr.model || r.order.find((x) => x.id === tr.id)?.model; if (m) a.models.add(m); }
         else a.fails[tr.fail || "other"] = (a.fails[tr.fail || "other"] || 0) + 1;
-        if (tr.rest && end >= a.restAt) { a.rest = tr.rest; a.restAt = end; }
+        const rm = tr.rest ? restModel(tr.rest, tr.model || r.order.find((x) => x.id === tr.id)?.model) : "";
+        if (rm) modelRest(a, rm, tr.rest, end);
+        else if (tr.rest && end >= a.restAt) { a.rest = tr.rest; a.restAt = end; }
       }
     }
     // a rest lifted by hand since the request that found it (#1869): the
     // kept requests still say it, until the next one asks it again
-    for (const a of by.values()) if (a.rest?.key && (liftedAt.get(a.rest.key) || 0) >= a.restAt) a.rest = null;
+    for (const a of by.values()) {
+      if (a.rest?.key && (liftedAt.get(a.rest.key) || 0) >= a.restAt) a.rest = null;
+      for (const [m, x] of a.mrests) if (x.rest.key && (liftedAt.get(x.rest.key) || 0) >= x.at) a.mrests.delete(m);
+    }
     const list = [...by.values()].sort((x, y) => (x.w.name || "").localeCompare(y.w.name || "") || x.w.provider.localeCompare(y.w.provider) || rankOf(x.w) - rankOf(y.w) || x.pos - y.pos);
     setText(actLabel, t("Accounts and keys"));
     setText(actNote, t("over those requests"));
@@ -2464,6 +2526,10 @@
       else name.append(el("b", "", who(w)), el("span", "", w.plan || (w.kind === "key" ? t("API key") : "")));
       let st, cls = "";
       const resting = a.rest && at(a.rest.until) > n;
+      // its models resting alone, while the account answers its others:
+      // a line of their own, naming them, under what the account has left
+      const parts = resting ? [] : [...a.mrests].filter(([, x]) => at(x.rest.until) > n)
+        .sort(([m, x], [l, y]) => at(x.rest.until) - at(y.rest.until) || m.localeCompare(l));
       if (resting) { st = `${failWord(a.rest.why)} · ${restWhen(a.rest)}`; cls = "rest"; }
       else if (w.unlisted) { st = unlistedWord(w); cls = "left"; }
       else if (w.noURL) st = noURLWord(w);
@@ -2481,6 +2547,10 @@
         ...(fails.length ? [el("span", "bad", fails.join(", "))] : []),
         ...(a.last ? [el("span", "", t("last answered {time}", { time: clock(a.last) }))] : []));
       row.append(name, el("div", "st " + cls, st));
+      if (parts.length) {
+        const r0 = parts[0][1].rest;
+        row.append(el("div", "st rest part", `${parts.map(([m]) => m).join(", ")} · ${failWord(r0.why)} · ${restWhen(r0)}`));
+      }
       // a subscription account's windows each, with when they reset, as
       // the Usage page read them (#1833): the figure above is the one
       // window routing went by. Live only: a kept day's requests were
@@ -2500,20 +2570,24 @@
         ms.append(...mdls.map((m) => el("code", "mdl", m)));
         row.append(ms);
       }
-      if (resting && a.rest.key) {
+      const lifts = resting ? (a.rest.key ? [a.rest] : []) : parts.map(([, x]) => x.rest).filter((x) => x.key);
+      if (lifts.length) {
         // any rest can be lifted by hand (#1869): a quota, a backoff, a
         // Retry-After, a network blip read as down. It only ends the rest;
         // the vendor refusing again rests it again as before. The vendor
         // wants the account verified (#152), or restricted it until an
         // appeal lifts it (#1849): where, and the way to stop its rest
         // once it is
-        const fix = el("div", "fix"), rest = a.rest;
+        const fix = el("div", "fix"), rest = lifts[0];
         if (rest.link) { const b = el("button", "link", t("Verify the account ↗")); b.onclick = () => api("open", { url: rest.link }).catch(() => {}); fix.append(b); }
         const go = el("button", "link", t(rest.why === "restricted" ? "The restriction is lifted — try it again"
           : rest.why === "verify" ? "It's verified — try it again" : "Try now"));
         if (rest.why !== "restricted" && rest.why !== "verify") go.title = t("Ends the rest: the next request asks it again. Refused again, it rests again.");
         go.onclick = async () => {
-          try { await api("gateway/unrest", { key: rest.key }); liftedAt.set(rest.key, Date.now()); render(); } catch (e) { go.textContent = e.message; }
+          try {
+            for (const x of lifts) { await api("gateway/unrest", { key: x.key }); liftedAt.set(x.key, Date.now()); }
+            render();
+          } catch (e) { go.textContent = e.message; }
         };
         fix.append(go);
         row.append(fix);
@@ -3139,7 +3213,7 @@
     }
   }
 
-  function hubText() { hubSub.textContent = (providers?.gateway?.url || "").replace(/^https?:\/\//, "") || t("gateway"); }
+  function hubText() { setText(hubSub, (providers?.gateway?.url || "").replace(/^https?:\/\//, "") || t("gateway")); }
 
   // labels in the page's language, and again when it changes
   function words() {
@@ -4363,11 +4437,45 @@
     ed.append(kLab, kw);
     drawSink();
     // a member slow to begin its answer: waited for, or the next asked
-    const fHint = el("div", "hint"), fw = el("div");
-    const drawFirst = () => fHint.textContent = d.firstToken
-      ? t("A member that hasn't begun answering after {n} — no text, reasoning or tool call yet — is let go and the next one asked, before any of it reaches the agent. It doesn't rest; the last one left is always waited for. Only for streamed requests.", { n: took(d.firstToken * 1000) })
-      : t("Every member is waited for, however long it takes to begin answering.");
-    fw.append(segs(FIRST_OPTS.map(([n, l]) => [n, t(l)]), d.firstToken || 0, (v) => { d.firstToken = +v; drawFirst(); }), fHint);
+    // or after as many minutes as the user types (Kismet Alan on Discord)
+    const fHint = el("div", "hint"), fw = el("div", "ctx-wrap first-wrap");
+    const firstIn = keys(input("", t("e.g. 5")));
+    firstIn.classList.add("ctx-in", "first-in");
+    firstIn.inputMode = "decimal";
+    firstIn.setAttribute("aria-label", t("Minutes"));
+    fHint.id = "groupFirstHint";
+    firstIn.setAttribute("aria-describedby", fHint.id);
+    const firstUnit = el("span", "first-unit", t("min"));
+    const firstMins = (s) => String(+(s / 60).toFixed(2));
+    let firstMode = FIRST_OPTS.some(([n]) => n === (d.firstToken || 0)) ? d.firstToken || 0 : "custom";
+    if (firstMode === "custom") firstIn.value = firstMins(d.firstToken);
+    let firstErr = "";
+    const drawFirst = () => {
+      firstIn.hidden = firstUnit.hidden = firstMode !== "custom";
+      firstIn.setAttribute("aria-invalid", String(!!firstErr));
+      fHint.textContent = firstErr || (d.firstToken
+        ? t("A member that hasn't begun answering after {n} — no text, reasoning or tool call yet — is let go and the next one asked, before any of it reaches the agent. It doesn't rest; the last one left is always waited for. Only for streamed requests.", { n: took(d.firstToken * 1000) })
+        : t("Every member is waited for, however long it takes to begin answering."));
+    };
+    fw.append(segs([...FIRST_OPTS.map(([n, l]) => [n, t(l)]), ["custom", t("Custom")]], firstMode, (v) => {
+      firstErr = "";
+      firstMode = v;
+      if (v !== "custom") d.firstToken = +v;
+      else {
+        // starts from what was picked, or 5 minutes from Wait
+        d.firstToken = d.firstToken > 0 ? d.firstToken : 300;
+        firstIn.value = firstMins(d.firstToken);
+      }
+      drawFirst();
+      if (v === "custom") firstIn.focus();
+    }), firstIn, firstUnit, fHint);
+    firstIn.oninput = () => {
+      const v = firstIn.value.trim().replace(",", ".");
+      const n = /^\d+(?:\.\d+)?$/.test(v) ? Math.round(+v * 60) : 0;
+      firstErr = n > 0 ? "" : t("{v} is not a number of minutes", { v: firstIn.value.trim() });
+      if (n > 0) d.firstToken = n;
+      drawFirst();
+    };
     ed.append(el("label", "", t("Slow to start")), fw);
     drawFirst();
     // every member busy at once: the agent told, or the members asked
@@ -4995,7 +5103,7 @@
       n.node.style.setProperty("--agent", hueOf(id));
       n.wire.style.setProperty("--agent", hueOf(id));
       n.node.replaceChildren(icon(ag?.icon || "generic"), el("span", "ps-name", agentName(id)));
-      n.node.title = agentName(id);
+      n.node.title = [agentName(id), ...foldersOf(recent.filter((r) => r.agent === id).slice(0, 20).reverse()).map((f) => t("Folder") + ": " + f)].join("\n");
       return n.node;
     }));
     pTo.replaceChildren(...pDst.map((k) => {
@@ -5202,7 +5310,16 @@
     if (r.tries.length > 1) meta.push(t("{n} tries", { n: r.tries.length }));
     if (r.tokens) meta.push(t("{n} tokens", { n: tokens(r.tokens) }));
     if (r.done && r.ms) meta.push(took(r.ms));
-    b.append(asked, when, to, el("span", "meta", meta.join(" · ")));
+    // and how fast it wrote, as the Routing page's row tells it (#2050):
+    // none for one that failed or whose speed can't be told
+    const speed = r.done && how !== "bad" ? speedOf(r) : 0;
+    if (speed) meta.push(t("{n} tok/s", { n: Math.round(speed) }));
+    // where it went and its totals share a line, and the totals, longer
+    // with the speed, go under it, at the right, when both don't fit: the
+    // panel is narrow, and neither the "served …" mark nor the speed is cut
+    const line = el("span", "pr-line");
+    line.append(to, el("span", "meta", meta.join(" · ")));
+    b.append(asked, when, line);
     b.title = reqTitle(r, how, tr);
     b.onclick = (e) => { api("window/main?view=routing&req=" + r.id, {}); e.currentTarget.blur(); };
     return b;

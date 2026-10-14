@@ -168,6 +168,13 @@ func (m model) updateProviders(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}))
 			return m, nil
 		}
+		if pr == nil && p.Account == nil && len(customURLs(p)) > 0 {
+			// a provider of the user's own: its base URLs, one by one
+			// (luluxiu_1_4392 on Discord: on Linux, the TUI had no way to
+			// change one)
+			m.openAsk(customURLsAsk(p, customURLs(p), nil))
+			return m, nil
+		}
 		if pr == nil || pr.Endpoint == "" {
 			m.flash, m.flashOK = p.Name+" is asked at its vendor's address · magpie provider set "+p.ID+" url=… changes a custom one's", false
 			return m, nil
@@ -389,7 +396,10 @@ func (m *model) openProviderModels(id string) {
 		input:  newInput("filter models"),
 		items:  modelOptions(id),
 		relist: func() []agent.Option { return modelOptions(id) },
-		empty:  "no models known yet · m on the providers list asks the vendor for them",
+		empty:  "no models known yet · ctrl+r asks the vendor for them",
+		// the list asked again from here, where its models are looked at
+		// (#2113), as m does on the providers list
+		refetch: func() tea.Cmd { return refetchCmd(id) },
 		toggle: func(model string) ([]agent.Option, string, bool) {
 			p, err := provider.Find(id)
 			if err != nil {
@@ -544,6 +554,73 @@ func customURLAsk(api customAPI) ask {
 							return askMsg{addKeyAsk(p)}
 						}
 					}}}
+			}
+		}}
+}
+
+// customURLs are the APIs a provider of the user's own has a base URL
+// for, in customAPIs' order.
+func customURLs(p provider.Provider) []customAPI {
+	var out []customAPI
+	for _, c := range customAPIs {
+		if customURLOf(p, c) != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// customURLOf is p's base URL on api.
+func customURLOf(p provider.Provider, api customAPI) string {
+	switch api.id {
+	case "custom-openai":
+		return p.Chat
+	case "custom-responses":
+		return p.Responses
+	case "custom-anthropic":
+		return p.Anthropic
+	}
+	return p.Gemini
+}
+
+// customURLsAsk asks for each of p's base URLs in turn, the one it has
+// now typed in, and saves those changed once all are answered: enter
+// alone keeps one, as typed or emptied.
+func customURLsAsk(p provider.Provider, apis []customAPI, typed []string) ask {
+	api := apis[len(typed)]
+	in := newInput(api.example)
+	in.SetValue(customURLOf(p, api))
+	return ask{crumbs: []string{"providers", p.Name, "base URL"}, input: in, empty: true,
+		hint: api.name + " · enter keeps it",
+		onEnter: func(v string) tea.Cmd {
+			return func() tea.Msg {
+				if v != "" {
+					u, err := url.Parse(v)
+					if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+						return flashMsg{text: "the base URL is an http:// or https:// address, e.g. " + api.example}
+					}
+				}
+				typed := append(slices.Clone(typed), strings.TrimRight(v, "/"))
+				if len(typed) < len(apis) {
+					return askMsg{customURLsAsk(p, apis, typed)}
+				}
+				var set []int
+				var said []string
+				for i, c := range apis {
+					if typed[i] != "" && typed[i] != customURLOf(p, c) {
+						set = append(set, i)
+						said = append(said, typed[i])
+					}
+				}
+				if len(set) == 0 {
+					return flashMsg{text: p.Name + " base URL unchanged", ok: true}
+				}
+				return saveProvider(p.ID, func(q *provider.Provider) {
+					for _, i := range set {
+						apis[i].set(q, typed[i])
+					}
+					provider.ForgetBalances()
+				}, p.Name+" base URL "+strings.Join(said, " · "))()
 			}
 		}}
 }
@@ -949,7 +1026,14 @@ func (m model) updateUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	i := slices.Index(periods, m.period)
 	switch msg.String() {
 	case "u":
+		// the choice is Settings' QuotaLeft, which the app and the menu bar
+		// read too: u turns it for them as well (#122)
 		m.qleft = !m.qleft
+		s := settings.Load()
+		s.QuotaLeft = m.qleft
+		if err := settings.Save(s); err != nil {
+			m.flash, m.flashOK = err.Error(), false
+		}
 		return m, nil
 	case "c":
 		// WorkBuddy's daily check-in, as the app's "Check in now"
@@ -1229,8 +1313,10 @@ func quotaLines(qs []provider.SubscriptionQuota, asked, left bool, width int, no
 			if r.Until != nil {
 				c += sFaint.Render(" until " + provider.ResetClock(*r.Until, now))
 			}
-			if provider.AutoResets(q.Provider, q.User) {
-				c += sFaint.Render(" · auto") // spent by itself once the week is used up
+			if q.Provider == "codex" {
+				if auto := provider.AutoResetWords(q.User); auto != "" {
+					c += sFaint.Render(" · " + auto) // spent by itself: its week used up, before one expires, or both
+				}
 			}
 			cells = append(cells, c)
 		}

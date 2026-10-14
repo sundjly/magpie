@@ -76,7 +76,8 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 // one taken from the cache is up to a minute old already, and Allowances
 // counts its own minute from then, not from when it asked (#1295).
 func loginUsageAt(ctx context.Context, agent string) (map[string]SubscriptionQuota, time.Time) {
-	if settings.AccountDiscoveryOff() {
+	// nor of a provider switched off or removed (leftAlone)
+	if settings.AccountDiscoveryOff() || leftAlone(agent) {
 		return nil, time.Time{}
 	}
 	asked := time.Now()
@@ -153,6 +154,18 @@ var noteHistoryWrite = noteQuotaHistory
 // allows, rather than asked for again — the vendors' endpoints are
 // rate limited, and two readings a moment apart told an account two ways.
 func loginReading(ctx context.Context, l Login) loginUsageEntry {
+	e := cachedLoginReading(ctx, l)
+	if l.Agent == "codex" {
+		// what magpie spent of its resets, as of now: a reading kept from
+		// before one was spent still says it was
+		used := ResetsUsed(l.User)
+		e.q.ResetsUsed, e.read.ResetsUsed = used, used
+	}
+	return e
+}
+
+// cachedLoginReading is loginReading as read or kept.
+func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 	key := l.Agent + "/" + strings.ToLower(l.User)
 	c := &loginUsageCache
 	// with allowances read only when asked, one nobody asked for is what

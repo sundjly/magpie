@@ -46,6 +46,13 @@ const providerUsage = `usage:
                                           ids… replace the list, +id adds one, -id takes one out, all: the default,
                                           none: serve none of them, its balance and usage still shown
   magpie provider refresh <id>            fetch the vendor's model list again (as the app's Fetch models)
+  magpie provider refresh-every <id> [6h|1d|off]
+                                          have the gateway (magpie serve, the app) fetch the list again by itself
+                                          once it is that old (at least 10m; off: only when asked)
+  magpie provider auto-include <id> [rule…|none]
+                                          rules over a model's id (a glob with *, e.g. 'gpt-*' '*claude*', or
+                                          're:…' a regular expression): the listed models one matches are exposed
+                                          now, and each one a later fetch newly lists; picks are only added to
   magpie provider account-models <id> [account|key [ids…|all]]
                                           the models one account or key alone serves; all: every model the provider has
   magpie provider account-cap <id> [account [percent|off]]
@@ -62,9 +69,15 @@ const providerUsage = `usage:
                                           past either a request is turned away with a 429 (0: no bound)
   magpie provider rpm <id> [n|off]        how many requests each account or key sends the vendor in any minute;
                                           one more waits for room, up to 2 minutes, then is turned away with a 429
-  magpie provider quota-rest <id> [30m|6h|7d|default]
+  magpie provider quota-rest <id> [30m|6h|7d|until 08:00|until 00:00+08:00|default]
                                           how long a key sits out once the vendor says it is out of its allowance
-                                          without saying when it is back (default: 15 minutes; at most 8 days)
+                                          without saying when it is back (default: 15 minutes; at most 8 days),
+                                          or until the time of day a daily allowance comes back, on this
+                                          computer's clock or at the vendor's offset from UTC
+  magpie provider rest-cap <id> [30m|6h|1d|default]
+                                          the most a key or account sits out while it keeps failing or being
+                                          rate limited, its rest doubling each time from a minute (default:
+                                          10 minutes for a failure, 30 for a rate limit; at most 8 days)
   magpie provider listed <id> yes|no      no: its models serve only through routing groups, not in the list
   magpie provider off|on <id>             switch it off (kept, but no agent or request uses it), or on again
   magpie provider test <id> [--as codex|claude-code] [model…]
@@ -105,7 +118,10 @@ const providerUsage = `usage:
                                    (a new-api relay's whole account: its access token and user id, from its personal settings)
                                    (balance.path: where the amount is in the reply, or a sum of those with + - * / and
                                     brackets; $ or ¥ in front adds the sign, % after it shows a percent of 1;
-                                    several go apart by ; each with a label: '5h: a.used / a.cap %; $credits.left')
+                                    several go apart by ; each with a label: '5h: a.used / a.cap %; $credits.left';
+                                    a list's items are a.*.used, or a[status=active].used for those that match,
+                                    in sum() max() min() count(): 'sum(a.*.used) / sum(a.*.cap) %'; one the reply
+                                    hasn't shows — and the others still show)
        magpie provider set my-relay context=272k context.gpt-6=1m
                                    (context: how long a request agents are told the models take, over what the
                                     vendor or models.dev says; context.<model> for one of them; empty clears)
@@ -553,8 +569,14 @@ func providerCmd(args []string) error {
 		return queueCmd(rest)
 	case "rpm":
 		return rpmCmd(rest)
+	case "refresh-every":
+		return refreshEveryCmd(rest)
+	case "auto-include":
+		return autoIncludeCmd(rest)
 	case "quota-rest":
 		return quotaRestCmd(rest)
+	case "rest-cap":
+		return restCapCmd(rest)
 	case "listed":
 		// no: the provider's models leave the list agents see and serve
 		// only through the routing groups they are in
@@ -628,11 +650,14 @@ func providerCmd(args []string) error {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		ms, dropped, err := p.Refetch(ctx)
+		ms, dropped, taken, err := p.RefetchTaking(ctx)
 		if err != nil {
 			return err
 		}
 		fmt.Println(green.Render("✓"), len(ms), "models from", fetchedFrom(*p))
+		if len(taken) > 0 {
+			fmt.Println(green.Render("+"), "newly listed, taken by its auto-include rules:", strings.Join(taken, ", "))
+		}
 		if len(dropped) > 0 {
 			fmt.Println(amber.Render("!"), "gone from its list, so no longer picked:", strings.Join(dropped, ", "))
 		}
@@ -814,8 +839,10 @@ func showProvider(p provider.Provider) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	if amount, ok, err := provider.Balance(ctx, p); ok {
 		from := ""
-		if p.BalanceURL != "" {
-			from = muted.Render("  from " + p.BalanceURL + " " + p.BalancePath)
+		// where it was asked: a panel's key query when its account query
+		// has no token left to ask with
+		if u, field := provider.BalanceQuery(p); u != "" {
+			from = muted.Render("  from " + u + " " + field)
 		}
 		if err != nil {
 			kv("balance", amber.Render("unavailable")+muted.Render("  "+err.Error())+from)
@@ -826,6 +853,12 @@ func showProvider(p provider.Provider) error {
 	cancel()
 	for _, k := range slices.Sorted(maps.Keys(p.Headers)) {
 		kv("header", k+": "+muted.Render(p.Headers[k]))
+	}
+	if d := p.RefreshInterval(); d > 0 {
+		kv("refresh", "every "+p.RefreshEvery+muted.Render("  the gateway fetches its list by itself"))
+	}
+	if len(p.AutoInclude) > 0 {
+		kv("include", strings.Join(p.AutoInclude, " ")+muted.Render("  newly listed models these match are exposed"))
 	}
 	ms := p.Exposed()
 	src := "models.dev"
@@ -947,7 +980,7 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		case "catalog":
 			p.Catalog = v
 		case "models":
-			p.Models = strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' })
+			p.Models = splitIDs(v, nil)
 		case "website":
 			p.Website = v
 		case "keys":
@@ -1188,6 +1221,9 @@ func serve() error {
 	fmt.Println(muted.Render("  OpenAI  "), public+"/v1/chat/completions", muted.Render("·"), public+"/v1/responses")
 	fmt.Println(muted.Render("  Anthropic"), public+"/v1/messages")
 	fmt.Println(muted.Render("  key     "), gateway.Token, muted.Render(keyNote()))
+	if l := tlsLine(); l != "" {
+		fmt.Println(l)
+	}
 	for _, l := range shareLines() {
 		fmt.Println(l)
 	}
@@ -1575,8 +1611,51 @@ func rpmCmd(rest []string) error {
 // vendor says one is out of its allowance without saying when it is back
 // (#1772: Ollama Cloud's weekly limit, asked again every 15 minutes).
 func quotaRestCmd(rest []string) error {
+	usage := fmt.Errorf("magpie provider quota-rest <id> [30m|6h|7d|until 08:00|until 00:00+08:00|default]")
+	if len(rest) == 3 && (rest[1] == "until" || rest[1] == "at") {
+		rest = []string{rest[0], rest[2]}
+	}
 	if len(rest) < 1 || len(rest) > 2 {
-		return fmt.Errorf("magpie provider quota-rest <id> [30m|6h|7d|default]")
+		return usage
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	if len(rest) > 1 {
+		// a time of day (#2008): until the daily allowance comes back
+		if strings.Contains(rest[1], ":") {
+			err = provider.SetQuotaResetAt(p.ID, rest[1])
+		} else {
+			var minutes int
+			if minutes, err = restMinutes(rest[1]); err == nil {
+				if err = provider.SetQuotaRest(p.ID, minutes); err == nil && minutes == 0 {
+					err = provider.SetQuotaResetAt(p.ID, "")
+				}
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if p, err = provider.Find(p.ID); err != nil {
+			return err
+		}
+	}
+	if t, ok := provider.NextResetAt(p.QuotaResetAt, time.Now()); ok {
+		fmt.Printf("%s · a key out of its allowance, with no word of when it is back, sits out until %s (next %s)\n", p.Name, p.QuotaResetAt, t.Local().Format("Jan 2 15:04"))
+	} else if d := p.QuotaRestFor(); d > 0 {
+		fmt.Printf("%s · a key out of its allowance, with no word of when it is back, sits out %s\n", p.Name, restWords(d))
+	} else {
+		fmt.Printf("%s · a key out of its allowance, with no word of when it is back, sits out 15 minutes (magpie's own)\n", p.Name)
+	}
+	return nil
+}
+
+// restCapCmd sets or shows the most a provider's keys and accounts sit out
+// while they keep failing or being rate limited (#2008).
+func restCapCmd(rest []string) error {
+	if len(rest) < 1 || len(rest) > 2 {
+		return fmt.Errorf("magpie provider rest-cap <id> [30m|6h|1d|default]")
 	}
 	p, err := provider.Find(rest[0])
 	if err != nil {
@@ -1587,17 +1666,17 @@ func quotaRestCmd(rest []string) error {
 		if err != nil {
 			return err
 		}
-		if err := provider.SetQuotaRest(p.ID, minutes); err != nil {
+		if err := provider.SetRestCap(p.ID, minutes); err != nil {
 			return err
 		}
 		if p, err = provider.Find(p.ID); err != nil {
 			return err
 		}
 	}
-	if d := p.QuotaRestFor(); d > 0 {
-		fmt.Printf("%s · a key out of its allowance, with no word of when it is back, sits out %s\n", p.Name, restWords(d))
+	if p.RestCap > 0 {
+		fmt.Printf("%s · a key or account that keeps failing sits out at most %s\n", p.Name, restWords(time.Duration(p.RestCap)*time.Minute))
 	} else {
-		fmt.Printf("%s · a key out of its allowance, with no word of when it is back, sits out 15 minutes (magpie's own)\n", p.Name)
+		fmt.Printf("%s · a key or account that keeps failing sits out at most 10 minutes, 30 when rate limited (magpie's own)\n", p.Name)
 	}
 	return nil
 }
@@ -1752,4 +1831,64 @@ func printPicksChange(before, after provider.Provider, args []string) {
 			fmt.Println(" ", amber.Render("!"), after.ID+"/"+id, muted.Render("isn't in "+after.Name+"'s list; exposed as given"))
 		}
 	}
+}
+
+// refreshEveryCmd shows, or sets, how often the gateway fetches a
+// provider's list by itself (#2135).
+func refreshEveryCmd(rest []string) error {
+	if len(rest) < 1 || len(rest) > 2 {
+		return fmt.Errorf("magpie provider refresh-every <id> [30m|6h|1d|off]")
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	if len(rest) > 1 {
+		if err := provider.SetRefreshEvery(p.ID, rest[1]); err != nil {
+			return err
+		}
+		if p, err = provider.Find(p.ID); err != nil {
+			return err
+		}
+	}
+	if d := p.RefreshInterval(); d > 0 {
+		fmt.Printf("%s · its model list is fetched by the gateway every %s (magpie serve, or the app, running)\n", p.Name, p.RefreshEvery)
+	} else {
+		fmt.Printf("%s · its model list is fetched only when asked (magpie provider refresh %s, or Fetch models)\n", p.Name, p.ID)
+	}
+	return nil
+}
+
+// autoIncludeCmd shows, or sets, the rules a provider's newly listed models
+// are exposed by (#2135); none clears them.
+func autoIncludeCmd(rest []string) error {
+	if len(rest) < 1 {
+		return fmt.Errorf("magpie provider auto-include <id> [rule…|none]")
+	}
+	p, err := provider.Find(rest[0])
+	if err != nil {
+		return err
+	}
+	if len(rest) > 1 {
+		rules := rest[1:]
+		if len(rules) == 1 && (rules[0] == "none" || rules[0] == "off") {
+			rules = nil
+		}
+		taken, err := provider.SetAutoInclude(p.ID, rules)
+		if err != nil {
+			return err
+		}
+		if len(taken) > 0 {
+			fmt.Println(green.Render("+"), "exposed now, as its rules match them:", strings.Join(taken, ", "))
+		}
+		if p, err = provider.Find(p.ID); err != nil {
+			return err
+		}
+	}
+	if len(p.AutoInclude) == 0 {
+		fmt.Printf("%s · no auto-include rules: a newly listed model is exposed as its picks say\n", p.Name)
+		return nil
+	}
+	fmt.Printf("%s · a newly listed model is exposed when one of these matches its id: %s\n", p.Name, strings.Join(p.AutoInclude, " "))
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
+	"golang.org/x/term"
 )
 
 const pluginUsage = `usage: magpie plugin [list] [--json]
@@ -51,7 +53,7 @@ func pluginCmd(args []string) error {
 		if !plugin.IsPath(rest[0]) && !plugin.HasBun() {
 			fmt.Println(muted.Render("Downloading Bun " + plugin.BunInUse() + ", which plugins run on…"))
 		}
-		e, err := plugin.Add(ctx, rest[0])
+		e, err := provider.AddPlugin(ctx, rest[0])
 		if err != nil {
 			return err
 		}
@@ -518,6 +520,13 @@ func askNumber(n int) (int, error) {
 	}
 }
 
+// promptTerminal and promptHidden read a hidden answer; tests stand in for
+// the terminal.
+var (
+	promptTerminal = term.IsTerminal
+	promptHidden   = term.ReadPassword
+)
+
 func askPrompt(q *plugin.Prompt) (string, error) {
 	if q.Type == "select" {
 		fmt.Println(q.Message)
@@ -539,6 +548,13 @@ func askPrompt(q *plugin.Prompt) (string, error) {
 		p += " " + muted.Render("("+q.Placeholder+")")
 	}
 	fmt.Print(p + " ")
+	// a "password" question (a token, a PAT) is typed unseen on a
+	// terminal, as an API key is (#1982); piped in, it is a line
+	if q.Type == "password" && promptTerminal(int(os.Stdin.Fd())) {
+		b, err := promptHidden(int(os.Stdin.Fd()))
+		fmt.Println()
+		return strings.TrimSpace(string(b)), err
+	}
 	line, err := stdin.ReadString('\n')
 	if err != nil && line == "" {
 		return "", err

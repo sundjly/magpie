@@ -27,29 +27,33 @@ import (
 // with one key, the gateway that fronts them, and who is routed where.
 
 type modelJSON struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`              // the user's name for it, if they gave one
-	Default  string   `json:"default,omitempty"` // its own name, when the user gave it another
-	Plain    string   `json:"plain,omitempty"`   // a remote magpie's model's name there alone, when Name has its provider there after it (catalog.Model's)
-	Kept     []string `json:"kept,omitempty"`    // the reasoning levels the user keeps of Efforts, when not all
-	Efforts  []string `json:"efforts,omitempty"`
-	Given    bool     `json:"given,omitempty"`     // its levels aren't known: Efforts are those it can be given, Kept those it was
-	Images   bool     `json:"images"`              // agents are told it can see images
-	ImageSet bool     `json:"imageSet,omitempty"`  // the user said so, rather than its vendor
-	Own      bool     `json:"ownImages,omitempty"` // its vendor's answer, which a staged Restore default shows
-	On       bool     `json:"on"`                  // exposed to agents
-	Context  int      `json:"context,omitempty"`   // the window agents are told: the user's, else Listed
-	Output   int      `json:"output,omitempty"`    // the reply limit agents are told: provider.ReplyLimit within Context (provider.OutputWithin)
-	Listed   int      `json:"listed,omitempty"`    // its window before the user's: its vendor's list's, else models.dev's
-	Max      int      `json:"max,omitempty"`       // the most its context may be set to, above Listed
-	Free     bool     `json:"free,omitempty"`      // costs the subscription nothing
-	Rate     float64  `json:"rate,omitempty"`      // the credits a request costs the subscription, as a multiple
-	RateWas  float64  `json:"rateWas,omitempty"`   // the rate before a discount running now
-	API      string   `json:"api,omitempty"`       // the one API the user said it is asked on
-	Auto     []string `json:"auto,omitempty"`      // the APIs its vendor's list says it is served on, what Auto asks it on
-	Same     string   `json:"same,omitempty"`      // the model the user said it is the same as, for the groups magpie finds (#583)
-	Merge    string   `json:"merge,omitempty"`     // what those groups merge it by when the user says nothing
-	Kind     string   `json:"kind,omitempty"`      // what the user said it makes: image or video (#1399)
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`              // the user's name for it, if they gave one
+	Default string   `json:"default,omitempty"` // its own name, when the user gave it another
+	Plain   string   `json:"plain,omitempty"`   // a remote magpie's model's name there alone, when Name has its provider there after it (catalog.Model's)
+	Kept    []string `json:"kept,omitempty"`    // the reasoning levels the user keeps of Efforts, when not all
+	Efforts []string `json:"efforts,omitempty"`
+	Given   bool     `json:"given,omitempty"` // its levels aren't known: Efforts are those it can be given, Kept those it was
+	// Reasonless: the user said it takes no reasoning ask
+	// (provider.SetModelReasonless): none of Efforts is kept, and none is sent
+	Reasonless bool     `json:"reasonless,omitempty"`
+	Images     bool     `json:"images"`              // agents are told it can see images
+	ImageSet   bool     `json:"imageSet,omitempty"`  // the user said so, rather than its vendor
+	Own        bool     `json:"ownImages,omitempty"` // its vendor's answer, which a staged Restore default shows
+	On         bool     `json:"on"`                  // exposed to agents
+	Context    int      `json:"context,omitempty"`   // the window agents are told: the user's, else Listed
+	Output     int      `json:"output,omitempty"`    // the reply limit agents are told: provider.ReplyLimit within Context (provider.OutputWithin)
+	Listed     int      `json:"listed,omitempty"`    // its window before the user's: its vendor's list's, else models.dev's
+	Max        int      `json:"max,omitempty"`       // the most its context may be set to, above Listed
+	Free       bool     `json:"free,omitempty"`      // costs the subscription nothing
+	Rate       float64  `json:"rate,omitempty"`      // the credits a request costs the subscription, as a multiple
+	RateWas    float64  `json:"rateWas,omitempty"`   // the rate before a discount running now
+	API        string   `json:"api,omitempty"`       // the one API the user said it is asked on
+	Auto       []string `json:"auto,omitempty"`      // the APIs its vendor's list says it is served on, what Auto asks it on
+	NoAPI      bool     `json:"noAPI,omitempty"`     // the provider has a URL for none of them: agents aren't offered it (provider.NoAPIFor, #2094)
+	Same       string   `json:"same,omitempty"`      // the model the user said it is the same as, for the groups magpie finds (#583)
+	Merge      string   `json:"merge,omitempty"`     // what those groups merge it by when the user says nothing
+	Kind       string   `json:"kind,omitempty"`      // what the user said it makes: image or video (#1399)
 	// what it costs, USD per million tokens (#819): the price the user set
 	// for it, and its list price, its vendor's else its maker's, before the
 	// provider's price rate
@@ -173,9 +177,13 @@ type providerJSON struct {
 	// AnonKey is the key Add another key adds when nothing is pasted
 	// (provider.AnonymousKey: OpenCode Zen's public, #1795), while the
 	// provider doesn't have it yet
-	AnonKey  string   `json:"anonKey,omitempty"`
-	Ready    bool     `json:"ready"`
-	Chosen   []string `json:"chosen"`   // the user's explicit picks, if any
+	AnonKey string   `json:"anonKey,omitempty"`
+	Ready   bool     `json:"ready"`
+	Chosen  []string `json:"chosen"` // the user's explicit picks, if any
+	// Speaks: the APIs a provider of keys has a URL for, which a model's
+	// own API set in the editor is checked against (NoAPI); none for a
+	// sign-in, whose models are never left out for it
+	Speaks   []string `json:"speaks,omitempty"`
 	Fallback []string `json:"fallback"` // where requests go when this one can't take them
 	Routing  string   `json:"routing"`  // how requests spread over its keys or accounts
 	Affinity string   `json:"affinity"` // how long a conversation stays with who answered it
@@ -551,6 +559,11 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	if out.Fallback == nil {
 		out.Fallback = []string{}
 	}
+	if p.Account == nil {
+		for _, s := range p.Speaks() {
+			out.Speaks = append(out.Speaks, string(s))
+		}
+	}
 	if out.Chosen == nil {
 		out.Chosen = []string{}
 	}
@@ -682,6 +695,7 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 				j.Auto = append(j.Auto, string(a))
 			}
 		}
+		j.NoAPI = p.NoAPIFor(m.ID)
 		j.Same = sames[p.ID+"/"+m.ID]
 		j.Kind = p.ModelKind(m.ID)
 		j.Merge = provider.MergeName(m.ID)
@@ -700,6 +714,10 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		}
 		if k, ok := kept[m.ID]; ok {
 			j.Kept = slices.DeleteFunc(slices.Clone(j.Efforts), func(e string) bool { return !slices.Contains(k, e) })
+		}
+		if provider.Reasonless(p.ID, m.ID) {
+			// none of its levels is kept: each is there to tick again
+			j.Reasonless, j.Kept = true, nil
 		}
 		return j
 	}
@@ -1359,6 +1377,16 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				if in.QuotaRest == 0 && old != nil {
 					in.QuotaRest = old.QuotaRest
 				}
+				// and the time of day they are back, set with `magpie
+				// provider quota-rest <id> until 08:00` (#2008)
+				if in.QuotaResetAt == "" && old != nil {
+					in.QuotaResetAt = old.QuotaResetAt
+				}
+				// and the most they sit out while they keep failing, set
+				// with `magpie provider rest-cap` (#2008)
+				if in.RestCap == 0 && old != nil {
+					in.RestCap = old.RestCap
+				}
 				// and Codex's requests as sent, set with `magpie provider
 				// set <id> codex=as-sent` (#1758)
 				if !in.CodexAsSent && old != nil {
@@ -1428,6 +1456,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					if req.AuthHeader == nil {
 						in.AuthHeader = old.AuthHeader
 					}
+					// its list's schedule and rules are set on their own, from
+					// the CLI (#2135)
+					in.RefreshEvery, in.AutoInclude = old.RefreshEvery, old.AutoInclude
 					in.KeepLogin = old.KeepLogin // set on its own, with keeplogin
 					in.KeepLoginAs = old.KeepLoginAs
 					in.SwitchOnly = old.SwitchOnly
@@ -1809,7 +1840,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				Count    int          `json:"count"`
 				Dropped  []string     `json:"dropped,omitempty"`
 				Provider providerJSON `json:"provider"`
-			}{len(ms), dropped, providerInfo(*p, agentUses(agent.Detected(), provider.GroupFinder()))})
+			}{fetchedCount(*p, len(ms)), dropped, providerInfo(*p, agentUses(agent.Detected(), provider.GroupFinder()))})
 			return
 		default:
 			http.NotFound(rw, r)
@@ -1964,12 +1995,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		if st.URL != "" {
-			// one that installs a CLI first has no URL yet: the window
-			// opens it once there is one
-			w.OpenURL(st.URL)
-		}
-		writeJSON(rw, st)
+		// one that installs a CLI first has no URL yet: the window opens it
+		// once there is one
+		writeJSON(rw, signInOpened{st, openError(w, st.URL)})
 	})
 	mux.HandleFunc("GET /api/signin/{id}", func(rw http.ResponseWriter, r *http.Request) {
 		st, ok := provider.SignInStatus(r.PathValue("id"))
@@ -2092,7 +2120,11 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		var in struct{ URL string }
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		if strings.HasPrefix(in.URL, "https://") || strings.HasPrefix(in.URL, "http://") || strings.HasPrefix(in.URL, agent.CindyScheme) {
-			w.OpenURL(in.URL)
+			// Open again on a sign-in says why it didn't open (#2043)
+			if err := w.OpenURL(in.URL); err != nil {
+				fail(rw, err)
+				return
+			}
 		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
@@ -2181,4 +2213,17 @@ func concurrencyOf(raw json.RawMessage) (n *int, keep bool, err error) {
 		return nil, false, fmt.Errorf("max concurrent requests must be from 0 to 1000, not %d", *n)
 	}
 	return n, false, nil
+}
+
+// fetchedCount is the number of models a refetch says it found: the
+// models the editor lists from it, not the vendor's ids. Antigravity lists
+// a model once per thinking level, which the editor shows as one model
+// with those levels (and Cursor and Devin fold theirs the same way), so
+// "Antigravity: 23 models" sat over 17 chips (#2069). The ids counted
+// stand when the provider offers none.
+func fetchedCount(p provider.Provider, ids int) int {
+	if n := len(p.Available()); n > 0 {
+		return n
+	}
+	return ids
 }

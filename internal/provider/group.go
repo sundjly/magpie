@@ -746,8 +746,9 @@ func membersOff(entries []Entry, all []Group, g Group, off func(pid, model strin
 // levels the members have in common, as before, but for those fixed at
 // an effort of their own, which take whatever the agent asks, and those
 // whose levels nothing magpie reads knows (levelsUnknown), which are
-// sent it as asked, and those that think with no levels to pick from,
-// which are sent it as asked up to high (the gateway's fitFor). With
+// sent it as asked, those that think with no levels to pick from,
+// which are sent it as asked up to high (the gateway's fitFor), and those
+// known not to think, which are sent no reasoning ask (Quiet). With
 // every member fixed, the group offers the levels they are fixed at, so
 // that an agent still asks it to reason. A group that names its own
 // levels (Group.Levels) offers those, and so does a group in it for its
@@ -782,11 +783,11 @@ func groupEntries(entries []Entry) []Entry {
 			var efforts []string
 			images, thinks, ctx, output := false, false, 0, 0
 			var imageInput *bool
-			unknown := false
+			unknown, reasonless := false, false
 			for _, x := range entries {
 				if x.Provider.ID == m.Provider.ID && x.Model == m.Model {
 					efforts, images, thinks, ctx, output, imageInput = x.Efforts, x.Images, x.Reasoning, x.Context, x.Output, x.ImageInput
-					unknown = levelsUnknown(x)
+					unknown, reasonless = levelsUnknown(x), x.Reasonless
 				}
 			}
 			// it reasons when a member does: the gateway sends the
@@ -794,10 +795,8 @@ func groupEntries(entries []Entry) []Entry {
 			// to think is sent none of it, as a text-only member is sent
 			// no image (#756's rule for images, applied to reasoning).
 			// One that doesn't think is no reason to tell the agent the
-			// group can't. Which levels the group offers is left as it
-			// was: a member known to take none still leaves the group
-			// none (#597), and the group is then Levelless, a shape
-			// magpie serves
+			// group can't, nor does it take the others' levels away
+			// (below)
 			e.Reasoning = e.Reasoning || thinks
 			// the reply agents are told is the longest a member gives: the
 			// gateway asks each member for no more than its own
@@ -835,6 +834,12 @@ func groupEntries(entries []Entry) []Entry {
 			// its models (the outermost that does)
 			if i := slices.IndexFunc(m.Via, func(v Group) bool { return len(v.Levels) > 0 }); i >= 0 {
 				efforts = m.Via[i].Levels
+			} else if reasonless {
+				// the user said it takes no reasoning ask: the gateway sends
+				// it none, whatever the agent asks, so it doesn't take the
+				// others' levels away (yuexian7 on Discord: a group of
+				// Opus and a model that answers reasoning_effort with 422)
+				continue
 			} else if m.Effort != "" {
 				if !slices.Contains(fixed, m.Effort) {
 					fixed = append(fixed, m.Effort)
@@ -857,6 +862,14 @@ func groupEntries(entries []Entry) []Entry {
 				// had none, and dsh offered no thinking for it (ARNO on
 				// Discord: routing group 在接入 harness 的时候，没有设置
 				// reasoning_efforts)
+				continue
+			} else if len(efforts) == 0 {
+				// it is known not to think (Quiet): the gateway sends it no
+				// reasoning ask (quiet.go, #950), so it doesn't take the
+				// others' levels away either. It left the group none, and a
+				// group that reasons with none to pick from is a model Codex
+				// offers no effort control for, at its own medium (#2127:
+				// a 高性能 group's sessions and subagents ran at medium)
 				continue
 			}
 			ultra = ultra || slices.Contains(efforts, "ultra")
@@ -923,7 +936,7 @@ func levelsUnknown(x Entry) bool {
 // but for one the user fixed at an effort (Group's member syntax, #189):
 // the gateway leaves that alone, the user's word over magpie's.
 func (e Entry) Quiet() bool {
-	return !e.Reasoning && len(e.Efforts) == 0 && !levelsUnknown(e)
+	return e.Reasonless || !e.Reasoning && len(e.Efforts) == 0 && !levelsUnknown(e)
 }
 
 // SaveGroup adds or replaces a group of the user's. Changing one magpie

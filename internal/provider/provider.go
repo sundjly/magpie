@@ -176,6 +176,18 @@ type Provider struct {
 	// back (#1772: Ollama Cloud's weekly limit); 0 is the gateway's own
 	// quarter of an hour. A time the vendor names stands over it.
 	QuotaRest int `json:"quotaRest,omitempty"`
+	// QuotaResetAt is the time of day a key of it out of its allowance is
+	// back, when its vendor refuses for a day's allowance without saying
+	// when (#2008: a free tier's "today's free-model token quota"): "08:00"
+	// on this computer's clock, or "00:00+08:00" on the vendor's. Set, it
+	// stands over QuotaRest; a time the vendor names stands over both.
+	QuotaResetAt string `json:"quotaResetAt,omitempty"`
+	// RestCap is the most, in minutes, one of its keys or accounts sits
+	// out while it keeps failing or keeps being rate limited as soon as
+	// its rest is over (#2008); 0 is the gateway's own, 10 minutes for a
+	// failure and 30 for a rate limit. The vendor's own "try again in"
+	// still stands over it.
+	RestCap int `json:"restCap,omitempty"`
 
 	// PriceRate is what the provider charges against the official price
 	// (ITea312, #819): a relay that bills 0.8× or 1.5× of it. It scales the
@@ -322,6 +334,14 @@ type Provider struct {
 	// listed since is served beside picks that held every one listed then
 	// (withNewlyListed), and one listed then and left unpicked stays out.
 	PickedFrom []string `json:"pickedFrom,omitempty"`
+	// RefreshEvery, for a provider of the user's own, is how often the
+	// gateway fetches its model list by itself ("6h", "1d"; none, only when
+	// asked), as Fetch models does (#2135). See autolist.go.
+	RefreshEvery string `json:"refreshEvery,omitempty"`
+	// AutoInclude are patterns over a model's id (a glob with *, or a
+	// regular expression after "re:"): a model a fetch newly lists that one
+	// matches joins Models, beside the picks already there (#2135).
+	AutoInclude []string `json:"autoInclude,omitempty"`
 	// Unlisted keeps the provider's own models out of the list agents see:
 	// it serves only through the routing groups it is in, and by its
 	// "provider/model" ids.
@@ -381,6 +401,10 @@ type file struct {
 	// Routing page (#779), by id, found ones among them; one not in it
 	// follows those that are (see SetGroupOrder).
 	GroupOrder []string `json:"groupOrder,omitempty"`
+	// PluginLeft are the picks of a removed plugin's providers, set aside
+	// when it was removed and put back when it is added again (#2057; see
+	// plugin_left.go).
+	PluginLeft []LeftRecord `json:"pluginLeft,omitempty"`
 }
 
 // Path is the file the user's providers live in.
@@ -514,6 +538,7 @@ func (p Provider) clone() Provider {
 	p.Fallback = slices.Clone(p.Fallback)
 	p.Models = slices.Clone(p.Models)
 	p.PickedFrom = slices.Clone(p.PickedFrom)
+	p.AutoInclude = slices.Clone(p.AutoInclude)
 	p.Headers = maps.Clone(p.Headers)
 	p.ExtraBody = maps.Clone(p.ExtraBody)
 	p.AccountProxies = maps.Clone(p.AccountProxies)
@@ -714,7 +739,7 @@ func Save(p Provider) error {
 		if p.ID == "kiro" {
 			key = p.Key
 		}
-		p = Provider{ID: p.ID, Key: key, Models: p.Models, NoModels: p.NoModels, PickedFrom: p.PickedFrom, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, SwitchOnly: p.SwitchOnly, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountNames: p.AccountNames, MaxConcurrency: p.MaxConcurrency, AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM, QuotaRest: p.QuotaRest, PinUpstream: p.PinUpstream, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID), Tucked: tuckedAccount(p.ID)}
+		p = Provider{ID: p.ID, Key: key, Models: p.Models, NoModels: p.NoModels, PickedFrom: p.PickedFrom, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, SwitchOnly: p.SwitchOnly, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountNames: p.AccountNames, MaxConcurrency: p.MaxConcurrency, AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM, QuotaRest: p.QuotaRest, QuotaResetAt: p.QuotaResetAt, RestCap: p.RestCap, PinUpstream: p.PinUpstream, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID), Tucked: tuckedAccount(p.ID)}
 	} else {
 		p.AccountProxies = keyProxies(p) // a provider of keys proxies each key apart
 		if subscriptionID(p.ID) && !stored(p.ID) {
@@ -1147,6 +1172,10 @@ func normalize(p Provider) Provider {
 	p.QueueLimit, p.QueueWait = min(max(p.QueueLimit, 0), MaxQueueLimit), min(max(p.QueueWait, 0), MaxQueueWait)
 	p.MaxRPM = min(max(p.MaxRPM, 0), MaxRPMLimit)
 	p.QuotaRest = min(max(p.QuotaRest, 0), MaxQuotaRest)
+	p.RestCap = min(max(p.RestCap, 0), MaxQuotaRest)
+	if _, err := ParseResetAt(p.QuotaResetAt); err != nil {
+		p.QuotaResetAt = ""
+	}
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	// a Bedrock provider saved before the preset had its Responses API
 	// (#176) gets it where its chat completions are: the runtime serves both

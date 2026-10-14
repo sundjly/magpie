@@ -49,9 +49,10 @@ func topSummary(p Period, now time.Time, n int) Summary {
 		summaries.Unlock()
 		return summarizeFrom(p, now, snapshot.first, snapshot.keyProviders, func(fn func(Record)) { snapshot.visit(p.Since(now), fn) })
 	}
-	if p.IsRange() {
+	if p.IsRange() || p.Last() > 0 {
 		// a picked range is read afresh each time, so ranges never pile up
-		// in the cache (#1492)
+		// in the cache (#1492), and so is a rolling window, whose start
+		// moves with the clock though the log hasn't changed (#2075)
 		return topOf(work(), n)
 	}
 	meta := usagePriceCacheKey(now)
@@ -113,5 +114,6 @@ func usagePriceCacheKey(now time.Time) string {
 		fmt.Fprint(h, statKey(catalog.LivePath(current.ID)))
 	}
 	meta += fmt.Sprintf("|%x", h.Sum(nil))
-	return meta
+	// and the clients the user counts as agents (#1958)
+	return meta + "|" + clientAgentsKey()
 }
