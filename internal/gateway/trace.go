@@ -61,6 +61,17 @@ type Route struct {
 	// Subagent is a Codex or Claude Desktop subagent's request put on
 	// the model set for its subagents, or kept on the one asked for and why
 	Subagent *SubagentPick `json:"subagent,omitempty"`
+	// Sub: the Claude Code subagent the request is of (subagentOf), whose
+	// session header is its conversation's; "" for the conversation's own
+	Sub string `json:"sub,omitempty"`
+	// SubagentEffort is Desktop's configured effort. Tries keep the actual
+	// level after member overrides and fitting to the model.
+	SubagentEffort string `json:"subagentEffort,omitempty"`
+	// SubagentID is the Claude Code subagent whose turn this is
+	// (subagentTurnOf), the id the ledger's Subagent keeps too. Claude Code
+	// names no kind for it, so Kind stays empty and the Routing page tags
+	// it as Codex's subagents are.
+	SubagentID string `json:"subagentId,omitempty"`
 	// Nested: the rules of the groups in the group, down the way to the
 	// one that went first, each as it decided
 	Nested   []NestedRule `json:"nested,omitempty"`
@@ -88,6 +99,14 @@ type Route struct {
 	ReasoningHidden bool  `json:"reasoningHidden,omitempty"`
 	// Flow: the ms its content took to come (Call.Flow)
 	Flow int64 `json:"flow,omitempty"`
+	// Sent: ms from the request to its answering try's request written
+	// to the vendor, and of it Own magpie's, Retried the tries that
+	// failed first, Queued waiting for a slot, as the usage record has
+	// them (Record.Sent); the rest of Sent is connecting and sending
+	Sent    int64 `json:"sent,omitempty"`
+	Own     int64 `json:"own,omitempty"`
+	Retried int64 `json:"retried,omitempty"`
+	Queued  int64 `json:"queued,omitempty"`
 	// Served: the model the reply says answered, as the last try has it;
 	// Swapped: another than the one that try asked for; Routed: that try
 	// asked another magpie's routing group, and Served is its member
@@ -106,6 +125,10 @@ type Route struct {
 	// in (shortFolder), never the whole path; a request that says none
 	// takes its session's, as said last (#1068)
 	Folder string `json:"folder,omitempty"`
+	// Archive: "<date>/<id>", where the request archive keeps the call,
+	// when it was on (Call.Archive), for the page to read its bodies back
+	// once the recent calls have let them go
+	Archive string `json:"archive,omitempty"`
 }
 
 // RouteUsage is one billable attempt's pricing inputs, kept in routing history.
@@ -317,9 +340,16 @@ type Try struct {
 	// waited, so nobody was asked again (#1894: the Routing page's story
 	// otherwise ended on "tried again in 1s", a retry that never came)
 	Gone bool `json:"gone,omitempty"`
+	// Earlier: the last try, its allowance run out, whose error the agent
+	// wasn't told: it got the first failure before it that wasn't an
+	// allowance's (Discord, waroy). Whether a try went on is the next
+	// try in Tries, which is appended only as it is asked (#2281)
+	Earlier bool `json:"earlier,omitempty"`
 	// Queued: ms it waited for one of its key's or account's slots, the
 	// provider's MaxConcurrency out already (concurrency.go)
 	Queued int64 `json:"queued,omitempty"`
+	// Net: where its time went up to its reply's first byte (TryNet)
+	Net *TryNet `json:"net,omitempty"`
 	// Reset: its week used up and nobody else left, one of the account's
 	// Codex resets was spent by itself (the user's setting) — on Who, and
 	// what spending it did — and the request asked again
@@ -451,7 +481,9 @@ func (t *trace) changed() {
 // told it: one begun without (begin alone) is told to no held key.
 func (t *trace) beginFor(req *http.Request, r Route) *Route {
 	r.callerKey = access.Caller(req.Context()).KeyID
-	return t.begin(r)
+	rt := t.begin(r)
+	noteRoute(req.Context(), rt)
+	return rt
 }
 
 func (t *trace) begin(r Route) *Route {

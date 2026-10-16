@@ -77,13 +77,19 @@ type Model struct {
 	// Tiers, in one ChatGPT account's own model list, are the service
 	// tiers its plan offers on the model ("priority", "ultrafast"); in
 	// another magpie's, the tiers it offers its Codex on the model
-	// (#1234).
+	// (#1234); in a provider plugin's, the tiers it says its vendor serves
+	// the model at (#2514).
 	Tiers []string `json:",omitempty"`
 	// OwnTier is set on a model of a provider the user added by its
 	// address, which the gateway sends the tier Codex asks for as it is
 	// (gateway Request.Tier): Codex offers it the tiers of its own entry
 	// for the same model, Fast on another GPT model.
 	OwnTier bool `json:",omitempty"`
+	// CodexFast is set on a GPT model a ChatGPT account serves itself, not
+	// through a routing group: one Codex's /fast (service_tier "priority")
+	// is asked of, which OpenCode is offered as fast variants (#2379).
+	// Not kept with a list: it is the provider's, worked out each time.
+	CodexFast bool `json:"-"`
 	// AgentsV2 is set on a model Codex is told multi-agent V2 for, so its
 	// Ultra hands work to Codex's agents: one offering Ultra that no
 	// ChatGPT account answers for (provider.Entry's).
@@ -454,7 +460,7 @@ var (
 	// is, so it is never taken for another either (renamed)
 	canonical map[string]bool
 
-	syncMu sync.Mutex
+	syncCh = make(chan struct{}, 1)
 )
 
 // CachePath is where `magpie sync` stores the models.dev catalog.
@@ -620,8 +626,25 @@ func Reset() {
 // Sync downloads the models.dev catalog into CachePath. It serializes with
 // itself so a background refresh and a manual one cannot interleave writes.
 func Sync(ctx context.Context) error {
-	syncMu.Lock()
-	defer syncMu.Unlock()
+	return syncLock(ctx, false)
+}
+
+// SyncIfMissing is Sync, but returns nil if a catalog already exists once the
+// lock is acquired.
+func SyncIfMissing(ctx context.Context) error {
+	return syncLock(ctx, true)
+}
+
+func syncLock(ctx context.Context, onlyIfMissing bool) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case syncCh <- struct{}{}:
+	}
+	defer func() { <-syncCh }()
+	if onlyIfMissing && Source() != "" {
+		return nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsDevURL, nil)
 	if err != nil {
 		return err
@@ -783,9 +806,11 @@ func canonicallyPriced(all map[string]mdProvider, providers []string, b string) 
 func dashed(id string) string { return strings.ReplaceAll(id, ".", "-") }
 
 // APIOf is the API a models.dev provider's model is served on, when the
-// catalog says it's one of its own: "responses" or "anthropic" for a model
-// OpenCode serves through OpenAI's or Anthropic's SDK, not the
-// OpenAI-compatible one the rest of its models go through.
+// catalog says it's one of its own: "responses", "anthropic" or "gemini"
+// for a model OpenCode serves through OpenAI's, Anthropic's or Google's
+// SDK (Gemini's generateContent: Zen's Gemini models, Go's Gemini 4 Argon
+// Contributor, #2168), not the OpenAI-compatible one the rest of its
+// models go through.
 func APIOf(providerID, modelID string) string {
 	if p, ok := load()[providerID]; ok {
 		if m, ok := p.Models[modelID]; ok && m.Provider != nil {
@@ -794,6 +819,8 @@ func APIOf(providerID, modelID string) string {
 				return "responses"
 			case "@ai-sdk/anthropic":
 				return "anthropic"
+			case "@ai-sdk/google":
+				return "gemini"
 			}
 		}
 	}

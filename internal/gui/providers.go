@@ -92,6 +92,16 @@ type providerJSON struct {
 	// on this machine or the local network, set to go unmasked by
 	// Settings' redaction (provider.Unredacted)
 	Unredacted bool `json:"unredacted"`
+	// a provider the user added whose own HTTPS host's certificate is
+	// taken as it is (provider.InsecureTLS, #2383); TakesInsecureTLS: it
+	// may be, being the user's own and not a preset's or a sign-in's
+	InsecureTLS      bool `json:"insecureTLS"`
+	TakesInsecureTLS bool `json:"takesInsecureTLS"`
+	// Codex's compaction asked of it as Codex sent it, its sealed item
+	// back as it came (provider.NativeCompaction, #1099); CarriesCompaction: its
+	// wire can carry it, so the editor offers it
+	NativeCompaction  bool `json:"nativeCompaction"`
+	CarriesCompaction bool `json:"carriesCompaction,omitempty"`
 	// requests go with the agent's own User-Agent, not magpie's
 	// (provider.PassUserAgent, #1851); OwnClient: they go as a client of
 	// the vendor's own whatever is set (provider.OwnClient), so the
@@ -126,9 +136,10 @@ type providerJSON struct {
 	AccountNames map[string]string `json:"accountNames,omitempty"`
 	AccountSeats map[string]string `json:"accountSeats,omitempty"`
 	// where a custom provider's balance is asked (see provider.Balance)
-	BalanceURL  string `json:"balanceURL,omitempty"`
-	BalancePath string `json:"balancePath,omitempty"`
-	ModelsURL   string `json:"modelsURL,omitempty"`
+	BalanceURL    string `json:"balanceURL,omitempty"`
+	BalancePath   string `json:"balancePath,omitempty"`
+	BalanceMethod string `json:"balanceMethod,omitempty"`
+	ModelsURL     string `json:"modelsURL,omitempty"`
 	// an account-wide balance token (provider.BalanceToken): whether the
 	// vendor takes one, and whether one is saved; never the token itself
 	BalanceToken struct {
@@ -252,8 +263,6 @@ type moveJSON struct {
 	Why *provider.MoveWhy `json:"why,omitempty"`
 }
 
-// stepPlanJSON: whether a StepFun provider's platform sign-in is kept, and
-// where and how the user gets one
 // accessKeyJSON is a provider's account access key as the editor sees
 // it: whose ("volcengine", "tencent"), the ID, and whether a Secret is
 // saved, never the Secret.
@@ -284,6 +293,8 @@ func presetAccessKey(pr provider.PresetDef) (string, []string) {
 	return vendor, ids
 }
 
+// stepPlanJSON: whether a StepFun provider's own platform sign-in is kept,
+// and where and how the user gets one
 type stepPlanJSON struct {
 	Site        string `json:"site"`
 	SignedIn    bool   `json:"signedIn"`
@@ -539,7 +550,7 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), TestsAs: p.TestClients(), DecideTest: p.AsksDecideModels(), MarksKinds: p.MarksKinds(),
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
-		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountNames: p.AccountNames, Headers: p.Headers, ExtraBody: p.ExtraBody, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, PassUserAgent: p.PassUserAgent, OwnClient: p.OwnClient(), AuthHeader: p.AuthHeader, BothAuth: p.BothAuth(), BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, ModelsURL: p.ModelsURL,
+		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountNames: p.AccountNames, Headers: p.Headers, ExtraBody: p.ExtraBody, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, InsecureTLS: p.InsecureTLS, TakesInsecureTLS: p.TakesInsecureTLS(), NativeCompaction: p.NativeCompaction, CarriesCompaction: p.CarriesCompaction(), PassUserAgent: p.PassUserAgent, OwnClient: p.OwnClient(), AuthHeader: p.AuthHeader, BothAuth: p.BothAuth(), BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, BalanceMethod: p.BalanceMethod, ModelsURL: p.ModelsURL,
 		Ready: p.Ready(), Chosen: p.Picks(), Models: []modelJSON{}, Agents: []providerAgent{},
 		Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, SwitchOnly: p.SwitchOnly, Unlisted: p.Unlisted, NoModels: p.ServesNone(), Off: p.Off, Contexts: p.Contexts,
 		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(), PriceRate: p.PriceRate,
@@ -594,7 +605,7 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		}
 	}
 	if site := provider.StepFunSite(p); site != "" {
-		out.StepPlan = &stepPlanJSON{site, provider.StepFunSignedIn(site), provider.StepFunSignInURL(site), provider.StepFunBookmarklet()}
+		out.StepPlan = &stepPlanJSON{site, provider.StepFunSignedIn(p.ID), provider.StepFunSignInURL(site), provider.StepFunBookmarklet()}
 	}
 	out.Key.Set = p.Key != ""
 	out.Key.Masked = provider.Mask(p.Key)
@@ -613,12 +624,14 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 		out.KeyList = []provider.KeyInfo{}
 	}
 	// a key the gateway passes over after a failure says so on its row
+	restKey := p.RestKeys()
 	for i, k := range out.KeyList {
 		if !k.On {
 			continue
 		}
-		if r, ok := keyRestOf(p.RestKey(k)); ok {
-			out.KeyList[i].Rest = &provider.KeyRest{Why: r.Why, Status: r.Status, Until: r.Until, Key: p.RestKey(k)}
+		key := restKey(k)
+		if r, ok := keyRestOf(key); ok {
+			out.KeyList[i].Rest = &provider.KeyRest{Why: r.Why, Status: r.Status, Until: r.Until, Key: key}
 		}
 	}
 	if !out.Key.Set && p.Ready() {
@@ -708,6 +721,8 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 			j.List, j.RemoteList = &pr, p.RemotePriced(m.ID)
 		} else if pr, ok := provider.MakerPrice(m.ID); ok {
 			j.List = &pr
+		} else if pr, ok := provider.SamePriceIn(held, p.ID, m.ID); ok {
+			j.List = &pr // the model it is the same as, beside it (#2344)
 		}
 		if len(j.Efforts) == 0 {
 			j.Efforts, j.Given = provider.Levels, true
@@ -944,18 +959,25 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 	})
 	// Recent-call bodies are read only when their row is opened, not with
 	// every Providers or Gateway refresh (#1521): forty calls' bodies made
-	// /api/providers 20 MB. The ring may have moved on by then.
+	// /api/providers 20 MB. The ring may have moved on by then. ?route= is
+	// the Routing page's request instead of the ring's number (Fate on
+	// Discord: a request there is opened to its request and response).
 	mux.HandleFunc("GET /api/gateway/call", func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Cache-Control", "no-store")
 		if gw := served.Load(); gw != nil {
+			var c gateway.Call
+			ok := false
 			if id, err := strconv.ParseUint(r.URL.Query().Get("id"), 10, 64); err == nil {
-				if c, ok := gw.RecentCall(id); ok {
-					writeJSON(rw, map[string]any{
-						"requestBody": c.RequestBody, "responseBody": c.ResponseBody,
-						"requestTruncated": c.RequestTruncated, "responseTruncated": c.ResponseTruncated,
-					})
-					return
-				}
+				c, ok = gw.RecentCall(id)
+			} else if route, err := strconv.ParseInt(r.URL.Query().Get("route"), 10, 64); err == nil {
+				c, ok = gw.RouteCall(route)
+			}
+			if ok {
+				writeJSON(rw, map[string]any{
+					"requestBody": c.RequestBody, "responseBody": c.ResponseBody,
+					"requestTruncated": c.RequestTruncated, "responseTruncated": c.ResponseTruncated,
+				})
+				return
 			}
 		}
 		rw.Header().Set("Content-Type", "application/json")
@@ -1036,6 +1058,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// Proxy is the proxy its requests go through (#237), "" to
 			// follow the global one; a save that leaves it out keeps it
 			Proxy *string `json:"proxy"`
+			// InsecureTLS is whether the certificate of its own HTTPS
+			// host is taken unchecked (#2383); a save that leaves it out
+			// keeps it
+			InsecureTLS *bool `json:"insecureTLS"`
 			// MaxConcurrency is how many requests each of its keys or
 			// accounts has out at once: a number (0 none), null for what
 			// its plugin says or none; a save that leaves it out keeps it
@@ -1109,6 +1135,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// quota left goes to the back (provider.Provider.Sink); a
 			// save that leaves it out keeps it
 			Sink *bool `json:"sink"`
+			// NativeCompaction, for save: Codex's compaction asked of it
+			// as Codex sent it (provider.Provider.NativeCompaction); a save
+			// that leaves it out keeps it
+			NativeCompaction *bool `json:"nativeCompaction"`
 			// AuthHeader, for save: which header the key goes in on a
 			// third-party Anthropic API (provider.Provider.AuthHeader); a
 			// save that leaves it out keeps it, one learned too
@@ -1166,6 +1196,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		}
 		if req.Sink != nil {
 			in.Sink = *req.Sink
+		}
+		if req.NativeCompaction != nil {
+			in.NativeCompaction = *req.NativeCompaction
 		}
 		if req.AuthHeader != nil {
 			in.AuthHeader = *req.AuthHeader
@@ -1234,6 +1267,14 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
+		case "keychain-retry":
+			// Try again beside Codex's sign-in the macOS keychain didn't
+			// give: a refusal kept is dropped and the item read once
+			// (#2367); its answer, or that the prompt is still up
+			if err := provider.RetryCodexKeychain(); err != nil {
+				fail(rw, err)
+				return
+			}
 		case "save":
 			// a preset needs nothing but the key; a saved provider keeps
 			// its key when the form left it blank
@@ -1247,8 +1288,18 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				pr.Searches = in.Searches
 				pr.PinUpstream = in.PinUpstream
 				pr.Unredacted = in.Unredacted
+				pr.NativeCompaction = in.NativeCompaction
 				pr.PassUserAgent = in.PassUserAgent
 				pr.AuthHeader = in.AuthHeader
+				// and what its editor sets beside them: how requests spread
+				// over its keys, how long a conversation stays, the one
+				// rate limited to the back, Unlisted and each key's proxy.
+				// A decision-only preset (TypeSafe Jev) has no chat URL, so
+				// every save of its editor came here, and In order went
+				// back to Smart (fflake33 on Discord)
+				pr.Routing, pr.Affinity, pr.Sink = in.Routing, in.Affinity, in.Sink
+				pr.Unlisted = in.Unlisted
+				pr.AccountProxies = in.AccountProxies
 				if in.Name != "" {
 					pr.Name = in.Name
 				}
@@ -1323,11 +1374,18 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 			in.SecretAccessKey = strings.TrimSpace(in.SecretAccessKey)
 			var old *provider.Provider
+			if req.New && in.NativeCompaction && !in.CarriesCompaction() {
+				fail(rw, fmt.Errorf("%s can't carry Codex's native compaction: only a provider with a Responses API, a ChatGPT account or GitHub Copilot can", cmp.Or(in.Name, in.ID)))
+				return
+			}
 			if req.New {
 				// a second one of a preset, or a name already in use, is
 				// added beside the first under the next free id
 				if req.Proxy != nil {
 					in.Proxy = *req.Proxy
+				}
+				if req.InsecureTLS != nil {
+					in.InsecureTLS = *req.InsecureTLS
 				}
 				add := provider.Add
 				if req.CopyOf != "" {
@@ -1355,6 +1413,11 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					in.Proxy = *req.Proxy
 				} else if old != nil {
 					in.Proxy = old.Proxy
+				}
+				if req.InsecureTLS != nil {
+					in.InsecureTLS = *req.InsecureTLS
+				} else if old != nil {
+					in.InsecureTLS = old.InsecureTLS
 				}
 				if keepCC && old != nil {
 					in.MaxConcurrency = old.MaxConcurrency
@@ -1453,6 +1516,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					if req.Sink == nil {
 						in.Sink = old.Sink
 					}
+					if req.NativeCompaction == nil {
+						in.NativeCompaction = old.NativeCompaction
+					}
 					if req.AuthHeader == nil {
 						in.AuthHeader = old.AuthHeader
 					}
@@ -1479,6 +1545,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					if provider.Preset(in.Preset) != nil {
 						in.BalanceURL = cmp.Or(in.BalanceURL, old.BalanceURL)
 						in.BalancePath = cmp.Or(in.BalancePath, old.BalancePath)
+						in.BalanceMethod = cmp.Or(in.BalanceMethod, old.BalanceMethod)
 						in.ModelsURL = cmp.Or(in.ModelsURL, old.ModelsURL)
 					}
 				}
@@ -1489,6 +1556,12 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				}
 				if in.Icon == "" && old != nil && in.Preset == "" {
 					in.Icon = old.Icon
+				}
+				// native compaction only where the wire carries it: a
+				// signed-in account is told by the one saved
+				if in.NativeCompaction && !in.CarriesCompaction() && (old == nil || old.Account == nil || !old.CarriesCompaction()) {
+					fail(rw, fmt.Errorf("%s can't carry Codex's native compaction: only a provider with a Responses API, a ChatGPT account or GitHub Copilot can", cmp.Or(in.Name, in.ID)))
+					return
 				}
 				if err := provider.Save(in); err != nil {
 					fail(rw, err)
@@ -1678,7 +1751,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 			saved := *p
 			if req.Typed {
-				q := typed(*p, in, req.Proxy)
+				q := typed(*p, in, req.Proxy, req.InsecureTLS)
 				p = &q
 			}
 			if len(req.Test) > 0 {
@@ -1715,7 +1788,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				}
 				p = *saved
 			}
-			p = typed(p, in, req.Proxy)
+			p = typed(p, in, req.Proxy, req.InsecureTLS)
 			if strings.TrimSpace(in.Decide) != "" {
 				// a decision API is asked its smallest question, at
 				// POST …/systemone (#647)
@@ -1757,6 +1830,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 			q := *p
 			q.BalanceURL, q.BalancePath = strings.TrimSpace(in.BalanceURL), strings.TrimSpace(in.BalancePath)
+			q.BalanceMethod = in.BalanceMethod
 			if in.Headers != nil {
 				q.Headers = in.Headers
 			}
@@ -1791,7 +1865,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			if p.Name == "" {
 				p.Name = cmp.Or(strings.TrimSpace(in.Name), "the vendor")
 			}
-			p = typed(p, in, req.Proxy)
+			p = typed(p, in, req.Proxy, req.InsecureTLS)
 			ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 			defer cancel()
 			ms, err := p.List(ctx)
@@ -1823,7 +1897,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			defer cancel()
 			ask := *p
 			if req.Typed {
-				ask = typed(*p, in, req.Proxy)
+				ask = typed(*p, in, req.Proxy, req.InsecureTLS)
 			}
 			ms, dropped, err := ask.Refetch(ctx)
 			if err != nil {
@@ -2061,11 +2135,19 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		}{res, providersState()})
 	})
 	// StepFun's Step Plan windows: the session the user copied from their
-	// browser with magpie's bookmarklet
-	mux.HandleFunc("POST /api/stepfun/{site}/session", func(rw http.ResponseWriter, r *http.Request) {
-		site := r.PathValue("site")
-		if provider.StepFunSignInURL(site) == "" {
+	// browser with magpie's bookmarklet, the provider's own (two on one
+	// site can be two accounts, #2384), on the provider's platform
+	stepfunOf := func(rw http.ResponseWriter, r *http.Request) (string, string, bool) {
+		p, err := provider.Find(r.PathValue("id"))
+		if err != nil || provider.StepFunSite(*p) == "" {
 			http.NotFound(rw, r)
+			return "", "", false
+		}
+		return p.ID, provider.StepFunSite(*p), true
+	}
+	mux.HandleFunc("POST /api/stepfun/{id}/session", func(rw http.ResponseWriter, r *http.Request) {
+		id, site, ok := stepfunOf(rw, r)
+		if !ok {
 			return
 		}
 		var in struct{ Text string }
@@ -2075,14 +2157,18 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
-		if err := provider.SaveStepFunPaste(ctx, site, in.Text); err != nil {
+		if err := provider.SaveStepFunPaste(ctx, id, site, in.Text); err != nil {
 			fail(rw, err)
 			return
 		}
 		writeJSON(rw, providersState())
 	})
-	mux.HandleFunc("POST /api/stepfun/{site}/signout", func(rw http.ResponseWriter, r *http.Request) {
-		if err := provider.SignOutStepFun(r.PathValue("site")); err != nil {
+	mux.HandleFunc("POST /api/stepfun/{id}/signout", func(rw http.ResponseWriter, r *http.Request) {
+		id, _, ok := stepfunOf(rw, r)
+		if !ok {
+			return
+		}
+		if err := provider.SignOutStepFun(id); err != nil {
 			fail(rw, err)
 			return
 		}
@@ -2119,7 +2205,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("POST /api/open", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ URL string }
 		_ = json.NewDecoder(r.Body).Decode(&in)
-		if strings.HasPrefix(in.URL, "https://") || strings.HasPrefix(in.URL, "http://") || strings.HasPrefix(in.URL, agent.CindyScheme) {
+		if strings.HasPrefix(in.URL, "https://") || strings.HasPrefix(in.URL, "http://") || strings.HasPrefix(in.URL, agent.CindyScheme) || strings.HasPrefix(in.URL, agent.LodyScheme) {
 			// Open again on a sign-in says why it didn't open (#2043)
 			if err := w.OpenURL(in.URL); err != nil {
 				fail(rw, err)
@@ -2138,7 +2224,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 // Vertex AI provider's project, location, credentials file and service
 // account are the ones typed, spelled as a Save keeps them, unless no
 // project is.
-func typed(p, in provider.Provider, proxy *string) provider.Provider {
+func typed(p, in provider.Provider, proxy *string, insecureTLS *bool) provider.Provider {
 	if k := strings.TrimSpace(in.Key); k != "" && k != p.Key {
 		p.Key, p.KeyName, p.KeyProtocol, p.KeyWeight = k, "", "", 0
 	}
@@ -2161,6 +2247,11 @@ func typed(p, in provider.Provider, proxy *string) provider.Provider {
 	}
 	if proxy != nil {
 		p.Proxy = *proxy
+	}
+	// asked unsaved as it would be saved: Via takes it only when p is the
+	// user's own (TakesInsecureTLS)
+	if insecureTLS != nil {
+		p.InsecureTLS = *insecureTLS
 	}
 	return p
 }

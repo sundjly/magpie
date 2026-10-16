@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -44,7 +46,15 @@ func appliedLoad() map[string]applied {
 	return out
 }
 
+// appliedSave writes m as applied.json. It holds what magpie set on every
+// agent, and appliedLoad reads a file that doesn't parse as empty: such a
+// file is copied aside first, and one that can't be copied isn't written
+// over (#2263).
 func appliedSave(m map[string]applied) {
+	if err := lastgood.KeepUnparsed(appliedPath(), lastgood.Into[map[string]applied]); err != nil {
+		log.Printf("applied.json wasn't written over: %v", err)
+		return
+	}
 	b, _ := json.MarshalIndent(m, "", "  ")
 	os.MkdirAll(filepath.Dir(appliedPath()), 0o755)
 	os.WriteFile(appliedPath(), b, 0o600)
@@ -172,8 +182,11 @@ func (a *Agent) Drift() *Drift {
 	}
 	rec := appliedOf(a.ID)
 	// still joined, a model off magpie is one picked in the agent, beside
-	// magpie's in its list (dsh's /model), not a change from outside
+	// magpie's in its list (dsh's /model), not a change from outside; so is
+	// one Codex picks beside its ChatGPT sign-in, which still goes through
+	// magpie (#2424: the row went red with Reconnect)
 	joined := a.Joined != nil && a.Joined()
+	picked := joined || a.Beside != nil && a.Beside()
 	for _, f := range a.Fields {
 		want, ok := rec.Fields[f.Key]
 		// a field that reads empty while it follows another (Claude Code's
@@ -185,7 +198,7 @@ func (a *Agent) Drift() *Drift {
 		if now == "" && f.Follows != "" {
 			now = vals[f.Follows]
 		}
-		if !ok || joined || now == want || !magpieValue(a, f, want, vals) || magpieValue(a, f, now, vals) || sameGroup(want, now) {
+		if !ok || picked || now == want || !magpieValue(a, f, want, vals) || magpieValue(a, f, now, vals) || sameGroup(want, now) {
 			continue
 		}
 		return &Drift{Kind: "replaced", Field: f.Key, Now: vals[f.Key], Want: want,
@@ -888,12 +901,13 @@ func sameHost(a, b string) bool { return hostOf(a) == hostOf(b) }
 // gateway — pairs of key and value, read with get — and says which no longer
 // holds, "" when all do. A URL is quoted; a key's value never is. A URL
 // that reaches magpie another way (reachesMagpie: a reverse proxy, #1985)
-// holds.
+// holds. So does a key of the gateway's own the user put in place of
+// magpie's (keyHolds).
 func wiringOff(name, file string, get func(string) (string, bool), kvs ...string) string {
 	for i := 0; i+1 < len(kvs); i += 2 {
 		k, want := kvs[i], kvs[i+1]
 		v, _ := get(k)
-		if v == want || v != "" && reachesMagpie(v, want) {
+		if keyHolds(v, want) || v != "" && reachesMagpie(v, want) {
 			continue
 		}
 		where := name + "'s " + k + " (" + filepath.Base(file) + ")"

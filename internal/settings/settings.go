@@ -44,7 +44,8 @@ type Settings struct {
 	Lang       string `json:"lang,omitempty"` // system | en | zh
 	Tray       string `json:"tray,omitempty"` // what clicking the tray icon opens: panel | window
 	// SessionTerminal is the Mac app that opens a resumed session, by bundle
-	// id. "" and "system" follow the .command file association.
+	// id. "" and "system" follow the .command file association. This
+	// computer's own (KeepOwn): another Mac may not have that app.
 	SessionTerminal string `json:"sessionTerminal,omitempty"`
 	// Currency is what a cost — the Usage page's, the tray panel's, the
 	// TUI's and the CLI's — is shown converted to: usd (its native
@@ -94,6 +95,11 @@ type Settings struct {
 	RedactRules    []redact.Rule   `json:"redactRules,omitempty"`
 	// LAN shares the gateway on the local network; remote callers must use
 	// named caller keys. LANKey is retained for older Magpie versions.
+	// LAN is this computer's own (KeepOwn; Lullaby on Discord: sharing
+	// turned on at home came on at work too). LANKey and LANKeyID name the
+	// default key, which rides the synced gateway-key store, so they follow
+	// the folder: turned on on another computer, sharing there takes up the
+	// same key.
 	LAN    bool   `json:"lan,omitempty"`
 	LANKey string `json:"lanKey,omitempty"`
 	// CORSOrigins are the web pages (scheme://host[:port]) and browser
@@ -108,8 +114,17 @@ type Settings struct {
 	// reach the gateway from at all (lc on Discord); any other is refused
 	// 403 even with a gateway key. None: every address, as before. This
 	// computer is always let in. MAGPIE_ALLOW_IPS, where set, is used in
-	// its place (gateway.AllowIPs).
+	// its place (gateway.AllowIPs). This computer's own (KeepOwn), as LAN
+	// is: the addresses are of the network this computer is on.
 	AllowIPs []string `json:"allowIPs,omitempty"`
+	// FetchPrivate are the private hosts and ranges (a name, name:port, an
+	// IP or a CIDR range) magpie may download a URL from that it didn't
+	// choose itself: an image or video a request names or a vendor answers
+	// with, or a page web_fetch reads. None by default: such a URL is
+	// downloaded from public addresses only, whoever sent the request and
+	// from wherever (gateway.publicClient). In settings.json only; it names
+	// this computer's own network, so it isn't synced (KeepOwn).
+	FetchPrivate []string `json:"fetchPrivate,omitempty"`
 	// Port is the gateway's port on this computer, 0 for DefaultPort.
 	// MAGPIE_ADDR, where it is set, comes first (GatewayAddr).
 	Port int `json:"port,omitempty"`
@@ -246,6 +261,13 @@ type Settings struct {
 	// one of UpdateEveries, 0 for every six hours.
 	NoAutoUpdate bool `json:"noAutoUpdate,omitempty"`
 	UpdateEvery  int  `json:"updateEvery,omitempty"`
+	// NoAutoDownload has a check, by the clock or Settings' Check, only
+	// say a newer version is out (with its notes and size) rather than
+	// download it (#2296): a metered network or a proxy billed by traffic
+	// downloads it only on a click (Download update, the header's Update,
+	// magpie update). Off, as by default, a newer version is downloaded
+	// as soon as it is found.
+	NoAutoDownload bool `json:"noAutoDownload,omitempty"`
 	// AutoRestart has the app restart into an update it downloaded by
 	// itself, once the gateway it serves has nothing in flight, rather than
 	// waiting for a click or for quitting (#2096). Off by default: a
@@ -313,6 +335,11 @@ type Settings struct {
 	// menu bar ("42% +12%"), as the Usage page's cards have it (fflake33
 	// on Discord); off by default, as it widens every card.
 	TrayPace bool `json:"trayPace,omitempty"`
+	// TrayNoCost leaves money out of magpie's own totals in the menu bar:
+	// the today and last-7-days cards, their tooltips and the tooltip with
+	// no cards say the tokens alone (BussanQ on Discord); off by default,
+	// the cost shown.
+	TrayNoCost bool `json:"trayNoCost,omitempty"`
 	// Lightweight lets the webview of a window closed — the tray panel or
 	// the main window — go once it has stayed closed a while, and makes it
 	// again when it is opened (#580): less memory, a moment's wait. This
@@ -431,6 +458,9 @@ type Settings struct {
 	// subagent tool turns on. "" leaves them on the model their lead asks
 	// for; tool-less helpers and the lead's own turns are never moved.
 	DesktopSubagentModel string `json:"desktopSubagentModel,omitempty"`
+	// DesktopSubagentEffort fixes Desktop's subagent tool turns at this
+	// reasoning level. Empty keeps the effort each request asks for.
+	DesktopSubagentEffort string `json:"desktopSubagentEffort,omitempty"`
 	// FullContext has Codex and Claude Code told a model's whole context
 	// window. Off, a window above WorkingWindow is told as WorkingWindow,
 	// so they compact a long conversation there instead of sending ever
@@ -537,6 +567,10 @@ type Settings struct {
 	// switched by the model in the agent's picker, as a routing group's
 	// member is (Group.Fast), without making a group of it.
 	FastPicks map[string][]string `json:"fastPicks,omitempty"`
+	// UltraPicks are the fast picks an agent's requests for are sent as
+	// Ultrafast instead (#1954), by agent id: each is in FastPicks too. An
+	// account that doesn't offer Ultrafast on the model is sent priority.
+	UltraPicks map[string][]string `json:"ultraPicks,omitempty"`
 
 	// The three maps below, and every one added beside them, are the
 	// per-model ones: a field named Model* whose type is a map[string]X,
@@ -608,7 +642,9 @@ type Settings struct {
 	// that a model is, by "<provider id>/<model id>": the routing groups
 	// magpie finds (provider's autoGroups) merge it with that one rather
 	// than by its own id, for an id no rule of magpie's matches up
-	// (kyzhouxu, #583). Absent leaves it to its id.
+	// (kyzhouxu, #583), and a call to it that no list prices is costed at
+	// that model's maker's price (provider.SamePriceIn, #2344). Absent
+	// leaves it to its id.
 	ModelSameAs map[string]string `json:"modelSameAs,omitempty"`
 	// ModelKinds is what the user said a model makes, by "<provider
 	// id>/<model id>": "image" or "video", for a provider set up with a
@@ -897,19 +933,26 @@ func (s Settings) Compact() int {
 
 // KeepOwn puts back cur's settings that are this computer's own, which a
 // sync or a restored backup never brings from another: the window's size
-// and whether it was maximised, the proxy, the gateway's port, the Dock, gateway mode, whether WSL is looked in, whether agents' sign-ins are read, when allowances are read, and what the menu bar or tray shows beside magpie's
-// icon (yoooo on Discord: usage turned off on a Mac came back from a
-// Windows box that shows it).
+// and whether it was maximised, the proxy, the gateway's port, whether it
+// is shared on the local network and the addresses let in to it, the
+// Dock, gateway mode, whether WSL is looked in, whether agents' sign-ins
+// are read, when allowances are read, the terminal app a session resumes
+// in, and what the menu bar or tray shows beside magpie's icon (yoooo on
+// Discord: usage turned off on a Mac came back from a Windows box that
+// shows it; Lullaby: sharing turned on at home came on at work).
 func (s *Settings) KeepOwn(cur Settings) {
 	s.GatewayConversations = cur.GatewayConversations
 	s.UIFont, s.CodeFont = cur.UIFont, cur.CodeFont
 	s.Window, s.Proxy, s.Port, s.Dock, s.DockWindow, s.Lightweight = cur.Window, cur.Proxy, cur.Port, cur.Dock, cur.DockWindow, cur.Lightweight
 	s.WindowMaximised, s.KeepAwake, s.KeepAwakeDisplay = cur.WindowMaximised, cur.KeepAwake, cur.KeepAwakeDisplay
-	s.TrayUsages, s.TrayUsage, s.TrayUsageEvery, s.TrayNoLogos, s.TrayNoBird, s.TrayPace = cur.TrayUsages, cur.TrayUsage, cur.TrayUsageEvery, cur.TrayNoLogos, cur.TrayNoBird, cur.TrayPace
+	s.TrayUsages, s.TrayUsage, s.TrayUsageEvery, s.TrayNoLogos, s.TrayNoBird, s.TrayPace, s.TrayNoCost = cur.TrayUsages, cur.TrayUsage, cur.TrayUsageEvery, cur.TrayNoLogos, cur.TrayNoBird, cur.TrayPace, cur.TrayNoCost
 	s.GatewayMode = cur.GatewayMode
 	s.NoWSLAgents = cur.NoWSLAgents
 	s.QuotaReads = cur.QuotaReads
 	s.NoAccountDiscovery = cur.NoAccountDiscovery
+	s.LAN, s.AllowIPs = cur.LAN, cur.AllowIPs
+	s.FetchPrivate = cur.FetchPrivate
+	s.SessionTerminal = cur.SessionTerminal
 }
 
 // RenamePerModel moves what the user said of a provider's models to the id
@@ -1005,6 +1048,14 @@ func loadChecked() (Settings, error) {
 	}
 	// parsed on every call: a caller that asks many times in one look holds
 	// what it read (provider.Hold's heldSettings) rather than asking again
+	return parse(b)
+}
+
+// parse is settings.json's contents b read as Settings, from its last good
+// generation when b doesn't parse.
+func parse(b []byte) (Settings, error) {
+	var s Settings
+	var err error
 	parses.Add(1)
 	if perr := json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &s); perr != nil {
 		// one left all zero by a crash (#1505) is its last good generation
@@ -1212,6 +1263,10 @@ func save(s Settings, recording bool) error {
 	s.DesktopSubagentModel = strings.TrimSpace(s.DesktopSubagentModel)
 	if s.DesktopSubagentModel != "" && !strings.Contains(s.DesktopSubagentModel, "/") {
 		return fmt.Errorf("the model for Claude Desktop's subagents must be a model's id such as deepseek/deepseek-v4, not %q", s.DesktopSubagentModel)
+	}
+	s.DesktopSubagentEffort = strings.ToLower(strings.TrimSpace(s.DesktopSubagentEffort))
+	if e := s.DesktopSubagentEffort; e != "" && (!slices.Contains(catalog.EffortRank, e) || e == "ultra") {
+		return fmt.Errorf("%q is not a reasoning effort for Claude Desktop's subagents", e)
 	}
 	s.Searcher = strings.TrimSpace(s.Searcher)
 	for _, e := range []*string{&s.VisionEffort, &s.SearcherEffort} {

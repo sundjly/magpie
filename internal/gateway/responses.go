@@ -5,10 +5,12 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -213,6 +215,7 @@ type rRequest struct {
 	PromptCacheKey    string          `json:"prompt_cache_key,omitempty"`
 	Include           []string        `json:"include,omitempty"`
 	ClientMetadata    json.RawMessage `json:"client_metadata,omitempty"`
+	AccessPrograms    json.RawMessage `json:"access_programs,omitempty"`
 	Text              json.RawMessage `json:"text,omitempty"`
 	Reasoning         *struct {
 		Effort  string `json:"effort,omitempty"`
@@ -257,7 +260,7 @@ func parseResponses(body []byte) (*Request, error) {
 	}
 	r := &Request{Model: q.Model, System: q.Instructions, MaxTokens: q.MaxOutputTokens, Temp: q.Temperature,
 		TopP: q.TopP, Stream: q.Stream, Parallel: q.ParallelToolCalls, Fast: q.ServiceTier == "priority" || q.ServiceTier == "ultrafast", Ultrafast: q.ServiceTier == "ultrafast", Tier: q.ServiceTier, CacheKey: q.PromptCacheKey, Include: q.Include,
-		ClientMetadata: sentRaw(q.ClientMetadata)}
+		ClientMetadata: sentRaw(q.ClientMetadata), AccessPrograms: q.AccessPrograms}
 	r.Text, r.Format = textFormat(sentRaw(q.Text))
 	if q.Reasoning != nil {
 		r.Effort = effortOf(q.Reasoning.Effort)
@@ -1035,7 +1038,9 @@ func buildResponses(r *Request, model, host string, rejectTemp bool) []byte {
 	// sealed reasoning, and may refuse an item without it.
 	replay := replaysReasoning(model, host)
 	var input []any
-	for _, m := range r.Messages {
+	// a second answer to one call is left out, as the Chat and Messages
+	// builds leave it (dropSecondAnswers)
+	for _, m := range dropSecondAnswers(r.Messages) {
 		var content []map[string]any
 		flushMsg := func() {
 			if len(content) == 0 {
@@ -1133,6 +1138,9 @@ func buildResponses(r *Request, model, host string, rejectTemp bool) []byte {
 	if len(r.ClientMetadata) > 0 {
 		out["client_metadata"] = r.ClientMetadata
 	}
+	if len(r.AccessPrograms) > 0 {
+		out["access_programs"] = r.AccessPrograms
+	}
 	if len(r.Text) > 0 || r.Format != nil {
 		text := map[string]any{}
 		decodeJSON(r.Text, &text)
@@ -1223,7 +1231,12 @@ func buildResponses(r *Request, model, host string, rejectTemp bool) []byte {
 		out["include"] = include
 	}
 	b, _ := json.Marshal(out)
-	return b
+	// a call the client left unanswered (a turn it interrupted) gets its
+	// synthetic result, as buildChat's pairToolMessages and
+	// buildAnthropic's pairToolBlocks give one: the Responses API refuses
+	// the lone call, "No tool output found for function call <id>", on
+	// every turn after it too (#2222)
+	return pairToolItems(b)
 }
 
 type rUsage struct {
@@ -1399,7 +1412,8 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 			if ev.Response.Error != nil {
 				msg = ev.Response.Error.Message
 			}
-			emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: refusedCode(data)})
+			status, said := requestRefused(data)
+			emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: refusedCode(data), Status: status, Said: said})
 			return nil
 		}
 		stop := "stop"
@@ -1426,9 +1440,42 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		if ev.Error != nil {
 			msg = cmp.Or(ev.Error.Message, msg)
 		}
-		emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: refusedCode(data)})
+		status, said := requestRefused(data)
+		emit(Event{Kind: KError, Text: cmp.Or(msg, streamErrorText(data)), Code: refusedCode(data), Status: status, Said: said})
 	}
 	return nil
+}
+
+// requestRefused is 400 and the vendor's error, as {"error":{…}}, when a
+// Responses stream's error event or failed response says the request
+// itself is at fault (type invalid_request_error): the ChatGPT backend
+// answers an access program the workspace doesn't have with a 200 stream
+// whose error event is access_program_not_enabled (magpie-releases#18).
+// Asked again, on this account or another, it is refused the same way, so
+// it is neither retried nor resumed, and a client answered whole gets its
+// code and param. Read by the error object's type, never by its words.
+func requestRefused(data string) (int, json.RawMessage) {
+	for _, path := range []string{"error", "response.error"} {
+		e := gjson.Get(data, path)
+		if e.IsObject() && e.Get("type").String() == "invalid_request_error" {
+			return http.StatusBadRequest, json.RawMessage(`{"error":` + e.Raw + `}`)
+		}
+	}
+	return 0, nil
+}
+
+// saidError puts the type, code and param of the vendor's own error (an
+// Event's Said) on the error a stream encoder writes, so a request the
+// vendor refused reads as refused (invalid_request_error) to the agent and
+// to the hold that decides whether to ask again, not as magpie's api_error
+// (magpie-releases#18). Without Said it is left as it was.
+func saidError(failed map[string]any, said json.RawMessage) {
+	e := gjson.GetBytes(said, "error")
+	for _, k := range []string{"type", "code", "param"} {
+		if v := e.Get(k); v.Type == gjson.String && v.String() != "" {
+			failed[k] = v.String()
+		}
+	}
 }
 
 // responsesEncoder writes events as a Responses stream. Codex reads the
@@ -1455,6 +1502,15 @@ type responsesEncoder struct {
 	// collector's last part isn't it once a hidden thinking block (signed
 	// with no text, or redacted) has come after the call (#1786)
 	call Part
+	// a message's output_item.done, and the events after it, wait here
+	// until its phase is known (phase.go, #2437)
+	heldMsg map[string]any
+	held    []heldEvent
+}
+
+type heldEvent struct {
+	typ    string
+	fields map[string]any
 }
 
 // callTo names the tool a function_call item is to as the client knows it:
@@ -1502,10 +1558,37 @@ func itemPrefix(item map[string]any) string {
 }
 
 func (e *responsesEncoder) send(typ string, fields map[string]any) {
+	if e.heldMsg != nil {
+		e.held = append(e.held, heldEvent{typ, fields})
+		if len(e.held) > heldMost {
+			e.release("")
+		}
+		return
+	}
+	e.write(typ, fields)
+}
+
+func (e *responsesEncoder) write(typ string, fields map[string]any) {
 	fields["type"] = typ
 	fields["sequence_number"] = e.seq
 	e.seq++
 	e.w.event(typ, fields)
+}
+
+// release sends the waiting message's events, the message given phase
+// (or none, for "").
+func (e *responsesEncoder) release(phase string) {
+	if e.heldMsg == nil {
+		return
+	}
+	if phase != "" {
+		e.heldMsg["phase"] = phase
+	}
+	held := e.held
+	e.heldMsg, e.held = nil, nil
+	for _, h := range held {
+		e.write(h.typ, h.fields)
+	}
 }
 
 func (e *responsesEncoder) response(status string, extra map[string]any) map[string]any {
@@ -1559,7 +1642,10 @@ func (e *responsesEncoder) closeAs(sealed json.RawMessage) {
 		e.send("response.output_text.done", map[string]any{"item_id": e.itemID, "output_index": e.item, "content_index": 0, "text": t, "logprobs": []any{}})
 		part := map[string]any{"type": "output_text", "text": t, "annotations": []any{}, "logprobs": []any{}}
 		e.send("response.content_part.done", map[string]any{"item_id": e.itemID, "output_index": e.item, "content_index": 0, "part": part})
-		item = map[string]any{"id": e.itemID, "type": "message", "role": "assistant", "status": "completed", "content": []map[string]any{part}}
+		m := map[string]any{"id": e.itemID, "type": "message", "role": "assistant", "status": "completed", "content": []map[string]any{part}}
+		// its done waits for what comes next to say its phase
+		e.release(phaseCommentary)
+		item, e.heldMsg = m, m
 	case Thinking:
 		t := e.text.String()
 		e.send("response.reasoning_summary_text.done", map[string]any{"item_id": e.itemID, "output_index": e.item, "summary_index": 0, "text": t})
@@ -1587,6 +1673,9 @@ func (e *responsesEncoder) closeAs(sealed json.RawMessage) {
 
 func (e *responsesEncoder) openItem(k Kind, prefix string, item map[string]any) {
 	e.closeItem()
+	if k != Thinking {
+		e.release(phaseCommentary)
+	}
 	e.item++
 	e.open, e.itemID = k, prefix+newID()
 	if k == Thinking && e.thinkID != "" {
@@ -1654,6 +1743,7 @@ func (e *responsesEncoder) event(ev Event) {
 		// and sources, as Anthropic's encoder does, without inventing
 		// earlier in-progress events or citation offsets in the answer.
 		e.closeItem()
+		e.release(phaseCommentary)
 		e.item++
 		item := responsesSearchItem(ev.Text, ev.Hits)
 		e.send("response.output_item.added", map[string]any{"output_index": e.item, "item": item})
@@ -1682,11 +1772,14 @@ func (e *responsesEncoder) event(ev Event) {
 		}
 	case KError:
 		e.closeItem()
+		e.release("")
 		code := "server_error"
 		if ev.Code != "" {
 			code = ev.Code
 		}
-		e.send("response.failed", map[string]any{"response": e.response("failed", map[string]any{"error": map[string]any{"code": code, "message": ev.Text}})})
+		failed := map[string]any{"code": code, "message": ev.Text}
+		saidError(failed, ev.Said)
+		e.send("response.failed", map[string]any{"response": e.response("failed", map[string]any{"error": failed})})
 	}
 	e.col.add(ev)
 }
@@ -1698,7 +1791,8 @@ func (e *responsesEncoder) keepalive() {
 		e.start(Event{}) // response.created and response.in_progress
 		return
 	}
-	e.send("response.in_progress", map[string]any{"response": e.response("in_progress", nil)})
+	// past what's waiting: a keepalive held back keeps nothing alive
+	e.write("response.in_progress", map[string]any{"response": e.response("in_progress", nil)})
 }
 
 func (e *responsesEncoder) finish() {
@@ -1717,6 +1811,10 @@ func (e *responsesEncoder) finish() {
 		}
 		extra["incomplete_details"] = map[string]any{"reason": reason}
 	}
+	if status == "completed" {
+		e.release(phaseFinal)
+	}
+	e.release("")
 	e.send(typ, map[string]any{"response": e.response(status, extra)})
 }
 
@@ -1789,6 +1887,7 @@ func renderResponses(res Result, model string, named map[string]nsTool) []byte {
 		// as the stream says it (#248)
 		status, incomplete = "incomplete", map[string]any{"reason": "content_filter"}
 	}
+	phaseOutput(output, status == "completed")
 	b, _ := json.Marshal(map[string]any{"id": id, "object": "response", "created_at": time.Now().Unix(), "status": status,
 		"model": model, "output": output, "usage": res.Usage.responses(), "incomplete_details": incomplete,
 		"parallel_tool_calls": true, "tool_choice": "auto", "tools": []any{}, "error": nil})

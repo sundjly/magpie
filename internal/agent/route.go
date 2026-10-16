@@ -68,7 +68,8 @@ func viaMagpie(agent, prefix string) []Option {
 		}
 		return u
 	}
-	fast := provider.FastPicks(agent)
+	fast, ultra := provider.FastPicks(agent), provider.UltraPicks(agent)
+	var tiered map[string]bool // provider.UltraModels, read at the first fast model
 	for _, e := range shown {
 		if e.Group != "" {
 			groups = append(groups, Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
@@ -86,6 +87,12 @@ func viaMagpie(agent, prefix string) []Option {
 		if provider.CanFast(e.Provider, e.Model) {
 			o.FastFor, o.Fast = agent, slices.Contains(fast, e.ID)
 			o.OwnFast = provider.OwnFast(e.Provider, e.Model)
+			if tiered == nil {
+				tiered = provider.UltraModels()
+			}
+			if provider.UltraOn(e.Provider, e.Model, tiered) {
+				o.UltraOK, o.Ultra = true, o.Fast && slices.Contains(ultra, e.ID)
+			}
 		}
 		out = append(out, o)
 	}
@@ -150,7 +157,7 @@ func magpieModels(agent string) []catalog.Model {
 		return ms
 	}
 	for i, e := range shown {
-		m := catalog.Model{ID: e.ID, Name: labels[i], Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts, Images: e.Images || seen, ImageInput: e.ImageInput, Context: e.Context, Output: e.Output, OutputSet: e.OutputSet, AgentsV2: e.AgentsV2, Reasoning: e.Reasoning}
+		m := catalog.Model{ID: e.ID, Name: labels[i], Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts, Images: e.Images || seen, ImageInput: e.ImageInput, Context: e.Context, Output: e.Output, OutputSet: e.OutputSet, AgentsV2: e.AgentsV2, Reasoning: e.Thinks()}
 		// where Codex and Claude Code compact it (#876): a threshold the
 		// user set on the model or on its provider, else a window they
 		// typed whole (#1809), else the one for every model, which codexcat
@@ -181,6 +188,12 @@ func magpieModels(agent string) []catalog.Model {
 		// lists offer them: Fast in the Codex CLI magpie writes
 		// magpie-models.json for (#1530)
 		provider.CodexTiers(&m, e, members)
+		// Codex's /fast on a ChatGPT account's own GPT model, which
+		// OpenCode has no command for and takes as variants (#2379); a
+		// group is sent fast as the group says, as a fast pick is
+		if a := e.Provider.Account; e.Group == "" && a != nil && a.Agent == "codex" {
+			m.CodexFast = provider.CanFast(e.Provider, e.Model)
+		}
 		out = append(out, m)
 	}
 	return out

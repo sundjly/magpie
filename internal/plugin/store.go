@@ -121,6 +121,9 @@ func lockAuth() func() {
 
 func listPath() string { return filepath.Join(settings.Dir(), "plugins.json") }
 
+// ListPath is plugins.json's path.
+func ListPath() string { return listPath() }
+
 // pluginsList is plugins.json as last read, with the bytes it was parsed
 // from. The file is read every time: an edit that keeps the file's size and
 // time (a swap of two accounts of one length, a replaced file whose time is
@@ -281,10 +284,15 @@ func checkList() {
 }
 
 // IsPath is whether spec names a file or folder rather than a package,
-// as OpenCode tells them apart.
+// as OpenCode tells them apart. A path rooted the way any system roots
+// one counts on every system, since plugins.json travels between
+// machines in a backup or a sync: a leading / or \ (a UNC path among
+// them) on Windows as well, and a drive letter off it (#2229).
 func IsPath(spec string) bool {
-	return strings.HasPrefix(spec, "file://") || strings.HasPrefix(spec, ".") || filepath.IsAbs(spec) || regexp.MustCompile(`^[A-Za-z]:[\\/]`).MatchString(spec)
+	return strings.HasPrefix(spec, "file://") || strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, `\`) || filepath.IsAbs(spec) || driveRooted.MatchString(spec)
 }
+
+var driveRooted = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
 
 var pkgName = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$`)
 
@@ -455,10 +463,16 @@ func notPlugin(target string) error {
 	if err != nil || !st.IsDir() || IsPi(target) {
 		return nil
 	}
+	if Gateway(target) != "" {
+		return nil
+	}
 	if f, _ := Middleware(target); f != "" {
 		return nil
 	}
 	if f, _ := Agent(target); f != "" {
+		return nil
+	}
+	if p, _ := WindowPage(target); p != nil {
 		return nil
 	}
 	var pkg struct {
@@ -623,7 +637,7 @@ func SetOptions(name string, opts map[string]any) error {
 	if i < 0 {
 		// a short name, as the community's READMEs write it: param-override
 		// for @magpie-community/middleware-param-override
-		i = slices.IndexFunc(l.Plugins, func(x Entry) bool { return ShortName(Name(x.Spec)) == name })
+		i = slices.IndexFunc(l.Plugins, func(x Entry) bool { return Called(Name(x.Spec), name) })
 	}
 	if i < 0 {
 		return fmt.Errorf("no plugin %q", name)
@@ -641,14 +655,34 @@ func SetOptions(name string, opts map[string]any) error {
 
 // ShortName is a package's name without its scope and the words every
 // package of its kind has: model-map for @magpie-community/middleware-model-map,
-// zed for @magpie-community/opencode-zed-auth. A plugin added from a folder
-// is named by its path, which on Windows ends after a backslash.
+// zed for @magpie-community/opencode-zed-auth, calc for
+// @magpie-community/tools-calc (so its tools are calc_eval, as from its
+// folder). A plugin added from a folder is named by its path, which on
+// Windows ends after a backslash.
 func ShortName(pkg string) string {
+	pkg = bareName(pkg)
+	for _, kind := range []string{"middleware-", "opencode-", "tools-", "page-", "agent-"} {
+		if strings.HasPrefix(pkg, kind) && len(pkg) > len(kind) {
+			pkg = pkg[len(kind):]
+			break
+		}
+	}
+	return strings.TrimSuffix(pkg, "-auth")
+}
+
+// bareName is a package's name without its scope, or a folder's last part.
+func bareName(pkg string) string {
 	if i := strings.LastIndexAny(pkg, `/\`); i >= 0 {
 		pkg = pkg[i+1:]
 	}
-	pkg = strings.TrimPrefix(strings.TrimPrefix(pkg, "middleware-"), "opencode-")
-	return strings.TrimSuffix(pkg, "-auth")
+	return pkg
+}
+
+// Called says whether a user's name for a plugin names this package: its
+// short name, or its name without the scope, which was its short name
+// before tools-, page- and agent- were taken off (agent-aider).
+func Called(pkg, name string) bool {
+	return name != "" && (ShortName(pkg) == name || bareName(pkg) == name)
 }
 
 // install puts an npm package into plugins/ with bun add, its scripts
@@ -672,8 +706,28 @@ func install(ctx context.Context, spec string) error {
 			return err
 		}
 	}
+	defer installMu.Unlock()
+	err = bunAdd(ctx, bun, spec)
+	// a @magpie-community package or version npm doesn't have (a new
+	// one waits for an owner to publish it there) comes from the
+	// community repo's dist branch; one Bun's minimumReleaseAge holds
+	// back stays held, as the user's bunfig asks
+	if name, version, ok := distWanted(spec); ok && err != nil && !minAge.MatchString(err.Error()) {
+		if derr := installDist(ctx, bun, name, version); derr != nil {
+			return fmt.Errorf("%w (and from the community repo's dist branch: %v)", err, derr)
+		}
+		err = nil
+	}
+	if err == nil {
+		pruneDist()
+	}
+	return err
+}
+
+// bunAdd adds spec to plugins/ with bun, its scripts left unrun.
+// installMu held.
+func bunAdd(ctx context.Context, bun, spec string) error {
 	out, err := bunCommand(ctx, bun, Dir(), "add", "--ignore-scripts", spec).CombinedOutput()
-	installMu.Unlock()
 	if err != nil {
 		if hint := missingLibs(string(out)); hint != "" {
 			return fmt.Errorf("bun add %s: %s: %w", spec, hint, err)

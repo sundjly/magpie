@@ -111,6 +111,10 @@ type signInFlow struct {
 	// pluginPorts are where a plugin's browser sign-in comes back to on
 	// this machine, for its address pasted (pluginsignin_paste.go)
 	pluginPorts []string
+	// pluginKey is a plugin's browser sign-in also finished by a key made
+	// on KeysURL and pasted: its provider and "api" method, as the plugin
+	// lists it (pluginsignin_paste.go)
+	pluginKey *pluginKeyWay
 
 	// nonce and hostID are a ChatGPT API sign-in's: what its ID token must
 	// carry, and this machine's id it registers magpie for (chatgpt_api.go)
@@ -550,6 +554,9 @@ func SubmitSignInCallback(id, raw string) error {
 	}
 	if s.pluginPorts != nil {
 		return s.pluginCallback(raw)
+	}
+	if s.pluginKey != nil {
+		return s.pastedPluginKey(raw)
 	}
 	if s.claude != nil {
 		return s.claudePaste(raw)
@@ -1012,7 +1019,8 @@ func addLogin(l savedLogin) (using bool, err error) {
 	if using {
 		switch l.Agent {
 		case "codex":
-			err = writePrivate(codexAuthPath(), append(bytes.TrimSpace(l.Auth), '\n'))
+			// where Codex's config.toml keeps it (#2367)
+			err = saveCodexLogin(codexHome(), l.Auth)
 		case "claude":
 			err = putClaudeLogin(l)
 		}

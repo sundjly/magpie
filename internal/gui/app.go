@@ -41,7 +41,7 @@ var trayIcon []byte // black glyph, tinted by the macOS menu bar
 var trayFlap embed.FS
 
 //go:embed icon.png
-var appIcon []byte // coloured, for other trays
+var appIcon []byte // coloured, for Windows' tray
 
 // The app's own icon: the Mac's Dock (which it replaces the bundle's .icns
 // in, at up to 512pt), window icons and the about box. At 64px it was
@@ -488,10 +488,16 @@ func Run(version string, showMain bool, link string) error {
 		go dropTrayName()
 	}
 	h.tray.SetTooltip("magpie")
-	if runtime.GOOS == "darwin" {
-		h.tray.SetTemplateIcon(trayIcon)
+	if icon, template := trayIconFor(runtime.GOOS, traySchemeLight()); template {
+		h.tray.SetTemplateIcon(icon)
 	} else {
-		h.tray.SetIcon(appIcon)
+		h.tray.SetIcon(icon)
+	}
+	if runtime.GOOS == "linux" {
+		go watchTrayScheme(func(light bool) {
+			icon, _ := trayIconFor("linux", light)
+			h.tray.SetIcon(icon)
+		})
 	}
 	h.tray.SetMenu(menu)
 	h.tray.AttachWindow(h.panel).WindowOffset(6)
@@ -672,6 +678,14 @@ func panelOptions(goos, theme string) application.WebviewWindowOptions {
 			// out of sight, until the user swiped back (#2141).
 			CollectionBehavior: application.MacWindowCollectionBehaviorCanJoinAllSpaces |
 				application.MacWindowCollectionBehaviorFullScreenAuxiliary,
+			// and shown without activating magpie, as a menu bar extra's
+			// panel is: an ordinary window's Focus activated the app, and
+			// the Mac then took the user to the Space of magpie's other
+			// windows (the desktop the main window is on), off the
+			// full-screen app's, panel and all (#2141, witt-bit, on
+			// v0.1.1246). A non-activating panel still takes the keyboard.
+			WindowClass:      application.MacWindowClassPanel,
+			PanelPreferences: application.MacPanelPreferences{NonActivating: true},
 		},
 		Windows: application.WindowsWindow{HiddenOnTaskbar: true},
 	}

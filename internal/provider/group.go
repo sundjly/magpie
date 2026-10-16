@@ -16,9 +16,9 @@ package provider
 //
 // A group's member may be another group ("group/<id>"): to the group it is
 // one member, which a rule can put first like a model; its models are its
-// own group's, ordered by its own routing and rules. A group can't be in
-// itself, however deep: SaveGroup refuses the loop, and one written into
-// providers.json by hand is cut where it closes.
+// own group's, ordered by its own routing, rules and Sink. A group can't
+// be in itself, however deep: SaveGroup refuses the loop, and one written
+// into providers.json by hand is cut where it closes.
 
 import (
 	"errors"
@@ -263,6 +263,57 @@ type Member struct {
 	// Fast is set on a member the group sends in its vendor's fast mode
 	// (Group.Fast), where its model has one.
 	Fast bool
+	// At is where the walk down the group met it, counting every model of
+	// every group in it, the same model's later places too: a group's own
+	// models are met in its own order.
+	At int
+	// Also are the other places further down the walk that have the same
+	// model at the same effort, which the group asks once, where it was
+	// met first: a rule naming a later group in the group still has it,
+	// in that group's own order (#2361).
+	Also []Member
+}
+
+// In is the member as the group's member id has it: itself, where it was
+// met further down the walk (Also), or, for a model, where a group in the
+// group ahead of it has it too (#625). ok is false when id isn't one of
+// its places.
+func (m Member) In(id string) (Member, bool) {
+	if m.ID == id {
+		return m, true
+	}
+	for _, o := range m.Also {
+		if o.ID == id {
+			return o, true
+		}
+	}
+	if !strings.HasPrefix(id, GroupPrefix) && len(m.Path) > 1 && m.Path[len(m.Path)-1] == id {
+		return m, true
+	}
+	return Member{}, false
+}
+
+// Homed is the member as the place under the members path names (the
+// group's member ids from the top) has it, its others in Also; ok is
+// false when none of its places is there.
+func (m Member) Homed(path []string) (Member, bool) {
+	under := func(o Member) bool { return len(o.Path) > len(path) && slices.Equal(o.Path[:len(path)], path) }
+	if under(m) {
+		return m, true
+	}
+	for i, o := range m.Also {
+		if under(o) {
+			o.Also = append(append([]Member{m.only()}, m.Also[:i]...), m.Also[i+1:]...)
+			return o, true
+		}
+	}
+	return Member{}, false
+}
+
+// only is the member without its other places.
+func (m Member) only() Member {
+	m.Also = nil
+	return m
 }
 
 // Groups are the ids of the groups in the group the model is of, the
@@ -278,7 +329,14 @@ func (m Member) Groups() []string {
 // Below is the member as the group at depth (0 the group itself, 1 the
 // group in it Path[0] names, …) has it.
 func (m Member) Below(depth int) Member {
-	return Member{ID: m.Path[depth], Path: m.Path[depth:], Via: m.Via[depth:], Provider: m.Provider, Model: m.Model, Effort: m.Effort, Fast: m.Fast}
+	out := Member{ID: m.Path[depth], Path: m.Path[depth:], Via: m.Via[depth:], Provider: m.Provider, Model: m.Model, Effort: m.Effort, Fast: m.Fast, At: m.At}
+	// its other places in the same group at depth
+	for _, o := range m.Also {
+		if len(o.Path) > depth && slices.Equal(o.Path[:depth], m.Path[:depth]) {
+			out.Also = append(out.Also, o.Below(depth))
+		}
+	}
+	return out
 }
 
 // maxNest is how deep groups in groups may go.
@@ -312,6 +370,9 @@ func groupsIn(entries []Entry) []Group {
 			g = withoutRemoved(g, have)
 		}
 		out = append(out, withMatches(entries, g.own()))
+	}
+	if !served(f.Groups) { // plugins/groups is off: the user's own aren't served
+		out = slices.DeleteFunc(out, func(g Group) bool { return !g.Auto })
 	}
 	if f.NoAutoGroups {
 		return orderedGroups(out, f.GroupOrder)
@@ -708,30 +769,39 @@ func membersIn(entries []Entry, all []Group, g Group) []Member {
 // membersOff is membersIn less the models off reports.
 func membersOff(entries []Entry, all []Group, g Group, off func(pid, model string) bool) []Member {
 	var out []Member
-	seen := map[string]bool{}
+	seen := map[string]int{} // where in out
+	at := 0
 	var walk func(g Group, path []string, via []Group, in []string)
 	walk = func(g Group, path []string, via []Group, in []string) {
 		for _, id := range g.routes() {
-			at := append(slices.Clone(path), id)
+			here := append(slices.Clone(path), id)
 			if gid, ok := strings.CutPrefix(id, GroupPrefix); ok {
 				sub, ok := groupOf(all, gid)
 				if !ok || sub.Disabled || slices.Contains(in, gid) || len(via) >= maxNest {
 					continue // gone, switched off, a loop, or deeper than anyone nests
 				}
-				walk(sub, at, append(slices.Clone(via), sub.Live()), append(slices.Clone(in), gid))
+				walk(sub, here, append(slices.Clone(via), sub.Live()), append(slices.Clone(in), gid))
 				continue
 			}
 			model, effort := memberEffortIn(entries, id)
 			p, m, ok := resolveIn(entries, model)
 			key := WithMemberEffort(p.ID+"/"+m, effort)
-			if !ok || seen[key] {
+			if !ok {
+				continue
+			}
+			mem := Member{ID: here[0], Path: here, Via: via, Provider: p, Model: m, Effort: effort, Fast: g.IsFast(id), At: at}
+			at++
+			if i, ok := seen[key]; ok {
+				// asked once, where it was met first; a rule naming this
+				// group still finds it here (#2361)
+				out[i].Also = append(out[i].Also, mem)
 				continue
 			}
 			if off(p.ID, m) {
 				continue // the user turned it off (#1867): a group never reaches it
 			}
-			seen[key] = true
-			out = append(out, Member{ID: at[0], Path: at, Via: via, Provider: p, Model: m, Effort: effort, Fast: g.IsFast(id)})
+			seen[key] = len(out)
+			out = append(out, mem)
 		}
 	}
 	walk(g, nil, nil, []string{g.ID})
@@ -774,7 +844,6 @@ func groupEntries(entries []Entry) []Entry {
 		// gateway sends max to the members that have no ultra
 		ultra := false
 		chatgpt := false // a ChatGPT account answers for a member
-		smallest := 0    // the smallest window a member is known to have
 		for i, m := range ms {
 			chatgpt = chatgpt || m.Provider.Account != nil && m.Provider.Account.Agent == "codex"
 			if !slices.ContainsFunc(ms[:i], func(o Member) bool { return o.Provider.ID == m.Provider.ID }) {
@@ -821,9 +890,6 @@ func groupEntries(entries []Entry) []Entry {
 			// for the one free model among them that holds 200k (#712)
 			if ctx > e.Context {
 				e.Context = ctx
-			}
-			if ctx > 0 && (smallest == 0 || ctx < smallest) {
-				smallest = ctx
 			}
 			if i == 0 {
 				e.ImageInput = imageInput
@@ -899,13 +965,40 @@ func groupEntries(entries []Entry) []Entry {
 		ruledEntry(&e, g.Live(), ms, entries)
 		if g.Context > 0 {
 			e.Context, e.WindowSet = g.Context, true
-		} else if g.Context == ContextSmallest && smallest > 0 {
-			e.Context = smallest
+		} else if smallest, typed := smallestWindow(entries, ms); g.Context == ContextSmallest && smallest > 0 {
+			e.Context, e.WindowSet = smallest, typed
 		}
 		e.Family = g.Family
 		out = append(out, e)
 	}
 	return out
+}
+
+// smallestWindow is the smallest window a member of ms is known to have
+// (0 when none is), and whether the user typed it, on the member's
+// provider for its model or all of its models. A group told its
+// smallest member's window is then told one the user typed (#2224: a
+// group following its smallest member, a 500K the user set on it, was
+// handed to Claude Desktop and Codex as magpie's default 272K, which a
+// group set to 500K itself wasn't). A tie counts as typed: the window is
+// the user's either way.
+func smallestWindow(entries []Entry, ms []Member) (n int, typed bool) {
+	for _, m := range ms {
+		ctx, set := 0, false
+		for _, x := range entries {
+			if x.Provider.ID == m.Provider.ID && x.Model == m.Model {
+				ctx, set = x.Context, x.WindowSet
+			}
+		}
+		switch {
+		case ctx <= 0:
+		case n == 0 || ctx < n:
+			n, typed = ctx, set
+		case ctx == n:
+			typed = typed || set
+		}
+	}
+	return n, typed
 }
 
 // levelsUnknown reports whether nothing magpie reads says which reasoning
@@ -1018,7 +1111,7 @@ func SaveGroup(g Group) error {
 	if err := cleanDecisionGroup(&g, groupsIn(entries)); err != nil {
 		return err
 	}
-	if g.Routing != Ordered && g.Routing != Rotate && g.Routing != LeastUsed && g.Routing != Pace && g.Routing != Weighted && g.Routing != Manual {
+	if g.Routing != Ordered && g.Routing != Rotate && g.Routing != LeastUsed && g.Routing != Pace && g.Routing != Weighted && g.Routing != Manual && !PluginRouting(g.Routing) {
 		g.Routing = ""
 	}
 	if !slices.Contains(Affinities, g.Affinity) {
@@ -1297,6 +1390,33 @@ func SwitchGroup(id string, on bool) error {
 	return store(f)
 }
 
+// PickGroup sends every request to a Manual group of the user's to its
+// member pick from the next request on (#317), as its card's radios do,
+// from wherever the user switches it: the tray panel (#2489) too. Nothing
+// else of the group changes, and only a Manual group can be switched so.
+func PickGroup(id, pick string) error {
+	f, err := read()
+	if err != nil {
+		return err
+	}
+	i := slices.IndexFunc(f.Groups, func(g Group) bool { return g.ID == id && !g.Hidden })
+	if i < 0 {
+		return fmt.Errorf("magpie has no group %q", id)
+	}
+	g := &f.Groups[i]
+	if g.Routing != Manual {
+		return fmt.Errorf("%s doesn't route by hand: its card picks a model only in Manual routing", g.Name)
+	}
+	if !slices.Contains(g.Members, pick) {
+		return fmt.Errorf("%s is not in %s", pick, g.Name)
+	}
+	if g.Pick == pick {
+		return nil
+	}
+	g.Pick = pick
+	return store(f)
+}
+
 // DisabledGroup is the group of the user's a model id names ("group/<id>",
 // or a model's as GroupFor takes it) when it is switched off.
 func DisabledGroup(id string) (Group, bool) {
@@ -1404,5 +1524,48 @@ func RenameGroup(from, to string) error {
 			f.Groups[i].Classifier = now
 		}
 	}
-	return store(f)
+	if err := store(f); err != nil {
+		return err
+	}
+	return renameGroupPicks(old, now)
+}
+
+// renameGroupPicks moves what each agent's list says of a group to its new
+// id, as renameModelPrefs does a provider's models: picked for an agent
+// shown only its picks, taken out, put in an order, sent fast. Left under
+// the old id, a group picked for Pi was off in Pi's list after its rename
+// (#2289, eachann1024), the id it was picked by no longer in the catalog.
+func renameGroupPicks(old, now string) error {
+	s := settings.Load()
+	moved := false
+	// the hidden and the picked are kept sorted (sortedIDs); an order is
+	// the user's own
+	for i, m := range []map[string][]string{s.HiddenModels, s.PickedModels, s.OrderedModels, s.FastPicks} {
+		for agent, ids := range m {
+			if !slices.Contains(ids, old) {
+				continue
+			}
+			var out []string
+			for _, id := range ids {
+				if id == old {
+					id = now
+				}
+				if !slices.Contains(out, id) {
+					out = append(out, id)
+				}
+			}
+			if i < 2 {
+				out = sortedIDs(out)
+			}
+			m[agent], moved = out, true
+		}
+	}
+	if !moved {
+		return nil
+	}
+	if err := settings.Save(s); err != nil {
+		return err
+	}
+	catalog.Touched()
+	return nil
 }

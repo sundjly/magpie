@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
@@ -120,7 +121,10 @@ type pluginEntryJSON struct {
 	Named bool `json:"named,omitempty"`
 	// OptionsExample is what its package suggests for its options, which
 	// the options editor starts from when none are set
-	OptionsExample map[string]any `json:"optionsExample,omitempty"`
+	OptionsExample map[string]any       `json:"optionsExample,omitempty"`
+	Gateway        *plugin.GatewayState `json:"gateway,omitempty"`
+	IsGateway      bool                 `json:"isGateway,omitzero"`
+	GatewayOnly    bool                 `json:"gatewayOnly,omitzero"`
 	// IsMiddleware is whether its package has gateway middleware, said of
 	// one switched off too, which Middleware leaves out; MiddlewareOnly is
 	// whether that is all it has, no provider to sign in to
@@ -133,11 +137,32 @@ type pluginEntryJSON struct {
 	Agent        *pluginAgentJSON `json:"agent,omitempty"`
 	IsAgent      bool             `json:"isAgent,omitempty"`
 	InMagpieOnly bool             `json:"inMagpieOnly,omitempty"`
+	// Page is the page it adds to the window (magpie.page), said of one
+	// switched off too: what the row shows before it is turned on, with
+	// what the page may read of magpie's
+	Page *pluginPageInfoJSON `json:"page,omitempty"`
 	// Clashes are the providers it signs in to that another plugin signs
 	// in to as well (a plugin of the user's own beside a third party's):
 	// the host runs one plugin for each, and the row says which, with a
 	// way to pick this one
 	Clashes []pluginClashJSON `json:"clashes,omitempty"`
+	// Tools are the tools it gives, which magpie's plugin tools MCP server
+	// offers every agent under MCP's name: with their descriptions while
+	// the host runs, by name alone from what it noted last when it doesn't
+	Tools []pluginToolJSON `json:"tools,omitempty"`
+}
+
+// pluginToolJSON is one tool a plugin gives, as its row lists it.
+type pluginToolJSON struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MCP         string `json:"mcp"` // its name on the MCP server
+}
+
+// pluginPageInfoJSON is a plugin's page as its row says it.
+type pluginPageInfoJSON struct {
+	Title string   `json:"title,omitempty"`
+	Reads []string `json:"reads"`
 }
 
 // pluginClashJSON is a provider two plugins sign in to, as a row says it.
@@ -172,6 +197,8 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	names := map[string][]string{}
 	clashes := map[string][]plugin.Clash{}
 	idName := map[string]string{}
+	var tools []plugin.PluginTools
+	asked := false
 	if len(l.Plugins) > 0 && (plugin.Running() || plugin.HasBun()) {
 		loaded, err := plugin.Plugins(ctx)
 		if err != nil {
@@ -179,9 +206,25 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 		}
 		for _, p := range loaded {
 			errs[p.Spec] = p.Error
+			if p.Error == "" && len(p.Tools) > 0 {
+				tools = append(tools, plugin.PluginTools{Spec: p.Spec, Tools: p.Tools})
+			}
 		}
 		clashes = plugin.Clashes(loaded)
+		asked = err == nil
 	}
+	if !asked {
+		for _, e := range l.Plugins {
+			var ts []plugin.Tool
+			for _, n := range plugin.ToolNames()[e.Spec] {
+				ts = append(ts, plugin.Tool{Name: n})
+			}
+			if len(ts) > 0 && !e.Off {
+				tools = append(tools, plugin.PluginTools{Spec: e.Spec, Tools: ts})
+			}
+		}
+	}
+	toolNames := gateway.ToolNames(tools)
 	// each plugin's subscriptions, by the names it gave last (plugin.Cached,
 	// which holds them without starting the host or asking anyone, and asks
 	// the plugins again in the background when a sign-in or the plugins
@@ -200,6 +243,7 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	// npm's newest, as it said last: asking it again is /api/plugins/npm's
 	known := plugin.InfoCached(npmNames(l.Plugins))
 	mws := middleware.States()
+	gws := plugin.GatewayStates(ctx)
 	var agentErrs map[string]string
 	for _, e := range l.Plugins {
 		if f, _ := plugin.Agent(plugin.Target(e.Spec)); f != "" && !e.Off {
@@ -209,6 +253,17 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	}
 	for _, e := range l.Plugins {
 		j := pluginEntryJSON{Entry: e, Error: errs[e.Spec], Providers: names[e.Spec], Version: plugin.Installed(e.Spec), Named: answered}
+		if plugin.Gateway(plugin.Target(e.Spec)) != "" {
+			j.IsGateway = true
+			j.GatewayOnly = plugin.GatewayOnly(plugin.Target(e.Spec))
+			if !e.Off {
+				state := plugin.GatewayState{LastOutcome: "idle"}
+				if found, ok := gws[e.Spec]; ok {
+					state = found
+				}
+				j.Gateway = &state
+			}
+		}
 		if npmPlugin(e.Spec) {
 			j.Latest = known[plugin.Name(e.Spec)].Version
 		}
@@ -227,6 +282,8 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 		}
 		if file, only := plugin.Middleware(plugin.Target(e.Spec)); file != "" {
 			j.IsMiddleware, j.MiddlewareOnly = true, only
+		}
+		if j.IsMiddleware || j.IsGateway {
 			j.OptionsExample = plugin.OptionsExample(plugin.Target(e.Spec))
 		}
 		if file, _ := plugin.Agent(plugin.Target(e.Spec)); file != "" {
@@ -236,12 +293,27 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 				j.Agent = pluginAgentOf(e.Spec, agentErrs)
 			}
 		}
+		if pg, _ := plugin.WindowPage(plugin.Target(e.Spec)); pg != nil {
+			j.Page = &pluginPageInfoJSON{Title: pg.Title, Reads: pg.Reads}
+			if j.Page.Reads == nil {
+				j.Page.Reads = []string{}
+			}
+			j.InMagpieOnly = plugin.InMagpieOnly(plugin.Target(e.Spec))
+		}
 		for _, c := range clashes[e.Spec] {
 			n := idName[c.ID]
 			if n == "" {
 				n = c.ID
 			}
 			j.Clashes = append(j.Clashes, pluginClashJSON{Clash: c, Name: n})
+		}
+		for _, pt := range tools {
+			if pt.Spec != e.Spec || e.Off {
+				continue
+			}
+			for _, x := range pt.Tools {
+				j.Tools = append(j.Tools, pluginToolJSON{Name: x.Name, Description: x.Description, MCP: toolNames[e.Spec][x.Name]})
+			}
 		}
 		j.Moved = provider.MovedOnto(e.Spec)
 		if j.Moved == nil {

@@ -31,14 +31,17 @@ const providerUsage = `usage:
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
                                           again, it adds another (deepseek-2); k=v pairs too: id, name, header.X-Foo
-  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, gemini, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.token, models.url, search, user-agent,
+  magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, gemini, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.method, balance.token, models.url, search, user-agent,
                                           access.key, access.secret (a Volcengine access key, or a Tencent Cloud SecretId and SecretKey, for its plan's windows)
   magpie provider set <id> k=v…           change a provider's settings, with the same k=v pairs as add;
                                           codex=as-sent sends Codex's Responses requests as Codex sent them
                                           (a relay that checks they are Codex's own), codex=default fits them;
                                           user-agent=agent sends the User-Agent the agent gave (pi, opencode…)
                                           in place of magpie's, for a plan that serves only agents it names;
-                                          user-agent=magpie, the default, sends magpie's
+                                          user-agent=magpie, the default, sends magpie's;
+                                          compaction=native asks the provider Codex's own compaction and hands
+                                          Codex its sealed item as it came (a Responses API, a ChatGPT account,
+                                          Copilot), compaction=magpie, the default, has magpie summarise
   magpie provider key <id> <key>          change the API key
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
   magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
@@ -74,10 +77,13 @@ const providerUsage = `usage:
                                           without saying when it is back (default: 15 minutes; at most 8 days),
                                           or until the time of day a daily allowance comes back, on this
                                           computer's clock or at the vendor's offset from UTC
-  magpie provider rest-cap <id> [30m|6h|1d|default]
+  magpie provider rest-cap <id> [1m|30m|6h|1d|off|default]
                                           the most a key or account sits out while it keeps failing or being
                                           rate limited, its rest doubling each time from a minute (default:
-                                          10 minutes for a failure, 30 for a rate limit; at most 8 days)
+                                          10 minutes for a failure, 30 for a rate limit; at most 8 days);
+                                          off: one that fails without saying why (a relay's 5xx) doesn't
+                                          rest at all, while out of quota, its key refused or rate limited
+                                          still rests it
   magpie provider listed <id> yes|no      no: its models serve only through routing groups, not in the list
   magpie provider off|on <id>             switch it off (kept, but no agent or request uses it), or on again
   magpie provider test <id> [--as codex|claude-code] [model…]
@@ -114,6 +120,8 @@ const providerUsage = `usage:
                                     requests as written; not for a local relay that passes them on to a vendor)
        magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… balance=https://relay.example.com/api/usage/token balance.path='$data.total_available / 500000'
        magpie provider set my-relay balance.path='(1 - credits.monthlyCredits / 70) %'
+       magpie provider set my-relay balance.method=POST
+                                   (a balance endpoint that answers only a POST: asked with no body)
        magpie provider set my-relay balance=https://relay.example.com/api/user/self balance.path='$data.quota / 500000' balance.token=<access token> header.New-Api-User=<user id>
                                    (a new-api relay's whole account: its access token and user id, from its personal settings)
                                    (balance.path: where the amount is in the reply, or a sum of those with + - * / and
@@ -793,6 +801,9 @@ func showProvider(p provider.Provider) error {
 		}
 		kv("unmasked", "yes"+muted.Render(why))
 	}
+	if p.NativeCompaction {
+		kv("compaction", "native"+muted.Render("  Codex's own, sealed by the key or account that answers it"))
+	}
 	switch {
 	case p.Account != nil:
 		who := p.Account.User
@@ -842,6 +853,9 @@ func showProvider(p provider.Provider) error {
 		// where it was asked: a panel's key query when its account query
 		// has no token left to ask with
 		if u, field := provider.BalanceQuery(p); u != "" {
+			if p.BalanceMethod != "" {
+				u = strings.ToUpper(p.BalanceMethod) + " " + u
+			}
 			from = muted.Render("  from " + u + " " + field)
 		}
 		if err != nil {
@@ -989,6 +1003,17 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.BalanceURL = v
 		case "balance.path":
 			p.BalancePath = v
+		case "balance.method":
+			// GET (the default) or POST, for an endpoint that answers
+			// only a POST (#2368)
+			switch strings.ToUpper(strings.TrimSpace(v)) {
+			case "GET", "":
+				p.BalanceMethod = ""
+			case "POST":
+				p.BalanceMethod = "POST"
+			default:
+				return fmt.Errorf("balance.method=GET|POST, not %q", v)
+			}
 		case "balance.token":
 			p.BalanceToken = v
 		case "access.key":
@@ -1036,6 +1061,18 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 				return fmt.Errorf("search=yes|no, not %q", v)
 			}
 			p.Searches = v == "yes"
+		case "compaction":
+			// native: Codex's compaction_trigger goes to the provider as
+			// Codex sent it, its sealed compaction back to Codex as it
+			// came (#1099); magpie: magpie's summary, the default
+			switch strings.ToLower(v) {
+			case "native", "yes", "on":
+				p.NativeCompaction = true
+			case "magpie", "default", "no", "off":
+				p.NativeCompaction = false
+			default:
+				return fmt.Errorf("compaction=native|magpie, not %q", v)
+			}
 		case "unmasked":
 			// yes: a model on this computer or the local network gets the
 			// requests as written, unmasked by Settings' redaction (lc on
@@ -1090,6 +1127,9 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			}
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}
+	}
+	if p.NativeCompaction && !p.CarriesCompaction() {
+		return fmt.Errorf("compaction=native: %s can't carry Codex's own compaction; only a provider with a Responses API (responses=), a ChatGPT account or GitHub Copilot can", p.Name)
 	}
 	if workspace != "" {
 		// Bailian's decision model is asked at the workspace's own host
@@ -1655,14 +1695,14 @@ func quotaRestCmd(rest []string) error {
 // while they keep failing or being rate limited (#2008).
 func restCapCmd(rest []string) error {
 	if len(rest) < 1 || len(rest) > 2 {
-		return fmt.Errorf("magpie provider rest-cap <id> [30m|6h|1d|default]")
+		return fmt.Errorf("magpie provider rest-cap <id> [1m|30m|6h|1d|off|default]")
 	}
 	p, err := provider.Find(rest[0])
 	if err != nil {
 		return err
 	}
 	if len(rest) > 1 {
-		minutes, err := restMinutes(rest[1])
+		minutes, err := restCapMinutes(rest[1])
 		if err != nil {
 			return err
 		}
@@ -1673,12 +1713,29 @@ func restCapCmd(rest []string) error {
 			return err
 		}
 	}
-	if p.RestCap > 0 {
+	if p.NoFailRest() {
+		fmt.Printf("%s · a key or account that fails without saying why doesn't rest: the next request asks it again. Out of quota or credit, its key refused or its model not served still rests it; rate limited, at most 30 minutes (magpie's own)\n", p.Name)
+	} else if p.RestCap > 0 {
 		fmt.Printf("%s · a key or account that keeps failing sits out at most %s\n", p.Name, restWords(time.Duration(p.RestCap)*time.Minute))
 	} else {
 		fmt.Printf("%s · a key or account that keeps failing sits out at most 10 minutes, 30 when rate limited (magpie's own)\n", p.Name)
 	}
 	return nil
+}
+
+// restCapMinutes reads a rest cap as restCapCmd takes it: as restMinutes
+// does, but off (or never) is provider.RestCapOff, no rest after an
+// unknown failure, and a cap under a minute is turned away with what to
+// set instead, as the first rest is a minute already.
+func restCapMinutes(s string) (int, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "off", "never", "no":
+		return provider.RestCapOff, nil
+	}
+	if d, err := time.ParseDuration(strings.TrimSpace(s)); err == nil && d > 0 && d < time.Minute {
+		return 0, fmt.Errorf("the shortest rest cap is 1m, which rests a minute every time, not longer; off doesn't rest after an unknown failure at all")
+	}
+	return restMinutes(s)
 }
 
 // restMinutes reads a rest as quotaRestCmd takes it: default (0), a

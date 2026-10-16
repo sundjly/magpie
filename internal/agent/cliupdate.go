@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/netproxy"
@@ -141,14 +142,30 @@ var cliSpecs = map[string]cliSpec{
 			}
 			return nil
 		}},
-	"pi":        {npm: []string{"@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"}, brew: []string{"pi-coding-agent"}},
-	"omp":       {npm: []string{"@oh-my-pi/pi-coding-agent"}},
+	"pi": {npm: []string{"@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"}, brew: []string{"pi-coding-agent"}},
+	// omp: bun's global, or omp.sh's -Binary install, a binary of its own
+	// in ~/.local/bin (install, PI_INSTALL_DIR aside) or
+	// %LOCALAPPDATA%\omp (install.ps1), which omp update replaces with
+	// the release's, as the reporter of #2192 saw it do
+	"omp": {npm: []string{"@oh-my-pi/pi-coding-agent"},
+		self: func(bin, real string) []string {
+			if l := strings.ToLower(real); strings.HasSuffix(l, "/.local/bin/omp") || strings.HasSuffix(l, "/appdata/local/omp/omp.exe") {
+				return []string{bin, "update"}
+			}
+			return nil
+		}},
 	"copilot":   {npm: []string{"@github/copilot"}, brew: []string{"copilot-cli"}},
 	"crush":     {npm: []string{"@charmland/crush"}, brew: []string{"crush"}},
 	"cline":     {npm: []string{"cline"}, brew: []string{"cline"}},
 	"dsh":       {npm: []string{"@deepseek-ai/dsh"}},
 	"codebuddy": {npm: []string{"@tencent-ai/codebuddy-code"}},
 	"goose":     {brew: []string{"block-goose-cli"}},
+	// Cursor CLI: its own installer (cursor.com/install) links
+	// ~/.local/bin/cursor-agent to ~/.local/share/cursor-agent/versions/<v>/
+	// cursor-agent, and `cursor-agent --version` says the version
+	// ("2026.10.01-e373342"). Not on npm nor Homebrew, and it updates
+	// itself, so magpie shows its version only (@G_Z_Y on X saw none).
+	"cursor": {},
 	// AtomCode's installer chooses /usr/local/bin or ~/.local/bin by
 	// writability (`.local\bin\atomcode.exe` on Windows); `atomcode upgrade`
 	// exists, but its installed-binary update path is not exercised here, so
@@ -156,6 +173,9 @@ var cliSpecs = map[string]cliSpec{
 	"atomcode": {npm: []string{"@atomgit.com/atomcode"}, brew: []string{"atomcode"}},
 	// Snow CLI is published on npm alone (snow-ai)
 	"snow": {npm: []string{"snow-ai"}},
+	// MothX: its npm installer package, which brings the native binary
+	// for the platform as an optional dependency
+	"mothx": {npm: []string{"mothx-installer"}},
 	// omo update, however it was installed: OmO's own updater, which moves
 	// the engine it pins (senpi) with it
 	"omo": {npm: []string{"omo-ai"},
@@ -310,12 +330,12 @@ func fromNodeModules(pkg, bin, real string) *updater {
 		if !isDir(filepath.Join(filepath.FromSlash(modules), filepath.FromSlash(pkg))) {
 			modules = "" // pnpm's shims name a store elsewhere
 		}
-	} else {
+	} else if !bunxNames(bin, pkg) {
 		return nil
 	}
 	lower := strings.ToLower(real + "|" + filepath.ToSlash(bin))
 	switch {
-	case strings.Contains(lower, "/.bun/"):
+	case strings.Contains(lower, "/.bun/") || modules == "" && bunxNames(bin, pkg):
 		bun := filepath.Join(filepath.Dir(bin), exe("bun"))
 		if !isFile(bun) {
 			var err error
@@ -367,6 +387,26 @@ func fromNodeModules(pkg, bin, real string) *updater {
 	}
 	u.cmd = []string{npm, "install", "-g", "--prefix", prefix, pkg + "@latest"}
 	return u
+}
+
+// bunxNames says whether bin is bun's Windows shim of pkg's program: a
+// small opencode.exe that runs what the opencode.bunx beside it names, in
+// UTF-16, from bun's folder: install\global\node_modules\opencode-ai\
+// bin\opencode.exe (bun 1.4.3, #2192). The .exe itself names no package.
+func bunxNames(bin, pkg string) bool {
+	if !strings.EqualFold(filepath.Ext(bin), ".exe") {
+		return false
+	}
+	b, err := os.ReadFile(strings.TrimSuffix(bin, filepath.Ext(bin)) + ".bunx")
+	if err != nil || len(b) > 64<<10 {
+		return false
+	}
+	u := make([]uint16, 0, len(b)/2)
+	for i := 0; i+1 < len(b); i += 2 {
+		u = append(u, uint16(b[i])|uint16(b[i+1])<<8)
+	}
+	named := strings.ReplaceAll(string(utf16.Decode(u)), `\`, "/")
+	return strings.Contains(named, "node_modules/"+pkg+"/")
 }
 
 // shimNames says whether bin is a small script naming pkg's folder.
@@ -884,7 +924,9 @@ func updateEnv(u *updater) []string {
 			}
 		}
 	}
-	return append(env, "NONINTERACTIVE=1", "HOMEBREW_NO_ENV_HINTS=1", "NO_COLOR=1")
+	// the --version run after an update starts Cline, which would otherwise
+	// check for (and schedule) an update of its own
+	return append(env, "NONINTERACTIVE=1", "HOMEBREW_NO_ENV_HINTS=1", "NO_COLOR=1", "CLINE_NO_AUTO_UPDATE=1")
 }
 
 // updateTimeout bounds an update: a download, or Homebrew updating itself first.
