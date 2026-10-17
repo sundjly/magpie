@@ -636,6 +636,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/magpie/route", s.sessionRoute)
 	mux.HandleFunc("GET /v1/magpie/concurrency", s.concurrency)
 	mux.HandleFunc("GET /v1/magpie/limit", s.keyLimit)
+	// a heap profile of this process, for magpie heap (loopback only)
+	mux.HandleFunc("GET "+HeapPath, s.heapProfile)
 	mux.HandleFunc("GET /v1/magpie/omarchy", s.omarchyTheme)
 	mux.HandleFunc("OPTIONS /v1/magpie/omarchy", s.omarchyTheme)
 	mux.HandleFunc("POST /v1/chat/completions", s.handle(provider.Chat))
@@ -833,8 +835,15 @@ func modelObject(e provider.Entry) map[string]any {
 	for _, effort := range e.Efforts {
 		levels = append(levels, reasoningLevel{Effort: effort})
 	}
+	// the same levels as plain names, [] when there are none: clients of
+	// the Catwalk schema (Crush and kin) read this flat array to know which
+	// reasoning efforts a model takes, and drop the effort from requests to
+	// a model that names none (#2576). The objects stay for the readers the
+	// list already has (catalog.levelsOf reads either)
+	flat := append(make([]string, 0, len(e.Efforts)), e.Efforts...)
 	m := map[string]any{"id": e.ID, "object": "model", "type": "model", "created": 0, "created_at": "2025-01-01T00:00:00Z",
-		"owned_by": e.Provider.ID, "display_name": e.PlainName(), "reasoning": e.Thinks(), "supported_reasoning_levels": levels}
+		"owned_by": e.Provider.ID, "display_name": e.PlainName(), "reasoning": e.Thinks(), "supported_reasoning_levels": levels,
+		"reasoning_levels": flat}
 	// the window, as the names clients read it by: a group's context
 	// (magpie group set … context=) included
 	if e.Context > 0 {
@@ -938,7 +947,7 @@ func nativeEndpoints(e provider.Entry) []string {
 // asks for them in its list (provider.DrawersHeader): "kind": "image",
 // which an agent's list never has, so it takes none for a model to chat
 // with. A gateway key held to some models is told of those alone, as its
-// chat list is.
+// chat list is: models it names that an account it may use serves (#2579).
 func drawerObjects(r *http.Request) []map[string]any {
 	who, held := keyHolds(r)
 	var out []map[string]any
@@ -947,7 +956,7 @@ func drawerObjects(r *http.Request) []map[string]any {
 			continue
 		}
 		for _, m := range Drawers(p) {
-			if held && !modelAllowed(who, p, m.ID) {
+			if held && (!modelAllowed(who, p, m.ID) || !accountServes(who, p, m.ID)) {
 				continue
 			}
 			name := cmp.Or(m.Name, m.ID)
@@ -965,7 +974,8 @@ func drawerObjects(r *http.Request) []map[string]any {
 
 // videomakerObjects are the video models magpie makes videos with, as
 // another magpie asks for them (provider.VideomakersHeader): "kind": "video".
-// A gateway key held to some models is told of those alone.
+// A gateway key held to some models or accounts is told of those alone,
+// as its chat list is (#2579).
 func videomakerObjects(r *http.Request) []map[string]any {
 	who, held := keyHolds(r)
 	var out []map[string]any
@@ -974,7 +984,7 @@ func videomakerObjects(r *http.Request) []map[string]any {
 			continue
 		}
 		for _, m := range Videomakers(p) {
-			if held && !modelAllowed(who, p, m.ID) {
+			if held && (!modelAllowed(who, p, m.ID) || !accountServes(who, p, m.ID)) {
 				continue
 			}
 			name := cmp.Or(m.Name, m.ID)
@@ -1374,6 +1384,9 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			// own: in the request's tools for every route, the relay's
 			// and every check that reads them (#2322)
 			body = liftMessageTools(body)
+			// a tool in MCP's, Anthropic's or Responses' shape, which
+			// no Chat API takes, in the Chat shape for every route (#2622)
+			body = shapeChatTools(body)
 		}
 		// Claude Code's headers, for a test asked as Claude Code to ask
 		// with (provider.TestAs), whatever serves this model: a
@@ -1906,7 +1919,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		if currentImage {
 			call.Status, call.Error = 400, "model does not support image input"
-			writeError(w, from, 400, fmt.Sprintf("model %q does not support image input%s", call.Model, noSeerNote()))
+			group := ""
+			if isGroup {
+				group = g.Name
+			}
+			writeError(w, from, 400, fmt.Sprintf("model %q does not support image input%s%s", call.Model, textOnlyNote(p, model, group), noSeerNote()))
 			turnedAway()
 			return
 		}
@@ -2154,7 +2171,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 			if len(cands) == 0 {
 				call.Status, call.Error = 400, "model does not support image input"
-				writeError(w, from, 400, fmt.Sprintf("model %q does not support image input%s", call.Model, noSeerNote()))
+				writeError(w, from, 400, fmt.Sprintf("model %q does not support image input%s%s", call.Model, textOnlyNote(p, model, g.Name), noSeerNote()))
 				turnedAway()
 				return
 			}
@@ -2243,10 +2260,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	gaveWay := map[string]bool{} // keys and accounts that gave way, full, to one free (laneMate)
 	// a group's members that failed in a way that passes are asked again,
-	// once each has been, for up to its Patience (#1418)
-	var patience time.Duration
+	// once each has been, for up to its Patience (#1418): a member of a
+	// group in the group uses the innermost that sets Patience (#2410)
+	var patience, patienceFallback time.Duration
 	if isGroup {
-		patience = g.Waits()
+		patienceFallback = g.Waits()
+		patience = maxWaits(cands, patienceFallback)
 	}
 	var busyNow []busyTry  // the members of this round that failed so
 	rounds := 0            // the rounds they were asked again in
@@ -2416,14 +2435,27 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			levels = groupLevels(g, ms, c)
 		}
 		fixed := cmp.Or(c.effort, withinLevels(askedEffort, levels))
-		if fixed == "" && effort == "" && agentPick != "" && c.p.Thinks(c.model) {
+		// the reasoning the rule that put this member first asks it for
+		// (#2633), over the agent's, a suffix's and the turn's pick; a
+		// member fixed at an effort keeps its own
+		ruled := ""
+		if c.effort == "" {
+			if ruled = ruleEffort(c, hit, nested); ruled != "" {
+				fixed = ""
+			}
+		}
+		if fixed == "" && ruled == "" && effort == "" && agentPick != "" && c.p.Thinks(c.model) {
 			// the effort picked in magpie for an agent whose config can't
 			// carry one (Cursor Private Inference, #1003), in place of the
 			// level it sent, on a model that reasons; a member fixed at
 			// one, a suffix and the turn's pick are more particular
 			fixed = withinLevels(agentPick, levels)
 		}
-		if fixed != "" {
+		if ruled != "" {
+			// asked even of a request that asked for no reasoning, as a
+			// member fixed at an effort is; already fitted to its levels
+			attemptBody = withFixedEffort(from, attemptBody, ruled)
+		} else if fixed != "" {
 			// a member fixed at an effort is asked for it, at the level its
 			// model has nearest, whatever the agent asked or the turn's
 			// pick: even a request that asked for no reasoning
@@ -2523,7 +2555,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		s.trace.update(tr, func(t *Route) {
 			t.imageProvider = c.p.ID
-			t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Effort: sent, Picked: picked, Fixed: fixed, Fast: fast, Start: began})
+			t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Effort: sent, Picked: picked, Fixed: fixed, RuleEffort: ruled, Fast: fast, Start: began})
 		})
 		held := false          // answered as its vendor did a moment ago, without asking
 		var heldBack time.Time // when the first of those held out of their allowance is back
@@ -2697,7 +2729,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		wentTier = at.tier
 		ended = time.Now()
-		try := Try{ID: c.rest, Model: c.model, Effort: wentAt, Picked: picked, Fixed: fixed, Fast: fast, Start: began, Done: true, Status: call.Status, Millis: ended.Sub(began).Milliseconds(), Error: call.Error, Queued: queued,
+		try := Try{ID: c.rest, Model: c.model, Effort: wentAt, Picked: picked, Fixed: fixed, RuleEffort: ruled, Fast: fast, Start: began, Done: true, Status: call.Status, Millis: ended.Sub(began).Milliseconds(), Error: call.Error, Queued: queued,
 			Served: call.Usage.Served, Upstream: call.Usage.Upstream, Tier: wentTier, TierServed: call.Usage.Tier, Auto: autoPicked(),
 			Net: nt.timing(began, queued)}
 		if resetFirst != nil {
@@ -3112,32 +3144,38 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			try.Fail, try.Rest = rest.Why, &rest
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
-			if patience > 0 && !hw.turnedAway && busy(hw.code(), hw.errBody()) {
+			if waitsOf(c.patience, patienceFallback) > 0 && !hw.turnedAway && busy(hw.code(), hw.errBody()) {
 				busyNow = noteBusy(busyNow, c, hw.header)
 			}
 			continue
 		}
 		if _, same := passing(hw.code(), hw.header, hw.errBody(), again); last && patience > 0 && !protected && !hw.turnedAway && !hw.refused && hw.failed() && busy(hw.code(), hw.errBody()) &&
-			(len(busyNow) > 0 || !same) {
+			(len(busyNow) > 0 || waitsOf(c.patience, patienceFallback) > 0 && !same) {
 			// every member has failed, each in a way that passes — busy,
 			// overloaded, rate limited for a moment — with nothing of a
 			// reply sent: after a pause, longer each round and no shorter
 			// than a Retry-After, those back by then are asked again in
-			// turn, while the group's Patience for the request lasts
+			// turn, while each member's Patience for the request lasts
 			// (#1418: Codex's turn ended on server_is_overloaded, to be
-			// told "continue" by hand). Another member busy too, this one
-			// isn't asked again alone first, as the last one left is: they
-			// take turns. The patience is counted from the first time
-			// every member had failed, when the agent would have had the
-			// error
+			// told "continue" by hand; #2410: a nested group's own).
+			// Another member busy too, this one isn't asked again alone
+			// first, as the last one left is: they take turns. The
+			// patience is counted from the first time every member had
+			// failed, when the agent would have had the error
 			if waitFrom.IsZero() {
 				waitFrom = time.Now()
 			}
-			busyNow = noteBusy(busyNow, c, hw.header)
+			if waitsOf(c.patience, patienceFallback) > 0 {
+				busyNow = noteBusy(busyNow, c, hw.header)
+			}
 			// nor once Codex would hang up in the pause, for want of an
 			// event (agentQuietMost): it has the error instead
-			if next, wait, ok := replan(busyNow, rounds, waitFrom.Add(patience)); ok && !kept.tooQuiet(wait) {
-				try.Fail, try.Again, try.Replan, try.Patience = failureOf(c, hw.code(), hw.errBody()), wait.Milliseconds(), len(next), int(patience/time.Second)
+			memberWait := waitsOf(c.patience, patienceFallback)
+			if memberWait == 0 {
+				memberWait = patience
+			}
+			if next, wait, ok := replan(busyNow, rounds, waitFrom, patienceFallback); ok && !kept.tooQuiet(wait) {
+				try.Fail, try.Again, try.Replan, try.Patience = failureOf(c, hw.code(), hw.errBody()), wait.Milliseconds(), len(next), int(memberWait/time.Second)
 				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 				skipped = append(skipped, c.label()+": "+call.Error)
 				rounds, busyNow = rounds+1, nil
@@ -3406,6 +3444,12 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		body = joinToolRuns(body)
 		body = orphanedToolOutputs(body)
 		body = pairToolItems(body)
+	}
+	if from == provider.Chat {
+		// a call kept with an empty id, which a strict upstream turns
+		// the whole request away for (#2611); before the relay, the
+		// translation and a plugin's fetch alike
+		body = chatCallIDs(body)
 	}
 	// every request to the provider goes through its own proxy, if it has
 	// one (#237)
@@ -4017,6 +4061,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		}
 	case provider.Chat:
 		body = developerAsSystem(body)
+		// a turn the client cut off before it said anything, which
+		// DeepSeek and Kimi turn every later request away for (#2599)
+		body = silentAssistantsOut(body)
 		if mistral := p.Preset == "mistral" || p.Host() == "api.mistral.ai"; !mistral && (chatReplaysReasoning(buildHost(p), model) || chatReplaysReasoning(buildHost(p), upstream)) {
 			// a tool call the client kept no thinking for, which DeepSeek
 			// turns the whole request away for (#1462)
@@ -5525,13 +5572,13 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		}
 		return writeVendorError(w, from, res.StatusCode, msg, b), msg
 	}
-	dec := decoder(actual)
+	dec := decoderFor(p, actual)
 	rd, sse := eventStream(res)
 	if !sse {
 		// the provider ignored stream:true; read the whole reply as one
 		// event stream would be wrong, so give up cleanly
 		b, _ := io.ReadAll(io.LimitReader(rd, 1<<20))
-		msg := p.Name + " did not stream: " + provider.APIError(b, "unexpected reply")
+		msg := p.Name + " " + didNotStream + ": " + provider.APIError(b, "unexpected reply")
 		return writeError(w, from, 502, msg), msg
 	}
 	// a Gemini reply that says nothing is a failure, not a turn's end
@@ -5768,6 +5815,18 @@ func build(proto provider.Protocol, r *Request, model, host string, rejectTemp b
 		out = withFields(out, map[string]any{"speed": "fast"})
 	}
 	return out, nil
+}
+
+// decoderFor is decoder for p's replies. A plugin's Chat text is read as
+// OpenCode reads it, as it came: the plugin knows its vendor and gives its
+// reasoning apart, so a <think> at the head of its text is the model's
+// words, not a block of thinking to take out (Qoder's, #2634).
+func decoderFor(p provider.Provider, proto provider.Protocol) func(data string, emit func(Event)) error {
+	if proto == provider.Chat && p.IsPlugin() {
+		d := &chatDecoder{past: true}
+		return d.decode
+	}
+	return decoder(proto)
 }
 
 func decoder(proto provider.Protocol) func(data string, emit func(Event)) error {
@@ -6026,12 +6085,26 @@ func developerAsSystem(body []byte) []byte {
 }
 
 // sessionHeaders are where agents already name their conversation: OpenCode
-// (to its own gateway, and to everyone else), Pi, Codex, Claude Code and
-// WorkBuddy / CodeBuddy (X-Conversation-ID).
+// (to its own gateway, and to everyone else), Pi, Codex, Claude Code,
+// WorkBuddy / CodeBuddy (X-Conversation-ID) and DSH (#2505).
 var sessionHeaders = []string{
 	"x-opencode-session", "x-session-affinity", "x-session-id",
 	"session_id", "session-id", "x-claude-code-session-id",
-	"x-conversation-id",
+	"x-conversation-id", "x-deepseek-harness-session-id",
+}
+
+// dshCompactHeader is how DSH marks a request that compacts its context
+// (#2505). Only the mark says so: a request without it is never taken for
+// one by what its prompt says.
+const dshCompactHeader = "x-deepseek-harness-compact"
+
+// dshCompacts reports whether h carries DSH's compaction mark, set.
+func dshCompacts(h http.Header) bool {
+	switch strings.ToLower(strings.TrimSpace(h.Get(dshCompactHeader))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
 }
 
 // SessionHeader names the session a call is part of, for the usage log to
@@ -6441,9 +6514,21 @@ func failTo(w http.ResponseWriter, a *keptAlive, proto provider.Protocol, status
 func streamError(w http.ResponseWriter, proto provider.Protocol, status int, msg string) {
 	sw := newSSEWriter(w)
 	sw.begun = true
-	ev := Event{Kind: KError, Text: saysPassing(status, msg), Status: status}
-	if tooLong(status, msg) {
+	text := saysPassing(status, msg)
+	ev := Event{Kind: KError, Text: text, Status: status}
+	overflow := tooLong(status, msg)
+	if overflow {
 		ev.Code = "context_length_exceeded"
+	}
+	// A 413 before the headers go out is typed request_too_large
+	// (writeErrorSaid). Once they have, Pi reads only this event's text
+	// (#2372) and does not compact on "Request Entity Too Large". Gemini
+	// keeps its own status shape.
+	byteCap := status == http.StatusRequestEntityTooLarge && !overflow
+	ownShape := proto == provider.Gemini
+	alreadySaid := strings.Contains(strings.ToLower(text), "request_too_large")
+	if byteCap && !ownShape && !alreadySaid {
+		ev.Text = text + " (request_too_large)"
 	}
 	makeEncoder(proto, sw, &Request{}).event(ev)
 }
