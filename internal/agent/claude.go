@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/desktopdir"
@@ -300,7 +301,8 @@ const claudeExploreEnv = "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP"
 // magpie has its actions reviewed by Anthropic (gateway.AutoModeReviewed):
 // one shown to the agents in catalogs (Claude Code, Claude Desktop whose
 // Code tab is Claude Code, T3 Code's instance of it), a routing group's
-// member, a provider's fallback, or one of models (those it is set to).
+// member, a provider's fallback, or one of models (those it is set to),
+// judged where it resolves to.
 // Any such keeps the review on, as /model can take a session there.
 func claudeReviewed(catalogs []string, models ...string) bool {
 	var entries []provider.Entry
@@ -330,7 +332,17 @@ func claudeReviewed(catalogs []string, models ...string) bool {
 			return true
 		}
 	}
-	return slices.ContainsFunc(models, func(m string) bool { return gateway.AutoModeReviewed(provider.Provider{}, m) })
+	return slices.ContainsFunc(models, func(id string) bool {
+		if _, ms, ok := find(id); ok {
+			return slices.ContainsFunc(ms, func(m provider.Member) bool { return reviewed(m.Provider, m.Model) })
+		}
+		if p, m, ok := provider.Resolve(id); ok {
+			return reviewed(p, m)
+		}
+		// Not one magpie knows: judged by its name, as the gateway would
+		// judge a request for it.
+		return gateway.AutoModeReviewed(provider.Provider{}, id)
+	})
 }
 
 // claudeCapsMax bounds claudeCapsEnv: the models Claude Code is set to go
@@ -1086,10 +1098,12 @@ func claudeIn(at place) *Agent {
 			return cmp.Or(s.Compact(), -1)
 		}
 		var models []claudeBudget
-		shown, _ := provider.CatalogFor("claude-desktop")
-		for _, e := range shown {
-			if id := gateway.DesktopID(e); claudeName(id) == "" {
-				models = append(models, claudeBudget{id: id, window: e.Context, long: gateway.DesktopListed1M(e), compact: work(e.ID)})
+		if desktopOn() {
+			shown, _ := provider.CatalogFor("claude-desktop")
+			for _, e := range shown {
+				if id := gateway.DesktopID(e); claudeName(id) == "" {
+					models = append(models, claudeBudget{id: id, window: e.Context, long: gateway.DesktopListed1M(e), compact: work(e.ID)})
+				}
 			}
 		}
 		if main != "" {
@@ -1103,13 +1117,13 @@ func claudeIn(at place) *Agent {
 			for _, t := range claudeTiers {
 				refs = append(refs, tiers[t])
 			}
-			for _, v := range refs {
+			for i, v := range refs {
 				m, _ := tierAt(v)
 				bare := strings.TrimSuffix(m, "[1m]")
 				if v == "" || claudeModel(bare) || provider.ClaudeGroup(bare) {
 					continue
 				}
-				models = append(models, claudeBudget{id: spell(v), window: window[bare], long: strings.HasSuffix(v, "[1m]"), compact: work(bare)})
+				models = append(models, claudeBudget{id: spell(v), window: window[bare], long: strings.HasSuffix(v, "[1m]"), main: i == 0, compact: work(bare)})
 			}
 			// the one for every model else, as the variable gave it: none
 			// on a Claude main model, which Anthropic runs to its own
@@ -1140,16 +1154,22 @@ func claudeIn(at place) *Agent {
 	// writeWindow tells Claude Code the window of the models it runs on
 	// (claudeWindow). While Claude Desktop runs on magpie too, it is the
 	// largest of theirs and each model below it gets its own
-	// (desktopPlan); with a CLAUDE_CODE_AUTO_COMPACT_WINDOW of the user's,
-	// which takes precedence over those, the least of them, as one value
-	// serves them all. One the user set is theirs.
+	// (desktopPlan), and so while the main model is a [1m] one beside a
+	// tier that isn't: the main's own window, with each tier below it held
+	// to the tier's (多喝热水 on Discord: the least tier's 246K beside a
+	// [1m] DeepSeek read as the main's window under Full window, and was
+	// the one it fell back to whenever Claude Code stopped taking it for
+	// 1M). With a
+	// CLAUDE_CODE_AUTO_COMPACT_WINDOW of the user's, which takes
+	// precedence over those, the least of them, as one value serves them
+	// all. One the user set is theirs.
 	writeWindow := func(main string, tiers map[string]string) error {
 		budgeted = false
 		if env(claudeContextEnv) != "" && !windowOurs() {
 			forget(windowKey)
 			return dropBudgets()
 		}
-		if desktopOn() && (env(claudeCompactEnv) == "" || compactOurs()) {
+		if (desktopOn() || claudeLongMain(main) && claudeWindow(main, tiers) > 0) && (env(claudeCompactEnv) == "" || compactOurs()) {
 			top, def, entries := desktopPlan(main, tiers)
 			if top <= 0 {
 				return dropWindow()
@@ -1479,9 +1499,19 @@ func claudeIn(at place) *Agent {
 			}
 		}
 		gw := gwAt()
+		tok := wiredKey()
+		// a caller key of the gateway's own where magpie's token goes goes
+		// through magpie all the same: theirs stays, as a sync keeps one
+		// (mergeKept, keyHolds); only a value the gateway would refuse is
+		// wired over (#2545). The sharing key magpie made is magpie's own,
+		// however much Authenticate takes it, so it never counts as theirs
+		// (Default): sharing going off brings gateway.Token back
+		if v, _ := edit.GetJSON(path, "env.ANTHROPIC_AUTH_TOKEN"); v != tok && keyHolds(v, tok) && !access.Default(v) {
+			tok = v
+		}
 		kvs := []edit.KV{
 			{Path: "env.ANTHROPIC_BASE_URL", Value: gw},
-			{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: wiredKey()},
+			{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: tok},
 			{Path: "env.ANTHROPIC_SMALL_FAST_MODEL", Value: spell(tiers["haiku"])},
 			{Path: "model", Value: spell(main)},
 		}
@@ -1715,16 +1745,16 @@ func claudeIn(at place) *Agent {
 				main, tiers := curTiers()
 				// its effort, if it has one, goes with it to the new model
 				_, e := tierAt(tiers[tier])
-				// the main model picked where the tier would follow another
-				// is the user's own; any other model is by itself
-				if v != "" && strings.TrimSuffix(v, "[1m]") == strings.TrimSuffix(main, "[1m]") && follow(tier, main) != main {
-					stash(map[string]string{ownKey(tier): "1"})
-				} else {
-					forget(ownKey(tier))
-				}
+				// a model picked is the user's own, the main model or the
+				// one the tier would follow too, so it stays when the main
+				// model moves (#2654: a sonnet tier given the main model
+				// read as "Same as main model" and went with its next
+				// move); only "Same as main model" follows
 				if v != "" {
+					stash(map[string]string{ownKey(tier): "1"})
 					tiers[tier] = tierWith(v, e)
 				} else {
+					forget(ownKey(tier))
 					tiers[tier] = followAt(tier, main, e)
 				}
 				return writeTiers(main, tiers)
@@ -1766,8 +1796,15 @@ func claudeIn(at place) *Agent {
 				return fmt.Errorf("subagents: %q is not a model magpie serves", v)
 			}
 			_, e := subagentAt()
-			// a pick of its own is the user's anew
-			forget(ownKey("subagent"))
+			// a model picked is the user's own, the main model too
+			// (#2654: given the main model, the subagents' was left out
+			// and they followed the main model's next move); only "Same
+			// as main model" follows
+			if v != "" {
+				stash(map[string]string{ownKey("subagent"): "1"})
+			} else {
+				forget(ownKey("subagent"))
+			}
 			return setSubagent(v, e)
 		},
 		Options: func(map[string]string) []Option {
@@ -2298,6 +2335,14 @@ func claudeOwnCompact(path, model string) bool {
 		}
 	}
 	return false
+}
+
+// claudeLongMain says main is a model of magpie's Claude Code takes for 1M
+// by its "[1m]", not one of Claude's own, which Anthropic runs to its own.
+func claudeLongMain(main string) bool {
+	m, _ := tierAt(main)
+	bare := strings.TrimSuffix(m, "[1m]")
+	return bare != m && !claudeModel(bare) && !provider.ClaudeGroup(bare)
 }
 
 // claudeWindow is the context window to tell Claude Code for the models it
