@@ -131,12 +131,12 @@ func statsIn(days int, now time.Time, native map[string]bool) Stats {
 	}
 	out := Stats{From: from, To: today.Format(time.DateOnly), Days: []Day{}, Sessions: []Summary{}, Keys: []string{}}
 
-	dbReadMu.Lock()
-	defer dbReadMu.Unlock()
+	storeMu.RLock()
+	defer storeMu.RUnlock()
 	mu.Lock()
 	defer mu.Unlock()
 	loadCache()
-	defer closeDBs()
+	defer useDBs()()
 	files := allFiles()
 	// every changed file, whatever the range, so a wider range picked later
 	// finds them read rather than starting another run
@@ -151,7 +151,7 @@ func statsIn(days int, now time.Time, native map[string]bool) Stats {
 		price := pricer()
 		for _, fs := range groups {
 			// as List: a session nothing was said in is not listed
-			if s, ok := assemble(fs, price); ok {
+			if s, ok := assembleListed(fs, price); ok {
 				native[s.Agent+"|"+s.ID] = true
 			}
 		}
@@ -336,7 +336,7 @@ func statsIn(days int, now time.Time, native map[string]bool) Stats {
 		if len(sh.dates) == 0 {
 			continue
 		}
-		s, ok := assemble(groups[key], price)
+		s, ok := assembleListed(groups[key], price)
 		if !ok {
 			continue
 		}
