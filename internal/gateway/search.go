@@ -206,12 +206,35 @@ func modelSearchesAny(p provider.Provider, model string) bool {
 	return slices.ContainsFunc(p.Speaks(), func(proto provider.Protocol) bool { return modelSearches(p, proto, model) })
 }
 
+// pluginSearches is whether p's plugin says model searches the web by
+// itself when asked in plain words (m.searches, as catalog.Model's
+// WebSearch "native"): the gateway asks it with no search tool, and takes
+// what it says with the links in it (searchWith).
+func pluginSearches(p provider.Provider, model string) bool {
+	if !p.IsPlugin() {
+		return false
+	}
+	i := slices.IndexFunc(p.Available(), func(m catalog.Model) bool { return m.ID == model })
+	return i >= 0 && p.Available()[i].WebSearch == searchNative
+}
+
+// searchesAlone is whether model of p searches by itself where the rest
+// of p's models don't: one of searchModels, or a plugin's it marks.
+func searchesAlone(p provider.Provider, model string) bool {
+	return modelSearchesAny(p, model) || pluginSearches(p, model)
+}
+
 // partSearcher is a provider of searchModels that searches by itself for
-// those of its models alone, on no API for every model: one magpie may
-// search with, with those models only (searchableModel). Command Code's
-// searched for themselves but were left out of the searcher picker and
-// magpie's own pick (01huadalang on Discord).
+// those of its models alone, on no API for every model, or a plugin's
+// that marks some of its models as ones that search (pluginSearches): one
+// magpie may search with, with those models only (searchableModel).
+// Command Code's searched for themselves but were left out of the
+// searcher picker and magpie's own pick (01huadalang on Discord), and so
+// was every plugin's, Trae's search model among them (01huadalang, 10-20).
 func partSearcher(p provider.Provider) bool {
+	if p.IsPlugin() {
+		return slices.ContainsFunc(p.Available(), func(m catalog.Model) bool { return m.WebSearch == searchNative })
+	}
 	if p.Account != nil || slices.ContainsFunc([]provider.Protocol{provider.Anthropic, provider.Responses, provider.Chat}, func(proto provider.Protocol) bool { return searchesItself(p, proto) }) {
 		return false
 	}
@@ -291,7 +314,7 @@ func searchRank(p provider.Provider) int {
 		return 3
 	case searchesItself(p, provider.Chat):
 		return 4
-	case partSearcher(p) && slices.ContainsFunc(p.Available(), func(m catalog.Model) bool { return modelSearchesAny(p, m.ID) }):
+	case partSearcher(p) && slices.ContainsFunc(p.Available(), func(m catalog.Model) bool { return searchesAlone(p, m.ID) }):
 		return 4
 	case googleAccount(p):
 		// Gemini on a Google sign-in, by googleSearch (#757)
@@ -893,7 +916,7 @@ var errNotSearched = fmt.Errorf("answered without searching the web: %w", errFou
 // searching for its own models is sent none.
 func (s *Server) searchWith(ctx context.Context, p provider.Provider, model, query, effort string) (string, []Hit, error) {
 	body, _ := json.Marshal(searchBody(p, model, query, effort))
-	r, err := http.NewRequestWithContext(magpieChose(ctx), http.MethodPost, "http://magpie/v1/messages", nil)
+	r, err := http.NewRequestWithContext(ownAsk(magpieChose(ctx)), http.MethodPost, "http://magpie/v1/messages", nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -903,9 +926,13 @@ func (s *Server) searchWith(ctx context.Context, p provider.Provider, model, que
 	s.serve(w, r, provider.Anthropic, body)
 	var out struct {
 		Content []struct {
-			Type    string          `json:"type"`
-			Text    string          `json:"text"`
-			Content json.RawMessage `json:"content"`
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			Content   json.RawMessage `json:"content"`
+			Citations []struct {
+				URL       string `json:"url"`
+				CitedText string `json:"cited_text"`
+			} `json:"citations"`
 		} `json:"content"`
 		Error *struct {
 			Message string `json:"message"`
@@ -924,11 +951,17 @@ func (s *Server) searchWith(ctx context.Context, p provider.Provider, model, que
 	var text strings.Builder
 	var sources []string
 	var found []Hit
+	quoted := map[string]string{} // what the searcher's citations quote of each page
 	searched := false
 	for _, b := range out.Content {
 		switch b.Type {
 		case "text":
 			text.WriteString(b.Text)
+			for _, c := range b.Citations {
+				if c.URL != "" && c.CitedText != "" && quoted[c.URL] == "" {
+					quoted[c.URL] = c.CitedText
+				}
+			}
 		case "server_tool_use":
 			searched = true
 		case "web_search_tool_result":
@@ -952,6 +985,9 @@ func (s *Server) searchWith(ctx context.Context, p provider.Provider, model, que
 				found = append(found, Hit{Title: h.Title, URL: h.URL, PageAge: age})
 			}
 		}
+	}
+	for i := range found {
+		found[i].Cited = quoted[found[i].URL]
 	}
 	said := strings.TrimSpace(text.String())
 	if said == "" || (len(found) == 0 && !strings.Contains(said, "://")) {
@@ -1206,7 +1242,20 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 			}
 			var failed error
 			told := time.Now() // when the reader was last sent anything
+			// the reader hears that the reply goes on while the
+			// provider says nothing at all, as streamTranslated's client
+			// does (keepThroughSilence)
+			var mu sync.Mutex
+			heard, stopKeep := keepThroughSilence(&mu, func() {
+				if failed == nil && time.Since(told) >= keepaliveEvery/2 {
+					failed = send(Event{Kind: KAlive})
+					told = time.Now()
+				}
+			})
 			err := readSSEAlive(rd, func(_, data string) error {
+				mu.Lock()
+				defer mu.Unlock()
+				heard()
 				if err := dec(data, func(ev Event) {
 					if failed == nil {
 						failed = send(ev)
@@ -1217,6 +1266,9 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 				}
 				return failed
 			}, func() {
+				mu.Lock()
+				defer mu.Unlock()
+				heard()
 				// a provider still queued or thinking — keepalives,
 				// response.in_progress — is heard from with nothing to
 				// translate: the reader hears that it goes on (#2316)
@@ -1225,6 +1277,7 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 					told = time.Now()
 				}
 			})
+			stopKeep()
 			if err != nil && failed == nil && ctx.Err() == nil {
 				send(Event{Kind: KError, Text: p.Name + ": " + err.Error()})
 			}

@@ -7,6 +7,9 @@ let gatewayOwnDraft = "";
 // #905) to how it is shown; what no provider has now is shown as it is kept
 let gatewayAccountNames = {};
 let gatewayKeysRead = 0;
+// gatewayKeysErr is why the list couldn't be read, said in its place until
+// a read works: a redraw of the page (the providers' poll) keeps it
+let gatewayKeysErr = "";
 // gatewayLimit is the key whose limit editor is open, and its draft
 // (#585): what is picked in it is sent only by its Save.
 let gatewayLimit = null;
@@ -59,12 +62,47 @@ async function loadGatewayKeys() {
     // A fresh list also refreshes a selected credential, which may have rotated.
     connectSecret = null;
     gatewayKeys = out.keys || [];
+    gatewayKeysErr = "";
     renderGatewayKeys();
     if (view === "gateway" && providers) selectConnectKey(connectKeyID);
   } catch (e) {
     if (read !== gatewayKeysRead) return;
-    $("#gatewayKeys").replaceChildren(el("div", "none", t(e.message)));
+    // a list read before stays: only one never read is said unreadable
+    if (gatewayKeys !== null) return status(t(e.message), "err");
+    gatewayKeysErr = e.message;
+    renderGatewayKeys();
   }
+}
+
+// refreshGatewayKeys reads the keys again for what each has used of its
+// limits, which only a visit to the page read before: left open, a reset
+// key's line said $0.00 however much was spent after it (Young on Discord).
+// It runs as the page is drawn again (the window back, a Refresh) and on
+// a timer while the page is in sight; the list is drawn again only when
+// it changed, and not while a key is being added, renamed or its limit
+// edited, nor while an action is on its way.
+async function refreshGatewayKeys() {
+  if (gatewayKeys === null || gatewayKeysBusy) return;
+  const read = ++gatewayKeysRead;
+  let out;
+  try { out = await api("caller-keys"); } catch { return; }
+  if (read !== gatewayKeysRead || gatewayKeysBusy) return;
+  const keys = out.keys || [];
+  if (JSON.stringify(keys) === JSON.stringify(gatewayKeys)) return;
+  gatewayKeys = keys;
+  gatewayAccountNames = out.accountNames || gatewayAccountNames;
+  if (gatewayKeyDraft === null && gatewayLimit === null && !$("#gatewayKeys .rename-in")) renderGatewayKeys();
+}
+// the timer: only while the Gateway page is in sight, as a look with
+// nothing to do wakes the web content process all the same (#3185)
+let gatewayKeysTick = 0;
+function gatewayKeysTicks() {
+  const page = $("#view-gateway");
+  if (!page || page.hidden || document.hidden) { clearInterval(gatewayKeysTick); gatewayKeysTick = 0; return; }
+  gatewayKeysTick ||= setInterval(() => {
+    if ($("#view-gateway").hidden || document.hidden) return gatewayKeysTicks();
+    if (view === "gateway" && gatewayKeys?.some((k) => !k.off && keyUsed(k).length)) refreshGatewayKeys();
+  }, 15e3);
 }
 
 async function gatewayKeyAction(action, body) {
@@ -167,8 +205,11 @@ function renderGatewayKeys() {
   $("#gatewayKeysBlock").hidden = !providers?.gateway.lan;
   box.replaceChildren();
   $("#addGatewayKey").onclick = () => { gatewayKeyDraft = ""; renderGatewayKeys(); };
-  if (gatewayKeys === null) return;
   const list = el("div", "accts");
+  if (gatewayKeys === null) {
+    if (gatewayKeysErr) list.append(el("div", "none", t(gatewayKeysErr))), box.append(list);
+    return;
+  }
   for (const k of gatewayKeys) {
     const row = el("div", "acc" + (k.off ? " off" : " in-use"));
     row.dataset.key = k.id;

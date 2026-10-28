@@ -16,6 +16,7 @@
 package gwmw
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"slices"
@@ -87,13 +88,26 @@ type Masker interface {
 	Writer(w http.ResponseWriter) (http.ResponseWriter, func())
 }
 
-// Hit is one value a masker swapped, told without the value: its kind,
+// Hit is one value a masker found, told without the value: its kind,
 // the finder that found it (rule, yours, word, model or known), its
-// placeholder, and as much of it as may be kept where it may not (Head,
-// its first character or a key's prefix, and Len, how many it has).
+// placeholder, what was done with it (Action: "" masked, "warn" sent as
+// written, "block" masked and the request to be held back), and as much
+// of it as may be kept where it may not (Head, its first character or a
+// key's prefix, and Len, how many it has).
 type Hit struct {
-	Kind, By, Placeholder, Head string
-	Len                         int
+	Kind, By, Placeholder, Action, Head string
+	Len                                 int
+}
+
+// Blocks says hits have a value the user asked to hold a request back
+// for.
+func Blocks(hits []Hit) bool {
+	for _, h := range hits {
+		if h.Action == "block" {
+			return true
+		}
+	}
+	return false
 }
 
 // Teller is a Masker that says what it masked too, for the record of
@@ -106,6 +120,15 @@ type Teller interface {
 	// Value is the value behind a placeholder, while the masker remembers
 	// it
 	Value(placeholder string) (string, bool)
+}
+
+// ContextTeller is a Teller whose masking can wait (for a local model's
+// turn) and stops waiting when ctx ends: the client went away, or the
+// gateway gave up on the request. It then fails, as a masker that can't
+// mask does, and nothing is sent.
+type ContextTeller interface {
+	JSONHitsContext(ctx context.Context, body []byte) ([]byte, []Hit)
+	TextHitsContext(ctx context.Context, s string) (string, []Hit)
 }
 
 var (

@@ -84,7 +84,10 @@ plugins' scripts and `app.js`, all classic scripts sharing one scope. It is
 The Gateway page is `plugins/gateway` with `Client: keys.js, client.js`
 (`internal/gui/assets/plugins/gateway/`): `keys.js` is the gateway-key
 manager that was `caller-keys.js`, and `client.js` is the page's code that
-was in app.js, ending in its `magpie.plugin("gateway", …)`. Still in
+was in app.js, ending in its `magpie.plugin("gateway", …)`, and after it
+the viewer of a recorded call's bodies (`callBodyPanel`: a JSON tree, a
+stream's events or its reply), which Usage's ledger and Routing's trace
+call too; every plugin's scripts load whether it is on or off. Still in
 app.js and app.css: its styles, its sidebar and header buttons
 (`data-feature="gateway"` in index.html), and `decideEntry`, which the model
 info card shares. `TestBuiltinClientsLoaded` holds index.html to load every
@@ -98,7 +101,9 @@ Each page moves in a commit of its own, whole: its code into
 says from i18n.js into its `i18n.js` (a key app.js, another page, index.html
 or Go also says stays in i18n.js). It stays so after: `i18n-keys`' "a
 plugin's words are its own" fails when anything outside a plugin's folder
-says one of its words, which goes back to i18n.js.
+says one of its words, which goes back to i18n.js. A word inside a longer
+one doesn't count: a comment's "fetchClaudeRuns asks" doesn't say "Runs
+as" (#3897).
 
 - **Sessions** (`plugins/sessions`, `Client: i18n.js, sessions.css,
   client.js`): the page that was `sessions.js`, its markup all drawn by its
@@ -186,14 +191,14 @@ The router strategy point says the order a pool of routes is tried in: a
 provider's accounts or keys, or the heads of a group's members. The gateway
 still lists the pool, and keeps rests, affinity, rules, pins and the walk
 over the order itself; a strategy only orders. Smart, the default, stays in
-the core. The six other routings are the built-in plugin `rotation`'s.
+the core. The seven other routings are the built-in plugin `rotation`'s.
 
 | Part | What it does | Source |
 | --- | --- | --- |
-| `routes.Strategy` | `Order(pool, seats) []int`: a permutation of the seats' indexes. `pool` is a provider's id or `group/<id>`, for a strategy that keeps a round per pool. `Exact` keeps the order as given; otherwise a provider's API keys that fit the request better go first, each in its order. `ByUse` puts each seat's recent tokens in the trace. | [`routes.go`](../../internal/routes/routes.go) |
-| `routes.Seat` | What a strategy weighs, read by `weighRouted` under the routing state's lock: its rest key, whether it is an account, whether its allowance is known or it learns it as it answers, the share used, when its windows renew, its weekly pace, its key's weight, whether it rests now and its tokens of the last hours. | [`routes.go`](../../internal/routes/routes.go), [`routing.go`](../../internal/gateway/routing.go) |
+| `routes.Strategy` | `Order(pool, seats) []int`: a permutation of the seats' indexes. `pool` is a provider's id or `group/<id>`, for a strategy that keeps a round per pool. `Exact` keeps the order as given; otherwise a provider's API keys that fit the request better go first, each in its order. `ByUse` puts each seat's recent tokens in the trace; `ByFree` has the gateway fill `Seat.Free`, and `BySpeed` `Seat.TTFT` and `TPS` (its speed lately, gateway `speed.go`), each only for a strategy that asks. | [`routes.go`](../../internal/routes/routes.go) |
+| `routes.Seat` | What a strategy weighs, read by `weighRouted` under the routing state's lock: its rest key, whether it is an account, whether its allowance is known or it learns it as it answers, the share used, when its windows renew, its weekly pace, its key's weight, whether it rests now, its tokens of the last hours, a prepaid wallet's balance and the provider and unit it is in (`Left`, `LeftIn`, #3950), and, when the strategy asks, whether its model is free and its ms to the first token and tokens a second lately. | [`routes.go`](../../internal/routes/routes.go), [`routing.go`](../../internal/gateway/routing.go) |
 | `Register`, `Find`, `Apply` | `Register(routing, s)` serves a routing until its remove; registering again stacks, and the last one serves. `Find("")` is `Smart` always. `Apply` fails open: a strategy that panics, or answers what isn't a permutation, leaves the pool in its listed order, logged. Every route is still tried. | [`routes.go`](../../internal/routes/routes.go) |
-| Strategies | `Smart` (core), and `Ordered`, `Rotate`, `LeastUsed`, `Pace` and `Weighted` in `routes.Builtin`. `Rotate` keeps a turn per pool and `Weighted` a smooth weighted round (`Round`, `MoveRound`), both moved out of the gateway; `Forget` clears them. | [`strategies.go`](../../internal/routes/strategies.go), [`round.go`](../../internal/routes/round.go) |
+| Strategies | `Smart` (core), and `Ordered`, `Rotate`, `LeastUsed`, `Pace`, `Weighted`, `FreeFirst` and `Fastest` in `routes.Builtin`. `Rotate` keeps a turn per pool and `Weighted` a smooth weighted round (`Round`, `MoveRound`), both moved out of the gateway, and `Fastest` a probe count per pool, so a seat not measured lately gets one request in `ProbeEvery`; `Forget` clears them. | [`strategies.go`](../../internal/routes/strategies.go), [`round.go`](../../internal/routes/round.go) |
 | Off | A routing no strategy serves is its listed order. `routingOf` in the gateway reads it as `order` wherever the core asks about a routing (a turn's mark, `sinks`, a rotate group's sessions, a group's heads), so nothing of the routing is left half on. | [`routing.go`](../../internal/gateway/routing.go) |
 | `plugins/rotation` | Requires `providers` and `gateway`, `Essential`. Apply registers every `routes.Builtin` and removes them when turned off. `InUse` counts the providers and groups providers.json routes by one of them (`provider.Routings`, the file alone, not the catalog); an unreadable providers.json is an error, so it stays on. The gateway's `KeepFresh` watches providers.json too, so a routing set from the CLI or the TUI turns it on within 2s. Off, the window's routing pickers (the provider editor, the Routing page's pools and groups) offer Smart alone: their options are marked `data-feature="rotation"` (`routingSegs`). | [`rotation.go`](../../plugins/rotation/rotation.go), [`provider.go`](../../internal/provider/provider.go), [`app.js`](../../internal/gui/assets/app.js) |
 

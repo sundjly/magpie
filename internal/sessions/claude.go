@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type ccLine struct {
 	IsSidechain bool   `json:"isSidechain"`
 	Cwd         string `json:"cwd"`
 	SessionID   string `json:"sessionId"`
+	UUID        string `json:"uuid"`
 	RequestID   ccStr  `json:"requestId"`
 	AITitle     string `json:"aiTitle"`
 	CustomTitle string `json:"customTitle"`
@@ -36,6 +38,8 @@ type ccLine struct {
 			Creation   *ccCacheCreation `json:"cache_creation"`
 		} `json:"usage"`
 	} `json:"message"`
+	// a compaction's summary, the first message of what follows it
+	IsCompactSummary bool `json:"isCompactSummary"`
 }
 
 var (
@@ -94,6 +98,7 @@ func claudeLine(s *state, b []byte, main bool) {
 		at := tsAt(b, true)
 		s.saw(at, main)
 		ccWhere(s, b)
+		ccLink(s, h, b, main)
 		ccReply(s, at, msg, b, main)
 	case bytes.HasPrefix(msg, ccRole) && typeAfter(msg, ccRole) == "user":
 		if main && !ccToolResult(msg) {
@@ -103,9 +108,62 @@ func claudeLine(s *state, b []byte, main bool) {
 		}
 		s.saw(tsAt(b, true), main)
 		ccWhere(s, b)
+		ccLink(s, h, b, main)
 	default:
 		claudeFull(s, b, main)
 	}
+}
+
+var ccSidechain = []byte(`"isSidechain":true`)
+
+// ccLink notes a message of the file's own conversation by its uuid, the
+// first as Root and the last as Leaf. Claude Code copies a conversation
+// into a new file under the same uuids when it forks one (--fork-session,
+// /branch) or moves it to a background session, so a file whose Leaf
+// another file holds is a copy of that one's conversation (ccCopies). The
+// uuid is the line's own: a tool's input or result can hold one too.
+func ccLink(s *state, h, b []byte, main bool) {
+	if !main || bytes.Contains(h, ccSidechain) {
+		return
+	}
+	if u := gjson.GetBytes(b, "uuid"); u.Type == gjson.String {
+		s.link(u.String())
+	}
+}
+
+// link notes uuid as the file's latest message. Only a uuid as Claude
+// Code makes them, random, tells a copy: a file whose writer numbers its
+// messages, or names them "u" as tests do, shares them with every other.
+func (s *state) link(uuid string) {
+	if !ccRandomUUID(uuid) {
+		return
+	}
+	if s.Root == "" {
+		s.Root = uuid
+	}
+	s.Leaf = uuid
+}
+
+// ccRandomUUID reports whether u is a version 4 uuid, as Claude Code's
+// message uuids are.
+func ccRandomUUID(u string) bool {
+	if len(u) != 36 || u[14] != '4' {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := u[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // ccWhere takes the session's folder and id from the end of a line, while
@@ -171,17 +229,49 @@ func ccTools(s *state, m *claudeContribution, at time.Time, b []byte) {
 			ID, Name string
 			Input    struct{ Skill any }
 		}
-		dec := json.NewDecoder(bytes.NewReader(rest[i:]))
-		if dec.Decode(&tool) != nil {
+		end := objectEnd(rest[i:])
+		if end < 0 || json.Unmarshal(rest[i:i+end], &tool) != nil {
 			return
 		}
-		rest = rest[i+int(dec.InputOffset()):]
+		rest = rest[i+end:]
 		skill, _ := tool.Input.Skill.(string)
 		if tool.Name != "Skill" {
 			skill = ""
 		}
 		ccTool(s, m, at, tool.ID, tool.Name, skill)
 	}
+}
+
+// objectEnd is the length of the JSON object b starts with, or -1 when
+// it doesn't close. It only matches brackets outside strings; the object
+// is checked when it is decoded. A json.Decoder over the rest of the line
+// copied all of it, for each tool block and each usage: the most a cold
+// start allocated (1.6 GB of 11.6 GB in its first 2 minutes).
+func objectEnd(b []byte) int {
+	if len(b) == 0 || b[0] != '{' {
+		return -1
+	}
+	depth, in := 0, false
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		switch {
+		case in:
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				in = false
+			}
+		case c == '"':
+			in = true
+		case c == '{' || c == '[':
+			depth++
+		case c == '}' || c == ']':
+			if depth--; depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return -1
 }
 
 // ccReply counts a reply's usage: its model and id lead the message, its
@@ -213,7 +303,8 @@ func ccReply(s *state, at time.Time, msg, b []byte, main bool) {
 		CacheWrite int              `json:"cache_creation_input_tokens"`
 		Creation   *ccCacheCreation `json:"cache_creation"`
 	}
-	if json.NewDecoder(bytes.NewReader(b[i+len(ccUsage)-1:])).Decode(&u) != nil {
+	usage := b[i+len(ccUsage)-1:]
+	if end := objectEnd(usage); end < 0 || json.Unmarshal(usage[:end], &u) != nil {
 		return
 	}
 	ccCount(s, m, at, model, ccTokens(u.Input, u.Output, u.CacheRead, u.CacheWrite, u.Creation), main)
@@ -239,6 +330,12 @@ func claudeFull(s *state, b []byte, main bool) {
 	}
 	if s.ID == "" && l.SessionID != "" {
 		s.ID = l.SessionID
+	}
+	if main && !l.IsSidechain && (l.Type == "user" || l.Type == "assistant") {
+		s.link(l.UUID)
+		if l.IsCompactSummary && l.Type == "user" && ccRandomUUID(l.UUID) && !slices.Contains(s.Compacts, l.UUID) {
+			s.Compacts = append(s.Compacts, l.UUID)
+		}
 	}
 	switch l.Type {
 	case "ai-title":

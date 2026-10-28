@@ -315,7 +315,8 @@ const claudeReviewEnv = "CLAUDE_CODE_AUTO_MODE_SERVER"
 const claudeExploreEnv = "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP"
 
 // claudeReviewed reports whether a model Claude Code can reach through
-// magpie has its actions reviewed by Anthropic (gateway.AutoModeReviewed):
+// magpie has its actions reviewed by Anthropic (gateway.AutoModeReviewable:
+// a Claude model asked on the Messages API, not translated):
 // one shown to the agents in catalogs (Claude Code, Claude Desktop whose
 // Code tab is Claude Code, T3 Code's instance of it), a routing group's
 // member, a provider's fallback, or one of models (those it is set to),
@@ -328,12 +329,12 @@ func claudeReviewed(catalogs []string, models ...string) bool {
 		entries = append(entries, shown...)
 	}
 	reviewed := func(p provider.Provider, model string) bool {
-		if gateway.AutoModeReviewed(p, model) {
+		if gateway.AutoModeReviewable(p, model) {
 			return true
 		}
 		return slices.ContainsFunc(p.Fallback, func(id string) bool {
 			fp, fm, ok := provider.Resolve(id)
-			return ok && gateway.AutoModeReviewed(fp, fm)
+			return ok && gateway.AutoModeReviewable(fp, fm)
 		})
 	}
 	find := provider.GroupFinder()
@@ -1263,19 +1264,38 @@ func claudeIn(at place) *Agent {
 	// takes the Agent call's model, then the agent's frontmatter, then
 	// CLAUDE_CODE_SUBAGENT_MODEL, then the session's (2.1.287). Empty
 	// while it follows the main model, as magpie writes it by itself.
+	// An effort with no model of their own is never written: the main
+	// model at that effort in CLAUDE_CODE_SUBAGENT_MODEL pins every
+	// subagent to the main model (KorenKrita on Discord).
 	subagentOwn := func() string {
 		w := env("CLAUDE_CODE_SUBAGENT_MODEL")
-		if m, e := tierAt(w); routed() && isMagpie(m) && (own("subagent") || w != wroteMain() && (e != "" || m != wroteMain())) {
+		if m, _ := tierAt(w); routed() && isMagpie(m) && (own("subagent") || m != wroteMain()) {
 			return w
 		}
 		return ""
 	}
+	// the effort an older magpie wrote for subagents that follow the main
+	// model, as the main model at that effort: "" for none
+	subagentFollowing := func() string {
+		m, e := tierAt(env("CLAUDE_CODE_SUBAGENT_MODEL"))
+		if routed() && e != "" && m == wroteMain() && !own("subagent") {
+			return e
+		}
+		return ""
+	}
+	// the subagents' effort the user gave with no model of their own: kept
+	// in the stash, not written, and applied once they have a model
+	subEffortKey := at.key("claude.subagent_effort")
+	subagentSaved := func() string { return cmp.Or(stashLoad()[subEffortKey], subagentFollowing()) }
 	// the subagents' model as written, its effort apart: "" for each while
-	// it follows the main model
+	// it follows the main model, which takes no effort of theirs
 	subagentAt := func() (string, string) {
 		m, e := tierAt(subagentOwn())
 		if m == wroteMain() && !own("subagent") {
 			m = ""
+		}
+		if m == "" {
+			e = ""
 		}
 		return m, e
 	}
@@ -1493,12 +1513,6 @@ func claudeIn(at place) *Agent {
 					}
 				}
 			}
-			// so do subagents that follow it at an effort of their own
-			if m, e := subagentAt(); routed() && m == "" && e != "" {
-				if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: spell(tierWith(v, e))}); err != nil {
-					return err
-				}
-			}
 			return writeTiers(v, tiers)
 		}
 		// a word that is no model: an effort level the model doesn't take,
@@ -1534,7 +1548,11 @@ func claudeIn(at place) *Agent {
 			return err
 		}
 		// subagents given a model of their own keep it; the others run on
-		// the session's, whatever /model picked, or on the tier they ask for
+		// the session's, whatever /model picked, or on the tier they ask for.
+		// An older magpie's effort on the main model goes out, kept unwritten.
+		if e := subagentFollowing(); e != "" && stashLoad()[subEffortKey] == "" {
+			stash(map[string]string{subEffortKey: e})
+		}
 		sub := subagentOwn()
 		// the main model is settings.json's alone: ANTHROPIC_MODEL would
 		// outrank a pick in /model
@@ -1644,7 +1662,7 @@ func claudeIn(at place) *Agent {
 				}
 				return env(tierEnv(t))
 			}
-			own := claudeOwn(cur["model"], tier)
+			own := claudeOwn(cur["model"], tier, provider.ClaudeCodeModels())
 			for i := range own {
 				own[i].Direct = direct
 			}
@@ -1815,15 +1833,24 @@ func claudeIn(at place) *Agent {
 	// subagents: the model one runs on when it names none (general-purpose,
 	// an agent of the user's without a model:). Unset, the session's, as
 	// before; an agent that names a tier (Explore's haiku) takes the tier's.
-	// setSubagent writes the subagents' model and effort, the main model's
-	// at none taking the variable away
+	// setSubagent writes the subagents' model and effort. With no model,
+	// the variable goes and the effort is kept unwritten (subagentSaved):
+	// the main model at an effort would pin every subagent to it.
 	setSubagent := func(model, effort string) error {
-		if model == "" && effort == "" {
+		if model == "" {
+			if effort != "" {
+				stash(map[string]string{subEffortKey: effort})
+			} else {
+				forget(subEffortKey)
+			}
 			if err := edit.DelJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL"); err != nil {
 				return err
 			}
-		} else if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: spell(tierWith(cmp.Or(model, mainModel()), effort))}); err != nil {
-			return err
+		} else {
+			forget(subEffortKey)
+			if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: spell(tierWith(model, effort))}); err != nil {
+				return err
+			}
 		}
 		return writeTiers(curTiers())
 	}
@@ -1840,7 +1867,10 @@ func claudeIn(at place) *Agent {
 			if v != "" && !isMagpie(v) {
 				return fmt.Errorf("subagents: %q is not a model magpie serves", v)
 			}
-			_, e := subagentAt()
+			m, e := subagentAt()
+			if m == "" {
+				e = subagentSaved()
+			}
 			// a model picked is the user's own, the main model too
 			// (#2654: given the main model, the subagents' was left out
 			// and they followed the main model's next move); only "Same
@@ -2046,6 +2076,11 @@ func claudeIn(at place) *Agent {
 					return err
 				}
 			}
+			// subagents an older magpie pinned to the main model at an
+			// effort of theirs follow it again, the effort kept unwritten
+			if subagentFollowing() != "" {
+				return writeTiers(curTiers())
+			}
 			// a model of magpie's an older magpie wrote with a dotted Claude
 			// version goes in as Claude Code is given it now (spell)
 			raw := []string{jsonGet(path, "model")()}
@@ -2233,14 +2268,15 @@ func claudeDropModelEffort(path, n string) error {
 	return nil
 }
 
-// claudeOwn is Anthropic's models as Claude Code takes them: only the
-// catalog's; Claude Code's own short aliases are not something any API
-// lists, and a compiled-in copy would just go stale. One the user's
+// claudeOwn is Anthropic's models as Claude Code takes them, ms: the
+// catalog's, and on this computer the ones Anthropic told Claude Code
+// its account has beyond them (provider.ClaudeCodeModels: Claude Mythos
+// 5.1); Claude Code's own short aliases are not something any API lists,
+// and a compiled-in copy would just go stale. One the user's
 // settings.json names (cur: "model": "sonnet") comes first, said as the
 // model it stands for, so the row doesn't show a bare word; tier is the
 // model the user's env gives a tier, "" for none.
-func claudeOwn(cur string, tier func(string) string) []Option {
-	ms := catalog.Provider("anthropic")
+func claudeOwn(cur string, tier func(string) string, ms []catalog.Model) []Option {
 	var own []Option
 	if o, ok := claudeAliasOption(cur, ms, tier); ok {
 		own = append(own, o)
@@ -2390,11 +2426,13 @@ func claude1MFor(agent string) func(ref string) string {
 
 // claudeModel says a model ref (magpie/v/claude-opus-5-5[1m], or Claude
 // Code's own claude-opus-5-5) is one of Anthropic's Claude models, by
-// whichever provider it comes.
+// whichever provider it comes and by whatever name it gives it: Amazon
+// Bedrock's us.anthropic.claude-opus-… too, which Claude Code knows by the
+// same "opus-…" it looks for, and which a group of was already taken for
+// Claude's (provider.ClaudeGroup) while the model alone was held to the
+// working window (划船不靠桨 on Discord).
 func claudeModel(ref string) bool {
-	m := strings.TrimSuffix(ref, "[1m]")
-	m = m[strings.LastIndex(m, "/")+1:]
-	return strings.HasPrefix(strings.ToLower(m), "claude")
+	return provider.ClaudeModel(strings.TrimSuffix(ref, "[1m]"))
 }
 
 // claudeOwnCompact says the settings.json at path has an auto-compact
@@ -2532,7 +2570,8 @@ var claudeManaged = func() string {
 // StandIn is the model Claude Code is set to use in place of one it named
 // that magpie doesn't serve: claude-haiku-4-5-… for a title or a small
 // task goes to its haiku tier's model, and a name of no tier to its main
-// model. For Codex, the model it is set to (codexStandIn). "" when the
+// model. For Codex, the model it is set to (codexStandIn), in a WSL
+// distro the distro's config names (wslCodexStandIn). "" when the
 // agent isn't routed through magpie or is neither. For gateway.StandIn.
 func StandIn(agent, model string) string {
 	if agent != "claude" && agent != "codex" {
@@ -2543,13 +2582,75 @@ func StandIn(agent, model string) string {
 		return ""
 	}
 	if agent == "codex" {
-		return codexStandIn(filepath.Join(here(home).codexHome(), "config.toml"))
+		if m := codexStandIn(filepath.Join(here(home).codexHome(), "config.toml")); m != "" || runtime.GOOS != "windows" {
+			return m
+		}
+		// a Codex in a WSL distro is known by the same client
+		return wslCodexStandIn()
 	}
 	if m := claudeStandIn(filepath.Join(here(home).claudeDir(), "settings.json"), model); m != "" || runtime.GOOS != "windows" {
 		return m
 	}
 	// a Claude Code in WSL is known by the same User-Agent
 	return wslClaudeStandIn(model)
+}
+
+// ClassifierStandIn is the model Claude Code's auto mode classifier goes
+// to in place of the one it named, while the sonnet tier it named follows
+// a main model that /model has moved since magpie last wrote the tiers.
+// Claude Code 2.1.310 runs the classifier, with CLAUDE_CODE_AUTO_MODE_MODEL
+// unset, on ANTHROPIC_DEFAULT_SONNET_MODEL ($Xe, BB in its bundle), not on
+// the session's model. A pick in /model saves the main model alone, and
+// the tiers following it move only when magpie next looks (Follow), so
+// the first classifier request after a switch named the model before it
+// (CyberCaius on Discord). "" leaves the model as asked. For
+// gateway.ClassifierStandIn.
+func ClassifierStandIn(agent, model string) string {
+	if agent != "claude" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	if m := claudeClassifierIn(here(home), model); m != "" || runtime.GOOS != "windows" {
+		return m
+	}
+	return wslClaudeClassifier(model)
+}
+
+// claudeClassifierIn is ClassifierStandIn for the Claude Code at a place:
+// the main model the sonnet tier follows, at the tier's effort, when the
+// classifier named that tier as magpie last wrote it and the main model
+// has moved on. A tier the user put on a model of its own, or an auto
+// mode model set for the classifier, is left as it is.
+func claudeClassifierIn(at place, model string) string {
+	path := filepath.Join(at.claudeDir(), "settings.json")
+	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return provider.ClaudeRead(v) }
+	if u := env("ANTHROPIC_BASE_URL"); u != at.gw() && !surelyMagpie(u, at.gw()) {
+		return ""
+	}
+	if env(claudeAutoModeEnv) != "" {
+		return ""
+	}
+	st := stashLoad()
+	if st[at.key("claude.tier_own.sonnet")] != "" {
+		return ""
+	}
+	bare := func(v string) string { m, _ := tierAt(v); return strings.TrimSuffix(m, "[1m]") }
+	tier, effort := tierAt(env(tierEnv("sonnet")))
+	if tier == "" || bare(provider.ClaudeRead(model)) != bare(tier) {
+		return ""
+	}
+	was := bare(cmp.Or(st[at.key("claude.main")], env("ANTHROPIC_MODEL")))
+	if was == "" || bare(tier) != bare(follow("sonnet", was)) {
+		return "" // the tier is on a model of its own
+	}
+	main := claudeMain(path)
+	if main == "" || bare(main) == was || !isMagpie(bare(main)) {
+		return ""
+	}
+	return followAt("sonnet", bare(main), effort)
 }
 
 func claudeStandIn(path, model string) string { return claudeStandInAt(path, model, gateway.URL()) }

@@ -39,6 +39,10 @@ type Part struct {
 	MediaType string
 	Data      string // base64
 	URL       string
+	// Detail is an image's detail as the client asked for it (low, high,
+	// auto, or Responses' original), which a Chat or Responses upstream
+	// is given back (chatDetail, responsesDetail)
+	Detail string
 
 	// tool_call
 	ID   string
@@ -50,12 +54,21 @@ type Part struct {
 	IsError    bool
 	Images     []Part         // the images the tool returned beside its text
 	Standalone map[string]any // native Responses notification with no call ID
+	// Loads are the tools a tool's result loads, by name: Claude Code's
+	// ToolSearch answers with tool_reference blocks naming the deferred
+	// tools it found (#2660)
+	Loads []string
 
 	// thinking: its signature (Anthropic's, or a Gemini thought's). On a
 	// tool call, and on text, Gemini's thoughtSignature: a tool call's
 	// comes only from Google, as gemini_signature.go carries it, and
 	// text's only from a Gemini API (#1445)
 	Signature string
+	// SignedBy is the API that signed a thinking Part (sealAnthropic for
+	// Claude's), empty when it isn't known: only Claude's signature goes
+	// to a Responses client, in its reasoning item's encrypted_content
+	// (claudeseal)
+	SignedBy string
 	// thinking an upstream sealed, as its API wrote it: Anthropic's
 	// redacted_thinking block, a Responses reasoning item with its id,
 	// summary and encrypted_content. Only that API's builder, encoder and
@@ -88,6 +101,10 @@ type Hit struct {
 	URL   string `json:"url"`
 	// PageAge is how old the search said the page is, "" when it didn't
 	PageAge string `json:"page_age,omitempty"`
+	// Cited is what the search said of the page (a search API's snippet,
+	// the text a searcher's own citation quotes), which a citation of it
+	// quotes (citesOf); "" when it said nothing of it alone
+	Cited string `json:"cited_text,omitempty"`
 }
 
 // attachmentText is the fallback when a protocol cannot carry a Gemini file.
@@ -140,6 +157,10 @@ type Tool struct {
 	Description string
 	Schema      json.RawMessage // JSON schema of the arguments
 	Strict      bool            // the client asked for its arguments held to the schema
+	// Deferred is a tool the client marked defer_loading: Claude Code's
+	// tools that ToolSearch loads, offered from where they were loaded
+	// (Part.Loads), not from the start (#2660)
+	Deferred bool
 }
 
 // Request is a call to a model, whichever API it arrived in.
@@ -149,6 +170,18 @@ type Request struct {
 	// leanPrompt has the Claude bridge give the caller's instructions as
 	// the run's system prompt, in place of Claude Code's (ClaudeLeanPrompt).
 	leanPrompt bool
+	// envElsewhere: the caller's instructions name a working directory the
+	// Claude bridge's run is not in (a client on another computer, or in
+	// Windows with Claude Code in WSL), so the run's own prompt describes
+	// another machine than the one the tools run on (envElsewhereNote).
+	envElsewhere bool
+	// hourMarks has the cache marks magpie adds on Anthropic's Messages
+	// (anthropicBody) last an hour: a Responses client's (Codex's), whose
+	// turns are often more than five minutes apart and whose own vendor
+	// keeps a thread's prompt cached an hour (chatGPTCold). Off when the
+	// client asked prompt_cache_retention "in_memory", or the upstream
+	// turned the ttl away (hourMarksRefused).
+	hourMarks bool
 
 	Model      string
 	System     string
@@ -182,6 +215,12 @@ type Request struct {
 	// built); one that turns the field away is asked again without it
 	// (optionalFields)
 	OwnTier bool
+	// OwnEffort is set when Effort is magpie's own ask, not the client's:
+	// auto mode's classifier asked to reason least of a model whose levels
+	// aren't known (fitAutoModeClassifier). An upstream that turns it away
+	// is asked at low, or without it, as it would have been
+	// (ownEffortRefused)
+	OwnEffort bool
 	// CacheKey is the client's prompt_cache_key (Codex sends its thread's
 	// id), which OpenAI, and relays in front of it, route a conversation by
 	// to where its prompt is cached.
@@ -204,7 +243,8 @@ type Request struct {
 	// was sent, null and all, when the request is built again for a
 	// Responses upstream, whose answer to a value it doesn't take
 	// (invalid_access_program) is the client's to read; no other API takes
-	// it (magpie-releases#18).
+	// it (magpie-releases#18). Only OpenAI's upstreams are sent it
+	// (keepsAccessPrograms, #3172).
 	AccessPrograms json.RawMessage
 	// Metadata is an Anthropic client's metadata (Claude Code's user_id),
 	// which goes on as it was sent when the request is built again for an
@@ -244,6 +284,12 @@ type Request struct {
 	// Namespaced are the tools a Responses client offered inside a
 	// namespace, by the flat name the model is offered them under.
 	Namespaced map[string]nsTool
+	// LoadedInPlace has a Responses upstream that takes an additional_tools
+	// item (loadsInPlace) given a deferred tool a result loaded in such an
+	// item right after that result, not in the top-level tools: the tools
+	// and the conversation sent before stay as they were, so its prompt
+	// cache does (#2660). Every other upstream gets them in tools.
+	LoadedInPlace bool
 	// Grok is set when the model asked is one of Grok's, whose calls'
 	// arguments reach the client with their zero fractions dropped
 	// (grok_integral.go).
@@ -268,7 +314,7 @@ const (
 	KStart     EventKind = iota // MsgID, Model, Usage (input side)
 	KText                       // Text
 	KThink                      // Text (reasoning)
-	KSig                        // Text (thinking signature)
+	KSig                        // Text (thinking signature), Name the API that signed it if known
 	KToolStart                  // ID, Name
 	KToolArgs                   // Text (partial JSON of the arguments)
 	KStop                       // Stop
@@ -341,6 +387,9 @@ type Usage struct {
 	// cacheCreationHasCounts describes the parsed update's own split.
 	// It is never accumulated from earlier usage.
 	cacheCreationHasCounts bool
+	// cacheUnknown: the reply said its vendor counts no cache tokens
+	// (a plugin's magpie_cache_unknown), so a CacheRead of 0 is not a miss
+	cacheUnknown bool
 
 	Reasoning int `json:"reasoning"`
 	// Served: the model the vendor's reply says answered, when it named
@@ -375,6 +424,13 @@ type Usage struct {
 
 // billed is what the request is billed for: its own count, and what it
 // counted of earlier ones (Deferred).
+// cacheNotCounted is whether the vendor counted no cache for this usage:
+// it said so (cacheUnknown) and no try of it reported a cache token. The
+// Routing page and the ledger leave such a prompt out of a hit rate (#3464).
+func (u Usage) cacheNotCounted() bool {
+	return u.cacheUnknown && u.CacheRead+u.CacheWrite == 0
+}
+
 func (u Usage) billed() Usage {
 	if d := u.Deferred; d != nil {
 		u.Input += d.Input
@@ -412,6 +468,7 @@ func (u *Usage) add(v Usage) {
 		u.CacheWrite1h = v.CacheWrite1h
 	}
 	u.cacheCreationReported = u.cacheCreationReported || v.cacheCreationReported
+	u.cacheUnknown = u.cacheUnknown || v.cacheUnknown
 	if v.Reasoning > 0 {
 		u.Reasoning = v.Reasoning
 	}
@@ -556,9 +613,12 @@ func (c *collector) add(ev Event) {
 		// display is omitted) is a block all the same (#1445)
 		if p := c.open(); p != nil {
 			p.Signature += ev.Text
+			if ev.Name != "" {
+				p.SignedBy = ev.Name
+			}
 		} else if c.fresh {
 			c.closeTool()
-			c.res.Parts = append(c.res.Parts, Part{Kind: Thinking, Signature: ev.Text})
+			c.res.Parts = append(c.res.Parts, Part{Kind: Thinking, Signature: ev.Text, SignedBy: ev.Name})
 		}
 	case KSealed:
 		// a Responses item's summary came before it as reasoning of its
@@ -720,6 +780,7 @@ func toolOutput(raw json.RawMessage) (string, []Part) {
 			URL       string `json:"url"`
 		} `json:"source"`
 		ImageURL json.RawMessage `json:"image_url"`
+		Detail   string          `json:"detail"` // a Responses input_image's
 	}
 	if len(raw) == 0 || raw[0] != '[' || decodeJSON(raw, &blocks) != nil {
 		return text, nil
@@ -735,15 +796,19 @@ func toolOutput(raw json.RawMessage) (string, []Part) {
 			}
 		case "input_image", "image_url":
 			var u string
+			detail := b.Detail
 			if decodeJSON(b.ImageURL, &u) != nil {
 				var o struct {
-					URL string `json:"url"`
+					URL    string `json:"url"`
+					Detail string `json:"detail"`
 				}
 				decodeJSON(b.ImageURL, &o)
-				u = o.URL
+				u, detail = o.URL, o.Detail
 			}
 			if u != "" {
-				images = append(images, imagePart(u))
+				im := imagePart(u)
+				im.Detail = detail
+				images = append(images, im)
 			}
 		}
 	}
@@ -759,6 +824,12 @@ func effortOf(s string) string {
 		return strings.ToLower(s)
 	case "ultra": // Codex's max, with its own agents to hand work to
 		return "max"
+	}
+	// a vendor's own word for a level (Trae's light, extra_high), which
+	// an agent sends for a model listing it; fitted back to the model's
+	// own word on the way out (fitEffort)
+	if l, ok := catalog.EffortAliases[strings.ToLower(strings.TrimSpace(s))]; ok {
+		return l
 	}
 	return ""
 }
