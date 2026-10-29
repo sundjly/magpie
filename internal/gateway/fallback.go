@@ -1918,6 +1918,10 @@ type holdWriter struct {
 	// before it was complete" and its 429 halfway went to the summary
 	// as the only answer, the next account never asked
 	wantWhole bool
+
+	// upstreamKeys are the headers of the vendor's reply heardUpstream put
+	// in header (#4145)
+	upstreamKeys []string
 }
 
 // onLoop sets what is told of a loop before it ends the reply (reask),
@@ -2331,12 +2335,23 @@ func (h *holdWriter) scan() {
 	}
 }
 
-// keepHeldAfter is how long a stream held for its reasoning waits before
-// its agent is first kept alive, as long as a stream with nothing in it
-// is held where its agent can't be (holdLongest); a refusal after it still
-// goes to another account,
-// whose stream follows the comments in the same response.
-var keepHeldAfter = holdLongest
+// keepHeldAfter is how long a held stream waits before its agent is first
+// kept alive (keepAlive): the stream's 200, then a comment every
+// keepHeldEvery. A refusal after it still goes to another account, whose
+// stream follows the comments in the same response. It was holdLongest,
+// 15s, and a proxy between the agent and magpie that hangs up on a
+// request with nothing back for about 10s ended every turn whose vendor
+// took longer to its first event: Codex on Windows sends its requests for
+// 127.0.0.1 through the system proxy a Clash-style app sets, "127.*" in
+// its bypass list notwithstanding (codexProxyFor), and they ended 499
+// (mrten_95615 on Discord). A failure before it is still a status, its
+// Retry-After with it.
+var keepHeldAfter = 3 * time.Second
+
+// keepHeldEvery is the longest a held stream's agent goes without a
+// comment once it has its 200, under keepaliveEvery: the same proxy waits
+// for bytes, not for events.
+var keepHeldEvery = 5 * time.Second
 
 // keptAlive is what a request's held streams have sent its agent ahead of
 // a reply: the stream's headers and SSE comments, nothing of the reply.
@@ -2374,7 +2389,7 @@ func (a *keptAlive) tooQuiet(d time.Duration) bool {
 }
 
 // keepAlive tells the agent of a stream held past keepHeldAfter for its
-// reasoning that it goes on, every keepaliveEvery: held for up to
+// reasoning that it goes on, every keepHeldEvery: held for up to
 // holdThinking (4 minutes), the agent heard nothing at all, and Alma's
 // idle timeout for a reasoning model, 240s, ended the turn first (#751). A
 // comment is no event in any protocol, so another account may still answer
@@ -2383,7 +2398,7 @@ func (h *holdWriter) keepAlive() {
 	a := h.alive
 	// a Gemini stream has none, as geminiEncoder.keepalive: agy fails on
 	// the comment ("invalid stream chunk: : keepalive", #934)
-	if a == nil || a.proto == provider.Gemini || time.Since(a.at) < keepaliveEvery {
+	if a == nil || a.proto == provider.Gemini || time.Since(a.at) < min(keepaliveEvery, keepHeldEvery) {
 		return
 	}
 	if !a.sent {
@@ -2655,7 +2670,7 @@ var watchEvery = time.Second
 // slot of its key's or account's (MaxConcurrency) or for room in its
 // minute (MaxRPM), before anything is sent to the vendor: past
 // keepHeldAfter it is sent the stream's 200 and SSE comments
-// (keepAlive), every keepaliveEvery for as long as the wait lasts, as a
+// (keepAlive), every keepHeldEvery for as long as the wait lasts, as a
 // try's held stream is. A wait of up to 2 minutes for the minute, or
 // QueueWait's for a slot, sent the agent nothing at all, which an agent's
 // or a proxy's timeout for its headers ended first (coeo91 on Discord:
@@ -2892,17 +2907,23 @@ const refusedStatus = http.StatusBadRequest
 
 // filterReasons are how a vendor says its safety filter stopped the reply:
 // Anthropic's stop_reason, OpenAI's finish_reason and incomplete reason,
-// an OpenAI or Azure error's code, and Gemini's finishReason and
-// blockReason.
+// an OpenAI or Azure error's code, Factory's error code, and Gemini's
+// finishReason and blockReason.
 var filterReasons = map[string]string{
 	"refusal":                  "refusal",
 	"content_filter":           "content_filter",
 	"content_policy_violation": "content_filter",
-	"SAFETY":                   "safety",
-	"PROHIBITED_CONTENT":       "safety",
-	"BLOCKLIST":                "safety",
-	"SPII":                     "safety",
-	"IMAGE_SAFETY":             "safety",
+	// Factory's usage policy check, a 403 whose code droid 0.245.0 tells
+	// apart from an account's 403 the same way (the Factory plugin keeps
+	// the code on the error it hands magpie): handed on as its 403, the
+	// agent took it for a failed sign-in (sweanng on Discord, ZCode:
+	// "Provider authentication failed", reason=auth_failed status=403)
+	"content_policy_rejected": "content_policy_rejected",
+	"SAFETY":                  "safety",
+	"PROHIBITED_CONTENT":      "safety",
+	"BLOCKLIST":               "safety",
+	"SPII":                    "safety",
+	"IMAGE_SAFETY":            "safety",
 }
 
 // refusedNote is what a refusal is noted as: the vendor's own reason.
@@ -3330,8 +3351,11 @@ func policyRefusal(raw []byte) (string, bool) {
 	}
 	note := func(reason string) (string, bool) {
 		if msg = strings.TrimSpace(msg); msg != "" {
-			if len(msg) > 300 {
-				msg = msg[:300] + "…"
+			// long enough for the vendor's own advice after its words:
+			// Factory's "start a new session…" and OpenAI's Daybreak
+			// link were cut off at 300
+			if len(msg) > 1000 {
+				msg = msg[:1000] + "…"
 			}
 			return refusedNote(reason) + " — " + msg, true
 		}

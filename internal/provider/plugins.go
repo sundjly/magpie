@@ -123,6 +123,18 @@ func (p Provider) PluginProvider() string {
 	return p.Account.plugin.ID
 }
 
+// OpenAIBase is where p takes the OpenAI-shaped requests that are no chat
+// (embeddings, rerank, speech, transcriptions): its Chat base, and a
+// plugin's fetch under plugin://<id>/v1 whatever API its chat models are
+// spoken on, for the plugin to answer or put in its vendor's shape
+// (XYenon's Google AI Studio plugin: Gemini's embedContent, its TTS).
+func (p Provider) OpenAIBase() string {
+	if p.IsPlugin() {
+		return pluginBase + p.Account.plugin.ID + "/v1"
+	}
+	return p.Base(Chat)
+}
+
 // PluginOpenAICompatible is whether p is a plugin's provider that speaks
 // model on an OpenAI-compatible API (@ai-sdk/openai-compatible), whose
 // other routes, the images API among them, its fetch sends under the same
@@ -254,6 +266,9 @@ func pluginTierOn(provider string, m plugin.Model, tier string) bool {
 func pluginCatalog(pp plugin.Provider) []catalog.Model {
 	out := make([]catalog.Model, 0, len(pp.Models))
 	for _, m := range pp.Models {
+		if !pluginTalks(m) {
+			continue
+		}
 		c := catalog.Model{
 			ID: m.ID, Name: m.Name, Provider: pp.ID, Released: m.Released,
 			APIs: []string{string(pluginProtocol(pp.ID, m))}, Images: m.Image,
@@ -317,6 +332,20 @@ func pluginCatalog(pp plugin.Provider) []catalog.Model {
 		out = append(out, c)
 	}
 	return out
+}
+
+// pluginTalks is whether m is a model to talk with, as its plugin says
+// what it gives: one that gives text, or images or videos (whose place is
+// #2792's to decide, a drawing model kept where it is until then), or one
+// said nothing of. An embedding ({"text": false}) and a TTS (audio alone)
+// are not, and stay out of every chat list, as the catalog's own lists
+// leave them out (textModel), #3279. Nothing is guessed from its id: a
+// plugin that says nothing of its outputs keeps every model it lists.
+func pluginTalks(m plugin.Model) bool {
+	if !m.OutputsSaid {
+		return true
+	}
+	return slices.ContainsFunc(m.Outputs, func(k string) bool { return k == "text" || k == "image" || k == "video" })
 }
 
 // pluginPrice is m's price as its plugin gives it (m.Cost), if it gives

@@ -740,6 +740,9 @@ func compactOn(r *http.Request, model string) *provider.Provider {
 // A gateway key held to some models or accounts (#882, #905) is served
 // through it always, alone no less: the relay would spend Codex's own
 // sign-in with nothing of the key asked, its accounts and its models both.
+// codexHeldKnown is provider.CodexUsedUpKnown, which tests set.
+var codexHeldKnown = provider.CodexUsedUpKnown
+
 func codexAccounts(r *http.Request, model string) (string, bool) {
 	h := r.Header
 	if model == "" || strings.Contains(model, "/") || apiKey(h) {
@@ -766,6 +769,19 @@ func codexAccounts(r *http.Request, model string) (string, bool) {
 	_, accHeld := accountHolds(r)
 	if keyHeld || accHeld {
 		return id, true
+	}
+	// Codex's sign-in known to be out (of its allowance, no credits): a
+	// Codex started before magpie took its turns over (codex.out) still
+	// sends them to its built-in provider, and relayed as they came each
+	// one met the same refusal until Codex was restarted, which then sent
+	// them to magpie as codex/<model> (unsplashz on Discord). Served as
+	// that restarted Codex's are, they go where routing sends them, with
+	// no restart. A request signed by an account magpie doesn't have (a
+	// Codex in WSL) goes as it came
+	if ok && p.Account != nil && p.Account.Agent == "codex" && codexHeldKnown() {
+		if acct := h.Get("chatgpt-account-id"); acct == "" || acct == provider.CodexSignedInAccount() {
+			return id, true
+		}
 	}
 	if !ok || p.Account == nil || p.Account.Agent != "codex" || len(p.AlsoOn()) == 0 && !pinned {
 		return "", false
@@ -1084,6 +1100,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 	}
 	var sniff *usageSniffer
 	var refusal []byte // what OpenAI said, of a request it turned away
+	relayedAcct := ""  // magpie's ChatGPT account the turn went out on, if any
 	if rest == "/responses" && base != codexAPIBase {
 		// the account goes on its credits, its week used up: a reset it
 		// spends by itself when the week runs out goes first
@@ -1231,6 +1248,17 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 			body = b
 		}
 		if rest == "/responses" {
+			if acct, ok := codexRelayedAccount(base, r.Header, on); ok {
+				// the windows the reply tells of the account it went out on
+				// are kept as its usage, and a full one has it read again at
+				// once, as a turn served through magpie's accounts has: with
+				// Codex's sign-in the only account, every turn comes this way,
+				// and the Codex app was moved off a used-up account only at
+				// the next look, minutes on, Send greyed until it was
+				// restarted (unsplashz on Discord)
+				heardCodexLimits(acct, res)
+				relayedAcct = acct.Account.User
+			}
 			// a web page or nothing at all, served 200, is the 502 it stands
 			// for (#1012)
 			res = notAnAPIReply(res, "OpenAI: ")
@@ -1390,6 +1418,12 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		// the Routing view show why, not just that
 		call.Error = provider.APIError(refusal, res.Status)
 		errType = provider.ErrorType(refusal)
+		if relayedAcct != "" && failure(res.StatusCode, refusal) == failQuota {
+			// the account it went out on refused the turn as out of its
+			// allowance: read again now, so magpie takes the turns over
+			// (codex.out) and the Codex app is told without a restart
+			codexMayBeUsedUp(relayedAcct)
+		}
 	}
 	end(call.Status, call.Error, uu.Input+uu.Output+uu.CacheRead+uu.CacheWrite, uu.Output)
 	call.Route = tr.ID
@@ -1497,23 +1531,35 @@ func fallbacksOnly(cands []candidate, pl planned, id, model string) ([]candidate
 // stays openai too, rather than a codex row that names the wrong account.
 // Rows already written are not rewritten.
 func codexServed(base string, h http.Header, on *provider.Provider) (id, account string) {
-	if base != provider.CodexBase || apiKey(h) {
+	p, ok := codexRelayedAccount(base, h, on)
+	if !ok {
 		return "openai", ""
 	}
+	return p.ID, p.Account.User
+}
+
+// codexRelayedAccount is the ChatGPT account of magpie's that a relay
+// through codexUpstreamOn went out on: the one it was signed with (on),
+// or Codex's own sign-in when the request names it; false for a call to
+// OpenAI's API, or one signed by an account magpie doesn't have.
+func codexRelayedAccount(base string, h http.Header, on *provider.Provider) (provider.Provider, bool) {
+	if base != provider.CodexBase || apiKey(h) {
+		return provider.Provider{}, false
+	}
 	if on != nil && on.Account != nil && on.Account.User != "" {
-		return on.ID, on.Account.User
+		return *on, true
 	}
 	// the token went out as Codex sent it: it is the sign-in magpie reads
 	// only when it names the same ChatGPT account. A Codex in WSL, or
 	// under another CODEX_HOME, signs with its own, which isn't named here
 	if acct := h.Get("chatgpt-account-id"); acct != "" && acct != provider.CodexSignedInAccount() {
-		return "openai", ""
+		return provider.Provider{}, false
 	}
 	p, err := provider.Find("codex")
 	if err != nil || p.Account == nil || p.Account.User == "" {
-		return "openai", ""
+		return provider.Provider{}, false
 	}
-	return p.ID, p.Account.User
+	return *p, true
 }
 
 // unreadableItem is the item OpenAI's refusal names: sealed content it
@@ -2266,6 +2312,31 @@ func localCompactionTurn(meta string) (string, bool) {
 	return strings.Replace(meta, old, `"implementation":"responses"`, 1), true
 }
 
+// previousModelCompaction is whether a compaction is the one Codex runs
+// before a turn on another model, on the model the thread was on: a
+// switch to a model with a smaller window (compaction.reason
+// "model_downshift") or of another compaction hash ("comp_hash_changed"),
+// the only places Codex names either (codex-rs core/src/session/turn.rs,
+// maybe_run_previous_model_inline_compact). When it fails Codex asks the
+// turn's own model instead, but only under its provider named "OpenAI"
+// (compact_model_fallback.rs); under magpie's, the provider Codex has
+// while its sign-in is used up (codex.out), the failure is the turn's,
+// and every turn of the thread asks the old model again.
+func previousModelCompaction(r *http.Request, body []byte) bool {
+	meta := r.Header.Get(turnMetadataHeader)
+	if meta == "" {
+		meta = gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata").Str
+	}
+	if !strings.Contains(meta, `"compaction"`) {
+		return false
+	}
+	switch gjson.Get(meta, "compaction.reason").Str {
+	case "model_downshift", "comp_hash_changed":
+		return true
+	}
+	return false
+}
+
 // localCompactionMeta is a request's client_metadata with its
 // x-codex-turn-metadata made localCompactionTurn's.
 func localCompactionMeta(raw json.RawMessage) (json.RawMessage, bool) {
@@ -2733,7 +2804,8 @@ var keepsSeal = map[string]bool{`"reasoning"`: true, `"compaction"`: true, `"com
 // forVendor is a Responses request as Codex sends it to a provider not
 // OpenAI's: without its messages' internal metadata, a call's
 // encrypted_function_args, stream_options' reasoning_summary_delivery,
-// configuration_update items, output.encrypted_content in its include,
+// configuration_update items (the last one's effort at the top instead),
+// output.encrypted_content in its include,
 // and the sealed output (encrypted_content) on a message or call that an
 // OpenAI model wrote earlier in the conversation.
 // A relay that checks it is Codex's turned the lot away ("invalid codex
@@ -2773,6 +2845,7 @@ func forVendor(p provider.Provider, body []byte) []byte {
 		}
 	}
 	if items, err := rawArray(q["input"]); err == nil {
+		updated := "" // the effort the agent changed to mid-thread
 		out := items[:0]
 		for _, raw := range items {
 			it, err := rawObject(raw)
@@ -2782,6 +2855,9 @@ func forVendor(p provider.Provider, body []byte) []byte {
 			}
 			if string(it["type"]) == `"configuration_update"` {
 				changed = true
+				if e := updateEffort(raw); e != "" {
+					updated = e
+				}
 				continue
 			}
 			_, meta := it["internal_chat_message_metadata_passthrough"]
@@ -2801,6 +2877,12 @@ func forVendor(p provider.Provider, body []byte) []byte {
 		}
 		if changed {
 			q["input"], _ = marshalPlain(out)
+		}
+		// the items go, the change they made stays: at the top, which is
+		// all this vendor reads
+		if reasoning, err := rawObject(q["reasoning"]); updated != "" && err == nil && reasoning != nil {
+			reasoning["effort"], _ = json.Marshal(updated)
+			q["reasoning"], _ = marshalPlain(reasoning)
 		}
 	}
 	if !changed {
@@ -2902,7 +2984,14 @@ func userMessage(text string) map[string]any { return codexsummary.UserMessage(t
 // keeps failing stops being asked for a while (compactFails, #2274).
 func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byte) {
 	key, model := compactKey(body), modelOf(body)
-	if msg, held := s.compactFails.held(key, model); held {
+	// Codex's compaction on the model a thread is leaving, under magpie's
+	// provider: one that fails is compacted locally, as Codex would have
+	// the turn's own model do it (previousModelCompaction), never the
+	// turn's failure. On CodexPath Codex's provider is its own "OpenAI",
+	// which asks the turn's model itself, a summary where magpie's local
+	// one is only what was asked and the last reply
+	prev := !strings.HasPrefix(r.URL.Path, CodexPath+"/") && previousModelCompaction(r, body)
+	if msg, held := s.compactFails.held(key, model); held && !prev {
 		log.Printf("codex compaction: %s", msg)
 		writeError(w, provider.Responses, http.StatusBadRequest, msg)
 		return
@@ -2948,6 +3037,19 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 			rec, res, err = &recorder{header: http.Header{}, status: 200}, compactResult{}, nil
 		}
 	}
+	if prev && local == "" && (rec.status >= 400 || err != nil) {
+		// the thread's old model can't summarise it — Codex's sign-in used
+		// up, the model gone — and the turn is on another: compacted
+		// locally, the thread goes on on the model it was switched to,
+		// where the refusal failed every turn of it (hiwise_aigc on X)
+		who, msg := compactFailure(body, rec)
+		if err != nil {
+			msg = "broken off: " + err.Error()
+		}
+		log.Printf("codex compaction: %s answered %d (%s) on the model the thread is leaving; compacting locally", who, rec.status, msg)
+		local = localSummary(body, fmt.Sprintf("%s answered %d to the summary request: %s", who, rec.status, msg))
+		rec, res, err = &recorder{header: http.Header{}, status: 200}, compactResult{}, nil
+	}
 	if rec.status >= 400 {
 		// said as the compaction's failure, with who answered it: a bare
 		// "Fake: 502 Bad Gateway" read as Codex's own, and a body with
@@ -2973,6 +3075,11 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 			why = d.Reason
 		}
 		err = fmt.Errorf("%s (%s)", incompleteReply, why)
+	}
+	if err != nil && prev {
+		who, _ := compactFailure(body, rec)
+		log.Printf("codex compaction: %s: %v on the model the thread is leaving; compacting locally", who, err)
+		local, err = localSummary(body, who+": "+err.Error()), nil
 	}
 	if err != nil {
 		who, _ := compactFailure(body, rec)
@@ -3017,6 +3124,9 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 		sum.WriteString(local)
 	} else {
 		sum.WriteString(res.summary())
+	}
+	if strings.TrimSpace(sum.String()) == "" && prev {
+		sum.WriteString(localSummary(body, "the model wrote no summary"+answeredWith(res.Output)))
 	}
 	if strings.TrimSpace(sum.String()) == "" {
 		why := "the model wrote no summary" + answeredWith(res.Output)

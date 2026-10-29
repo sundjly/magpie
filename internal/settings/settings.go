@@ -49,9 +49,13 @@ type Settings struct {
 	// ReduceMotion stills magpie's animations as the system's Reduce
 	// Motion does, for a computer or phone that the moving Routing page
 	// keeps busy (#3813).
-	ReduceMotion bool   `json:"reduceMotion,omitempty"`
-	Lang         string `json:"lang,omitempty"` // system | en | zh
-	Tray         string `json:"tray,omitempty"` // what clicking the tray icon opens: panel | window
+	ReduceMotion bool `json:"reduceMotion,omitempty"`
+	// NoBird keeps magpie's bird off the loading skeletons and the
+	// Plugins page's README, for a small server where its watch for them
+	// is work enough to matter (Yayoi_no_yume on X). Off means shown.
+	NoBird bool   `json:"noBird,omitempty"`
+	Lang   string `json:"lang,omitempty"` // system | en | zh
+	Tray   string `json:"tray,omitempty"` // what clicking the tray icon opens: panel | window
 	// SessionTerminal is the Mac app that opens a resumed session, by bundle
 	// id. "" and "system" follow the .command file association. This
 	// computer's own (KeepOwn): another Mac may not have that app.
@@ -72,10 +76,24 @@ type Settings struct {
 	// Dock keeps magpie in the Mac's Dock as well as the menu bar, for a
 	// menu bar too full to show its icon.
 	Dock bool `json:"dock,omitempty"`
-	// DockWindow shows it in the Dock only while its window is open, so
-	// Cmd-Tab reaches the window without an icon kept there the rest of
-	// the time. Dock wins over it.
+	// DockWindow is the With window choice: magpie is in the Dock, and so
+	// in Command-Tab, only while its window is open. It is what magpie
+	// does with neither Dock nor DockNever set (ShouguangCao on X: the
+	// window was out of Command-Tab, so going back to it to paste a key
+	// copied elsewhere took the menu bar), so it is still written for an
+	// older magpie reading the file, which took none for Hide.
 	DockWindow bool `json:"dockWindow,omitempty"`
+	// DockNever keeps magpie out of the Dock and Command-Tab even while
+	// its window is open, the Hide choice. Dock wins over it.
+	DockNever bool `json:"dockNever,omitempty"`
+	// DockSettled says this file's Dock choice is read with With window as
+	// the default. A file written before that (v0.1.2060) has none, and
+	// Hide was its default, stored as nothing: a user who chose Hide can't
+	// be told from one who never chose, so such a file with no choice is
+	// read as Hide (settleDock), never moved into the Dock by the new
+	// default. A new install, with no file, is settled from the start.
+	// Every save writes it.
+	DockSettled bool `json:"dockSettled,omitempty"`
 	// Proxy for magpie's own requests to vendors: "" follows the
 	// environment and then the system, "direct" uses none, anything else
 	// is the proxy (http://, https:// or socks5://; host:port means http).
@@ -641,6 +659,13 @@ type Settings struct {
 	// Agents list leaves out (ikunbots on X). It is that list's only: the
 	// ledger keeps their calls, and the totals and the chart count them.
 	UsageAgentsHidden []string `json:"usageAgentsHidden,omitempty"`
+	// UsageCardsHidden are the allowance cards the Usage page's Overview
+	// leaves out (whqtian_07012 on Discord), each as its tray card id (the
+	// provider id, then "|" and the account when there is one) and "|plan"
+	// or "|balance", so StepFun's balance card goes while its plan card
+	// stays. Only what that page shows: routing, caps, counting, the tray
+	// panel (PanelUsageHidden is its own) and the menu bar's cells keep them.
+	UsageCardsHidden []string `json:"usageCardsHidden,omitempty"`
 	// ClientAgents counts a client magpie doesn't know as one of the agents
 	// it does, on the Usage and Sessions pages (#1958, NorethSea): a bridge
 	// that starts Codex's app-server under a name of its own
@@ -1141,6 +1166,7 @@ func (s *Settings) KeepOwn(cur Settings) {
 	s.GatewayConversations = cur.GatewayConversations
 	s.UIFont, s.CodeFont = cur.UIFont, cur.CodeFont
 	s.Window, s.Proxy, s.Port, s.Dock, s.DockWindow, s.Lightweight = cur.Window, cur.Proxy, cur.Port, cur.Dock, cur.DockWindow, cur.Lightweight
+	s.DockNever, s.DockSettled = cur.DockNever, cur.DockSettled
 	s.ProxyCustom = cur.ProxyCustom
 	s.WindowMaximised, s.KeepAwake, s.KeepAwakeDisplay = cur.WindowMaximised, cur.KeepAwake, cur.KeepAwakeDisplay
 	s.TrayUsages, s.TrayUsage, s.TrayUsageEvery, s.TrayNoLogos, s.TrayNoBird, s.TrayPace, s.TrayNoCost = cur.TrayUsages, cur.TrayUsage, cur.TrayUsageEvery, cur.TrayNoLogos, cur.TrayNoBird, cur.TrayPace, cur.TrayNoCost
@@ -1304,11 +1330,26 @@ func loadChecked() (Settings, error) {
 	b, err := through("settings", Path(), func(b []byte) ([]byte, error) { return b, nil })
 	if err != nil {
 		if os.IsNotExist(err) {
+			// a new install: With window is its default
+			s.DockSettled = true
 			return s.normal(), nil
 		}
-		return s.normal(), fmt.Errorf("could not read settings at %s: %w", Path(), err)
+		return s.settleDock().normal(), fmt.Errorf("could not read settings at %s: %w", Path(), err)
 	}
 	return parse(b)
+}
+
+// settleDock reads a Dock choice written before With window was the
+// default (DockSettled unset) as that magpie did: no choice is Hide.
+func (s Settings) settleDock() Settings {
+	if s.DockSettled {
+		return s
+	}
+	if !s.Dock && !s.DockWindow && !s.DockNever {
+		s.DockNever = true
+	}
+	s.DockSettled = true
+	return s
 }
 
 // parsed is the last settings.json that parsed whole and what it read as,
@@ -1340,6 +1381,7 @@ func parse(b []byte) (Settings, error) {
 	parses.Add(1)
 	perr := json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &s)
 	if perr == nil {
+		s = s.settleDock()
 		// only what parsed whole is kept: a last good generation read in
 		// its place is read again, as is a file that can't be read at all
 		parsed.Lock()
@@ -1355,7 +1397,7 @@ func parse(b []byte) (Settings, error) {
 	} else if len(bytes.TrimSpace(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")))) != 0 {
 		err = fmt.Errorf("could not read settings at %s: %w", Path(), perr)
 	}
-	return s.normal(), err
+	return s.settleDock().normal(), err
 }
 
 // parses counts settings.json's parses (Parses).
@@ -1546,7 +1588,10 @@ func UseRedactModel(name string) error {
 // save is called under fileMu. Only the consent setter may replace recording.
 func save(s Settings, recording bool) error {
 	defer filememo.Forget() // read again, where a request holds it
-	s = s.normal()
+	// what is written is settled: a Settings read from an older file was
+	// settled as it was read, and one made without reading has its Dock
+	// choice read as that file's would be
+	s = s.settleDock().normal()
 	if !slices.Contains(Themes, s.Theme) {
 		return fmt.Errorf("theme must be one of %v, not %q", Themes, s.Theme)
 	}
@@ -1698,6 +1743,7 @@ func save(s Settings, recording bool) error {
 	s.UsageOrder = ids(s.UsageOrder)
 	s.PanelUsageHidden = ids(s.PanelUsageHidden)
 	s.UsageAgentsHidden = ids(s.UsageAgentsHidden)
+	s.UsageCardsHidden = ids(s.UsageCardsHidden)
 	s.ClientAgents = clientAgents(s.ClientAgents)
 	s.UsageCleared = usageCleared(s.UsageCleared)
 	s.TrayUsages = ids(s.TrayUsages)

@@ -21,6 +21,10 @@ import (
 // magpie's to read.
 func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
 	withGatewaySession(w, r)
+	// a Responses request naming the response it follows is given the
+	// conversation whole before anything reads it (prev_response.go)
+	w, r, body, kept := previousResponse(w, r, from, body)
+	defer kept()
 	w, recorded := recordConversation(w, r, from, body)
 	defer recorded()
 	// a conversation going round one tool call is answered here, before
@@ -40,7 +44,7 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 	for _, a := range agents {
 		// the user's middleware runs before a route is begun: a wait
 		// magpie knows of (unrouted.go)
-		waited := noteWait(r.Context())
+		waited := noteWait(r.Context(), "JS middleware")
 		run := a.Begin(info)
 		if run == nil {
 			waited()
@@ -119,7 +123,7 @@ func gatewayHooks(w http.ResponseWriter, r *http.Request, from provider.Protocol
 	}
 	// the plugin host, started for it if need be: a wait magpie knows of
 	// before a route is begun (unrouted.go)
-	waited := noteWait(r.Context())
+	waited := noteWait(r.Context(), "plugin hooks")
 	run := plugin.GatewayBegin(r.Context(), body, info)
 	waited()
 	if run == nil {

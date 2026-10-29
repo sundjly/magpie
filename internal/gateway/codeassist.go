@@ -562,8 +562,9 @@ func buildCodeAssistSent(r *Request, sent, agent string) []byte {
 			gen["responseJsonSchema"] = sc
 		}
 	}
-	if catalog.DrawsID(sent) {
-		// an image model draws only when asked for images too
+	if catalog.DrawsID(sent) || r.draws {
+		// an image model draws only when asked for images too: one named
+		// for them, or any asked to draw (a plugin's that says it does)
 		gen["responseModalities"] = []string{"TEXT", "IMAGE"}
 	}
 	if len(gen) > 0 {
@@ -811,6 +812,18 @@ func plainSchema(raw json.RawMessage) json.RawMessage {
 	var walk func(v any, depth int) any
 	walk = func(v any, depth int) any {
 		switch x := v.(type) {
+		case bool:
+			// a boolean schema, which JSON Schema has wherever a schema
+			// goes: true is any value, the schema {}; false is none, nil,
+			// and whoever holds it leaves it out. Google's Schema is an
+			// object only, and turns the whole request away over a
+			// boolean ("…items.items (…aiplatform.master.Schema), true",
+			// han_tiv on Discord: an MCP tool's array of arrays of
+			// anything)
+			if x {
+				return map[string]any{}
+			}
+			return nil
 		case []any:
 			out := make([]any, len(x))
 			for i, e := range x {
@@ -947,12 +960,23 @@ func plainSchema(raw json.RawMessage) json.RawMessage {
 					props := map[string]any{}
 					if m, ok := v.(map[string]any); ok {
 						for pk, pv := range m {
-							props[pk] = walk(pv, depth+1)
+							// a property whose schema is false is one the
+							// call may not have: it is left out, and so is
+							// its name in required
+							if w := walk(pv, depth+1); w != nil {
+								props[pk] = w
+							}
 						}
 					}
 					out[k] = props
 				case "items":
-					out[k] = walk(v, depth+1)
+					if w := walk(v, depth+1); w != nil {
+						out[k] = w
+					} else if x["maxItems"] == nil {
+						// items false: an array with nothing in it
+						out[k] = map[string]any{}
+						out["maxItems"] = 0
+					}
 				case "enum":
 					// Google takes string enums only
 					if es, ok := v.([]any); ok {

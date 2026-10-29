@@ -36,11 +36,11 @@ func stubCodexApp(t *testing.T) *codexAppStub {
 	t.Cleanup(func() {
 		CodexAppRoute, codexAppServersOn, endCodexAppServer, codexTurnRunning = oldOn, oldList, oldEnd, oldTurn
 		codexApp.Lock()
-		codexApp.seen, codexApp.route, codexApp.stale, codexApp.stuck = false, "", nil, false
+		codexApp.seen, codexApp.route, codexApp.stale, codexApp.stuck, codexApp.switched = false, "", nil, false, false
 		codexApp.Unlock()
 	})
 	codexApp.Lock()
-	codexApp.seen, codexApp.route, codexApp.stale, codexApp.stuck = false, "", nil, false
+	codexApp.seen, codexApp.route, codexApp.stale, codexApp.stuck, codexApp.switched = false, "", nil, false, false
 	codexApp.Unlock()
 	CodexAppRoute = func() (string, bool, bool) {
 		r := s.route
@@ -510,5 +510,104 @@ func TestRestartCodexAppEndsOnlyItsServer(t *testing.T) {
 	codexAppGoneWait = 300 * time.Millisecond
 	if err := RestartCodexApp(context.Background(), bundle); err == nil {
 		t.Fatal("an app-server that stays: no error")
+	}
+}
+
+// magpie uninstall restarts the Codex app's app-server once, so the app
+// reads a config with magpie out of it with no magpie left to watch it;
+// a running turn is waited for, never cut short.
+func TestRestartCodexAppWhenIdle(t *testing.T) {
+	s := stubCodexApp(t)
+	oldEvery := codexAppEvery
+	codexAppEvery = time.Millisecond
+	t.Cleanup(func() { codexAppEvery = oldEvery })
+	if n, left, err := RestartCodexAppWhenIdle(context.Background(), time.Second); n != 0 || left || err != nil {
+		t.Fatalf("no app running: %d %v %v", n, left, err)
+	}
+	s.running = []int{7, 8}
+	s.turnOpen = true
+	if n, left, _ := RestartCodexAppWhenIdle(context.Background(), 20*time.Millisecond); n != 0 || !left || len(s.ended) != 0 {
+		t.Fatalf("a turn running: ended %v, left %v", s.ended, left)
+	}
+	s.turnOpen = false
+	if n, left, err := RestartCodexAppWhenIdle(context.Background(), time.Second); n != 2 || left || err != nil || !slices.Equal(s.ended, []int{7, 8}) {
+		t.Fatalf("ended %v (%d), left %v, %v", s.ended, n, left, err)
+	}
+	s.endErr = proc.ErrDenied
+	if _, left, _ := RestartCodexAppWhenIdle(context.Background(), time.Second); !left {
+		t.Fatal("an app-server not ended isn't said")
+	}
+}
+
+// codexMacAppServer is the macOS Codex app's own app-server, as ps listed
+// it on the owner's Mac (ChatGPT.app 26.1027).
+const codexMacAppServer = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c features.code_mode_host=true app-server --analytics-default-enabled -c plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true"
+
+// After magpie switched Codex's ChatGPT account the Codex app stayed grey on
+// the used-up one until the user quit and opened it (danzi002 on Discord):
+// the switch handed over only the first app-server-looking process of a
+// five-second listing, which can be another program's --listen one (listed
+// ahead of the app's on the owner's Mac) or none when ps is slow. Every
+// one of the app's own on Codex's home is restarted, found at the next
+// look and again after a listing that failed.
+func TestCodexAppSwitchRestartsTheAppsOwnServers(t *testing.T) {
+	signIn(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	s := stubCodexApp(t)
+	old := listProcesses
+	t.Cleanup(func() {
+		listProcesses = old
+		DismissCodexDaemon()
+		DismissCodexApp()
+	})
+	var listErr error
+	listProcesses = func(context.Context) ([]proc.Process, error) {
+		if listErr != nil {
+			return nil, listErr
+		}
+		// another program's app-server first, as ps lists by pid
+		ps := []proc.Process{{PID: 58, Args: "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server --listen stdio://"}}
+		for _, p := range s.running {
+			ps = append(ps, proc.Process{PID: p, Args: codexMacAppServer})
+		}
+		return ps, nil
+	}
+	now := time.Now()
+	idle := func() (int, time.Time) { return 0, now.Add(-time.Minute) }
+	step := func() []int { return codexAppStep(context.Background(), now, idle) }
+
+	s.running = []int{221}
+	if got := step(); got != nil {
+		t.Fatalf("nothing changed: ended %v", got)
+	}
+	noteCodexSwitch("a@x", "b@x")
+	if got := step(); !slices.Equal(got, []int{221}) {
+		t.Fatalf("switched beside another program's app-server: ended %v, want [221]", got)
+	}
+	codexDaemonMu.Lock()
+	codexDaemonChecked = time.Time{}
+	codexDaemonMu.Unlock()
+	if got := CodexAppStale(); got != "" {
+		t.Fatalf("the app said to be on %q after its restart", got)
+	}
+
+	// ps too slow as the account changes, and again at the first look
+	s.running = []int{300, 301}
+	s.ended = nil
+	listErr = errors.New("ps: deadline exceeded")
+	noteCodexSwitch("b@x", "c@x")
+	s.listErr = listErr
+	if got := step(); got != nil {
+		t.Fatalf("app-servers not listed: ended %v", got)
+	}
+	s.listErr = nil
+	got := step()
+	slices.Sort(got)
+	if !slices.Equal(got, []int{300, 301}) {
+		t.Fatalf("switched while ps was slow: ended %v, want [300 301]", got)
+	}
+	if got := step(); got != nil {
+		t.Fatalf("the new app-servers read the new account as they started: ended %v", got)
 	}
 }

@@ -93,6 +93,22 @@ export const FakePlugin = async ({ client }) => ({
       cfg.provider[ID].models["sensenova-u1.5-lite"] = { name: "sensenova-u1.5-lite", limit: { context: 131072, output: 32768 } }
       cfg.provider[ID].models["flux-2"] = { name: "Flux 2", provider: { npm: "@ai-sdk/anthropic" }, limit: { context: 1000, output: 100 } }
     }
+    // $FAKE_GOOGLE: the provider's models are on Gemini's API, as XYenon's
+    // Google AI Studio plugin gives them all (@ai-sdk/google), so it has
+    // no OpenAI-compatible model
+    if (process.env.FAKE_GOOGLE) cfg.provider[ID].npm = "@ai-sdk/google"
+    // $FAKE_VIDEO: a video model, as a Gemini plugin lists Veo: it says it
+    // gives video, nothing else
+    if (process.env.FAKE_VIDEO) cfg.provider[ID].models["veo-3.1-generate-preview"] = { name: "Veo 3.1", modalities: { input: ["text", "image"], output: ["video"] }, limit: { context: 1000, output: 100 } }
+    // $FAKE_GEMINI_DRAWS: image models on Gemini's API, as XYenon's Google
+    // AI Studio plugin lists them: one named for images, one that only
+    // says it gives them, and an Imagen, which draws on :predict instead
+    if (process.env.FAKE_GEMINI_DRAWS) {
+      const g = { provider: { npm: "@ai-sdk/google" }, limit: { context: 3000, output: 300 } }
+      cfg.provider[ID].models["gemini-3-pro-image-preview"] = { ...g, name: "Nano Banana Pro", modalities: { input: ["text", "image"], output: ["text", "image"] } }
+      cfg.provider[ID].models["gemini-3-flash-canvas"] = { ...g, name: "Gemini 3 Flash Canvas", modalities: { input: ["text", "image"], output: ["text", "image"] } }
+      cfg.provider[ID].models["imagen-4.0-generate-001"] = { ...g, name: "Imagen 4", modalities: { input: ["text"], output: ["image"] } }
+    }
     // $FAKE_DEEPSEEK: a DeepSeek model, as Cline's cline-pass/deepseek-v4-pro
     if (process.env.FAKE_DEEPSEEK) cfg.provider[ID].models["deepseek-v4-pro"] = { name: "DeepSeek V4 Pro", limit: { context: 1000, output: 100 } }
     // $FAKE_GLM: a GLM model, as Cline's cline-pass/glm-5.3
@@ -348,6 +364,20 @@ export const FakePlugin = async ({ client }) => ({
       if (process.env.FAKE_ZEN) {
         p.models["mimo-v2.6-flash-free"] = { ...p.models["fake-1"], id: "mimo-v2.6-flash-free", name: "MiMo V2.6 Flash Free", api: { ...p.models["fake-1"].api, id: "mimo-v2.6-flash-free" }, free: true, variants: {},
           capabilities: {"temperature":true,"reasoning":true,"attachment":true,"toolcall":true,"input":{"text":true,"image":true,"audio":true,"video":true,"pdf":false},"output":{"text":true,"image":false,"audio":false,"video":false,"pdf":false},"interleaved":{"field":"reasoning_content"}} }
+      }
+      // $FAKE_KINDS: models as XYenon's magpie-google-ai-studio lists them
+      // (#3279): the embedding as the report gives it (output text false,
+      // nothing else said), one not named an embedding, a TTS with its
+      // parseModels' outputs (audio alone), a model that talks and speaks,
+      // one that talks and draws
+      if (process.env.FAKE_KINDS) {
+        const as = (id, output) => ({ ...p.models["fake-1"], id, name: id, api: { ...p.models["fake-1"].api, id }, free: false,
+          capabilities: { ...p.models["fake-1"].capabilities, input: { text: true }, output } })
+        p.models["gemini-embedding-001"] = as("gemini-embedding-001", { text: false })
+        p.models["bge-m3"] = as("bge-m3", { text: false })
+        p.models["gemini-2.5-flash-preview-tts"] = as("gemini-2.5-flash-preview-tts", { text: false, image: false, audio: true, video: false, pdf: false })
+        p.models["gemini-2.5-flash-native-audio"] = as("gemini-2.5-flash-native-audio", { text: true, image: false, audio: true, video: false, pdf: false })
+        p.models["gemini-2.5-flash-image"] = as("gemini-2.5-flash-image", { text: true, image: true, audio: false, video: false, pdf: false })
       }
       // $FAKE_SEARCHER: one more model, that searches the web by itself
       // when asked in plain words, marked on the list the hook gives, as
