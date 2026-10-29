@@ -332,9 +332,8 @@ func claudeReviewed(catalogs []string, models ...string) bool {
 		if gateway.AutoModeReviewable(p, model) {
 			return true
 		}
-		return slices.ContainsFunc(p.Fallback, func(id string) bool {
-			fp, fm, ok := provider.Resolve(id)
-			return ok && gateway.AutoModeReviewable(fp, fm)
+		return slices.ContainsFunc(provider.FallbackModels(p), func(m provider.Member) bool {
+			return gateway.AutoModeReviewable(m.Provider, m.Model)
 		})
 	}
 	find := provider.GroupFinder()
@@ -879,8 +878,11 @@ func claudeIn(at place) *Agent {
 		cur := env(claudeCompactEnv)
 		return cur != "" && cur == stashLoad()[compactKey]
 	}
+	// set while the window magpie wrote is Long conversations' (not a
+	// provider's Compact at): tune's card reads it as that one value
+	compactLongKey := at.key("claude.compact_long")
 	dropCompact := func() error {
-		defer forget(compactKey)
+		defer forget(compactKey, compactLongKey)
 		if compactOurs() {
 			return edit.DelJSON(path, "env."+claudeCompactEnv)
 		}
@@ -909,8 +911,9 @@ func claudeIn(at place) *Agent {
 		// model (settings.Compact), none under Full window
 		main := mainModel()
 		n := provider.CompactSet(main)
+		long := false
 		if s := settings.Load(); n == 0 && !claudeModel(main) && !provider.ClaudeGroup(main) {
-			n = s.Compact()
+			n, long = s.Compact(), true
 			// magpie's default gives way to an autoCompactWindow the user
 			// set in Claude Code (/autocompact, its settings), which the env
 			// would take precedence over; one typed in magpie doesn't (#876).
@@ -927,6 +930,11 @@ func claudeIn(at place) *Agent {
 		}
 		w := strconv.Itoa(n)
 		stash(map[string]string{compactKey: w})
+		if long {
+			stash(map[string]string{compactLongKey: "1"})
+		} else {
+			forget(compactLongKey)
+		}
 		if env(claudeCompactEnv) == w {
 			return nil
 		}

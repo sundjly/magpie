@@ -43,6 +43,7 @@ import (
 	"github.com/yetone/magpie/internal/mcpauth"
 	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/notices"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
@@ -115,6 +116,11 @@ func cliBehindRoutes(mux *http.ServeMux) {
 	// profile gets ~/.local/bin
 	mux.HandleFunc("GET /api/cli", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, update.ReadCLI())
+	})
+	// Settings › About's Open-source licenses: the notices this binary
+	// carries (notices.Text, THIRD_PARTY_NOTICES)
+	mux.HandleFunc("GET /api/notices", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, map[string]string{"text": notices.Text})
 	})
 	mux.HandleFunc("POST /api/cli", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -403,9 +409,6 @@ type settingsJSON struct {
 	GatewayOn  bool   `json:"gatewayOn,omitempty"`
 	GatewayWhy string `json:"gatewayWhy,omitempty"`
 	Web        bool   `json:"web,omitempty"`
-	// NoVideo: this app's webview would crash on a <video> (Linux without
-	// gst-plugins-good, webkitPlaysVideo), so the pages show no video
-	NoVideo bool `json:"noVideo,omitempty"`
 	// the proxy vendor requests go through now, and where it came from:
 	// settings, environment, system, off or none
 	ProxyNow    string `json:"proxyNow"`
@@ -480,6 +483,9 @@ type settingsJSON struct {
 	// LANURLs are a container's own addresses, not the host's: the page
 	// offers the one it was opened at instead, or says how to set it
 	LANContainer bool `json:"lanContainer,omitempty"`
+	// those of LANURLs at an internet address, which anyone online can
+	// reach, not only this network
+	LANPublic []string `json:"lanPublic,omitempty"`
 	// when the Codex warm-up last started an account's window
 	CodexWarmed *time.Time `json:"codexWarmed,omitempty"`
 	// and the Claude warm-up
@@ -630,7 +636,6 @@ func settingsState() settingsJSON {
 	}
 	s.WSL = runtime.GOOS == "windows"
 	s.Web = webPage.Load()
-	s.NoVideo = !s.Web && !webkitPlaysVideo()
 	s.GatewayOn, s.GatewayWhy = gatewayMode(s.Web)
 	s.LANKey = "" // the retained credential belongs on disk, not in UI state
 	// the GitHub token, masked, and where the library's requests take one
@@ -651,7 +656,7 @@ func settingsState() settingsJSON {
 		s.TerminalDefault = found.Default
 	}
 	s.FX = currentFX()
-	if (s.UsageAlert > 0 || s.BalanceAlert > 0 || s.ResetReminder > 0 || s.TurnDoneAlert > 0) && notifyProblem != nil {
+	if (s.UsageAlert > 0 || s.BalanceAlert > 0 || s.ResetReminder > 0 || s.TurnDoneAlert > 0 || s.MaskAlert) && notifyProblem != nil {
 		s.NotifyProblem = notifyProblem()
 	}
 	s.ProxyNow, s.ProxySource = netproxy.Describe()
@@ -665,6 +670,7 @@ func settingsState() settingsJSON {
 	s.Login, s.LoginAllow = login != autostart.Off, login == autostart.NeedsAllowing
 	if s.LAN {
 		s.LANURLs, s.LANContainer = gateway.LANURLs(), gateway.ContainerAddrs()
+		s.LANPublic = gateway.PublicURLs(s.LANURLs)
 	}
 	s.CodexWarmed, s.ClaudeWarmed = latest(provider.CodexWarmed()), latest(provider.ClaudeWarmed())
 	s.CodexUsers = codexUsers()
@@ -855,9 +861,20 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		if s.Colorblind {
 			boot["colorblind"] = true
 		}
+		if s.ReduceMotion {
+			boot["reduceMotion"] = true
+		}
 		// a browser tab keeps its own font choice (fonts.js)
 		if !isWeb(w) {
 			boot["uiFont"], boot["codeFont"] = s.UIFont, s.CodeFont
+		}
+		// and whether this app's webview would crash on a <video> (Linux
+		// without gst-plugins-good, webkitPlaysVideo), so the pages show
+		// none. Here, not in the settings: the page's settings come from
+		// /api/state, which never said it, so the masking demo set its
+		// video and the web process aborted (avk458 on X, omarchy)
+		if !isWeb(w) && !webkitPlaysVideo() {
+			boot["noVideo"] = true
 		}
 		// and whether it is a gateway's page alone (gatewaymode.go), so the
 		// pages left out never show
@@ -877,8 +894,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			// and MAGPIE_PUBLIC_URL while other machines are let in, which
 			// a page they open (magpie web) shows instead (noahhrreion on
 			// Discord: in Docker the line said the container's loopback)
-			if u := gateway.PublicURL(); u != "" && (s.LAN || gateway.OnNetwork()) {
-				side["publicURL"] = u
+			// and, shared, the addresses other machines use, which the
+			// window's line names from the first paint (coeo91 on Discord)
+			if s.LAN || gateway.OnNetwork() {
+				side["lan"], side["lanURLs"] = true, gateway.LANURLs()
+				if u := gateway.PublicURL(); u != "" {
+					side["publicURL"] = u
+				}
 			}
 			boot["sideGateway"] = side
 		}
@@ -1279,6 +1301,14 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		if _, sent := fields["classifyTimeout"]; !sent {
 			in.ClassifyTimeout = cur.ClassifyTimeout
 		}
+		// nor whether animations are stilled (#3813)
+		if _, sent := fields["reduceMotion"]; !sent {
+			in.ReduceMotion = cur.ReduceMotion
+		}
+		// nor whether a value masked for the first time is told (Must2333)
+		if _, sent := fields["maskAlert"]; !sent {
+			in.MaskAlert = cur.MaskAlert
+		}
 		in.AgentOrder, in.AgentsHidden, in.AgentsShown = cur.AgentOrder, cur.AgentsHidden, cur.AgentsShown
 		in.Window, in.WindowMaximised = cur.Window, cur.WindowMaximised // the window's own, as it was last resized
 		// and what other pages keep here: which models an agent is shown, and
@@ -1315,6 +1345,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.RedactModel = cur.RedactModel                   // set on its own (privacy-model)
 		in.RedactModelName = cur.RedactModelName           // set on its own (privacy-model)
 		in.RedactModelScore = cur.RedactModelScore         // set on its own (privacy-model)
+		in.RedactModelOff = cur.RedactModelOff             // set on its own (privacy-model)
+		in.RedactModelAuto = cur.RedactModelAuto           // set on its own (masking)
 		in.RedactActions = cur.RedactActions               // set on their own (redact-actions below)
 		in.RedactAllow = cur.RedactAllow                   // set on its own (redact-allow below)
 		in.DisabledModels = cur.DisabledModels             // set on their own (disabled-models below, #1867)
@@ -1331,6 +1363,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.UsageAgentsHidden = cur.UsageAgentsHidden
 		// and the names models' usage is counted under (magpie model alias)
 		in.UsageAliases = cur.UsageAliases
+		// and the clears of usage made on the Usage page
+		in.UsageCleared = cur.UsageCleared
 		// and the clients it counts as agents, set there too (#1958)
 		in.ClientAgents = cur.ClientAgents
 		// how agents' lists name models, set on its own for the agents to be told
@@ -1417,8 +1451,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		// an alert turned on or moved is looked at now, the Mac asked for its
 		// leave to notify as it is turned on (#368)
-		if (in.UsageAlert != cur.UsageAlert || in.BalanceAlert != cur.BalanceAlert || in.ResetReminder != cur.ResetReminder || in.TurnDoneAlert != cur.TurnDoneAlert) &&
-			(in.UsageAlert > 0 || in.BalanceAlert > 0 || in.ResetReminder > 0 || in.TurnDoneAlert > 0) && onAlerts != nil {
+		if (in.UsageAlert != cur.UsageAlert || in.BalanceAlert != cur.BalanceAlert || in.ResetReminder != cur.ResetReminder || in.TurnDoneAlert != cur.TurnDoneAlert || in.MaskAlert != cur.MaskAlert) &&
+			(in.UsageAlert > 0 || in.BalanceAlert > 0 || in.ResetReminder > 0 || in.TurnDoneAlert > 0 || in.MaskAlert) && onAlerts != nil {
 			onAlerts()
 		}
 		// the tray menu follows the page's language (#301)

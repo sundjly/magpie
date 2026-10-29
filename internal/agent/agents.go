@@ -17,6 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
@@ -59,6 +60,9 @@ func init() {
 // its used-up ChatGPT account (AppOut). Not known when Codex's config
 // can't be read.
 func codexAppRoute() (route string, out, known bool) {
+	// asked every 3s for as long as magpie runs: the config looked at once
+	// for its keys, not once for each (#1665)
+	defer filememo.Hold()()
 	home, _ := homes()
 	a := codex(home)
 	if _, err := os.ReadFile(a.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -72,6 +76,10 @@ func codexAppRoute() (route string, out, known bool) {
 	}
 	t, _ := edit.GetTOMLTable(a.Path, "model_providers."+magpieID)
 	b.WriteString("magpie.base_url=" + t["base_url"] + "\n")
+	// and whether it requires OpenAI auth, which decides whether the app
+	// has its ChatGPT account at all (openaiAuth in codex.go): read as the
+	// app-server starts, like the rest
+	b.WriteString("magpie.requires_openai_auth=" + t["requires_openai_auth"] + "\n")
 	// and the list in that catalog, which the app-server also reads only
 	// as it starts: a provider or group renamed, or a model added, left
 	// the app on the names and models it started with (lucis0116 on X)
@@ -191,6 +199,7 @@ func onMachine(home, cfg string) []*Agent {
 		empryo(home),
 		ante(home),
 		astrbot(home),
+		openClaw(home),
 		jcode(home),
 		miniMax(home),
 		droid(home),
