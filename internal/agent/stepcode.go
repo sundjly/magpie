@@ -16,7 +16,6 @@ import (
 	"github.com/tidwall/jsonc"
 
 	"github.com/yetone/magpie/internal/edit"
-	"github.com/yetone/magpie/internal/provider"
 )
 
 // StepCode keeps its configuration in ~/.stepcode/config.toml (or
@@ -37,19 +36,13 @@ func stepcodeDir(at place) string {
 			name = custom
 		}
 	}
-	return filepath.Join(at.home, name)
+	return at.join(name)
 }
 
 func stepcodeProvider(at place) any {
 	ms := make([]map[string]any, 0)
-	for _, m := range magpieModels("stepcode") {
-		// StepCode registers no google-generative-ai stream, only Pi's
-		// anthropic-messages, openai-completions and openai-responses
-		// (packages/providers/src/compat.ts BUILTIN_APIS, Step-Code at
-		// 90a57820), though its docs list it: a Gemini model stays on Chat
-		// there, which the gateway translates (#3282)
-		m.APIs = slices.DeleteFunc(slices.Clone(m.APIs), func(a string) bool { return a == string(provider.Gemini) })
-		ms = append(ms, piModelJSON(m, at.gw(), true))
+	for _, m := range sharedModels("stepcode") {
+		ms = append(ms, piModelJSON(piAsked("stepcode", m), at.gw(), true))
 	}
 	return map[string]any{
 		"name":    "magpie",
@@ -633,7 +626,7 @@ func stepcodeIn(at place) *Agent {
 					return nil
 				},
 				Options: func(cur map[string]string) []Option {
-					return append(ownOptions(authPath, cur["model"]), viaMagpie("stepcode", magpieID+"/")...)
+					return withVia(ownOptions(authPath, cur["model"]), "stepcode", magpieID+"/")
 				},
 			},
 		},

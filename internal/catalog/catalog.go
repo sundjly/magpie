@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -133,6 +134,18 @@ type Model struct {
 	// Reasoning is set on a model that thinks, whether or not it takes
 	// levels: mimo-v2.6-flash thinks with a switch alone (#402).
 	Reasoning bool `json:",omitempty"`
+	// AlwaysThinks is set on a model its vendor's list says always thinks,
+	// with no way to turn it off: Kimi Code's supports_thinking_type
+	// "only" (reasoning.type). Kimi Code is told always_thinking for it.
+	AlwaysThinks bool `json:",omitempty"`
+	// DynamicTools is set on a model its vendor's list says loads tools
+	// mid-conversation: Kimi Code's supports_dynamic_tools
+	// (tools.dynamic_load). Kimi Code is told dynamically_loaded_tools.
+	DynamicTools bool `json:",omitempty"`
+	// DefaultEffort is the effort the vendor's list says the model thinks
+	// at when none is asked: Kimi Code's think_efforts.default_effort
+	// (reasoning.effort.default). "" is not said.
+	DefaultEffort string `json:",omitempty"`
 	// WebSearch is how another magpie (a Remote magpie) searches the web
 	// for the model when a web search tool is offered: "native", its own
 	// provider by itself, or "magpie", with that magpie's searcher; "" it
@@ -183,8 +196,38 @@ func imageInput(modalities []string) *bool {
 	if modalities == nil {
 		return nil
 	}
-	yes := slices.Contains(modalities, "image")
+	yes := slices.Contains(Kinds(modalities), "image")
 	return &yes
+}
+
+// Kinds is a list's modalities as models.dev words them (text, image,
+// audio, video, pdf), each once and in the order first met. A vendor may
+// list the media types it takes instead: OpenCode Go's /models gives
+// deepseek-v4.1-flash ["text","image/jpeg","image/png","image/gif",
+// "image/webp"] and Gemini's application/pdf, which read word for word
+// were no "image", so every model there that sees was taken for
+// text-only (zeo9901 on Discord). An unknown word is kept as it is; nil
+// stays nil, a list that said nothing.
+func Kinds(modalities []string) []string {
+	if modalities == nil {
+		return nil
+	}
+	out := make([]string, 0, len(modalities))
+	for _, m := range modalities {
+		k := strings.ToLower(strings.TrimSpace(m))
+		if typ, _, ok := strings.Cut(k, "/"); ok {
+			switch {
+			case typ == "image" || typ == "video" || typ == "audio" || typ == "text":
+				k = typ
+			case k == "application/pdf":
+				k = "pdf"
+			}
+		}
+		if k != "" && !slices.Contains(out, k) {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // Price is what a model costs, in USD per million tokens.
@@ -204,6 +247,11 @@ type Price struct {
 	// output above 272K), lowest first. models.dev lists them as "tiers" of
 	// type "context".
 	Tiers []Tier `json:"tiers,omitempty"`
+	// Peak, when set, says this is an off-peak price, billed at PeakFactor
+	// times it in Peak's hours (Price.In): a DeepSeek model's list price at
+	// a provider that bills by DeepSeek's hours. A price the user set has
+	// none.
+	Peak Peak `json:"peak,omitempty"`
 }
 
 // Tier is a price from a request's input size on: what the whole request
@@ -288,7 +336,7 @@ func OneHourFor(id string, p *Price) {
 
 // Times is the price at r times each of its parts.
 func (p Price) Times(r float64) Price {
-	out := Price{Input: p.Input * r, Output: p.Output * r, CacheRead: p.CacheRead * r, CacheWrite: p.CacheWrite * r, CacheWrite1h: p.CacheWrite1h * r}
+	out := Price{Input: p.Input * r, Output: p.Output * r, CacheRead: p.CacheRead * r, CacheWrite: p.CacheWrite * r, CacheWrite1h: p.CacheWrite1h * r, Peak: p.Peak}
 	for _, t := range p.Tiers {
 		out.Tiers = append(out.Tiers, Tier{Above: t.Above, Input: t.Input * r, Output: t.Output * r, CacheRead: t.CacheRead * r, CacheWrite: t.CacheWrite * r, CacheWrite1h: t.CacheWrite1h * r})
 	}
@@ -298,7 +346,7 @@ func (p Price) Times(r float64) Price {
 // Same is whether two prices are the same in every part and tier.
 func (p Price) Same(q Price) bool {
 	return p.Input == q.Input && p.Output == q.Output && p.CacheRead == q.CacheRead && p.CacheWrite == q.CacheWrite &&
-		p.CacheWrite1h == q.CacheWrite1h && slices.Equal(p.Tiers, q.Tiers)
+		p.CacheWrite1h == q.CacheWrite1h && slices.Equal(p.Tiers, q.Tiers) && p.Peak == q.Peak
 }
 
 // At is the flat price a request whose input, cached and cache-written
@@ -306,10 +354,10 @@ func (p Price) Same(q Price) bool {
 // tier it is over, else the base price. OpenAI counts a request's input
 // with its cached tokens in it, and bills the whole request at the tier.
 func (p Price) At(prompt int) Price {
-	flat := Price{Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite, CacheWrite1h: p.CacheWrite1h}
+	flat := Price{Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite, CacheWrite1h: p.CacheWrite1h, Peak: p.Peak}
 	for _, t := range p.Tiers {
 		if prompt > t.Above {
-			flat = Price{Input: t.Input, Output: t.Output, CacheRead: t.CacheRead, CacheWrite: t.CacheWrite, CacheWrite1h: t.CacheWrite1h}
+			flat = Price{Input: t.Input, Output: t.Output, CacheRead: t.CacheRead, CacheWrite: t.CacheWrite, CacheWrite1h: t.CacheWrite1h, Peak: p.Peak}
 		}
 	}
 	return flat
@@ -538,7 +586,7 @@ var (
 )
 
 // CachePath is where `magpie sync` stores the models.dev catalog.
-func CachePath() string { return filepath.Join(appdir.Cache(), "models.json") }
+func CachePath() string { return appdir.Join(appdir.Cache(), "models.json") }
 
 func opencodeCache() string {
 	home, _ := os.UserHomeDir()
@@ -834,6 +882,10 @@ func PriceOf(providerID, modelID string) (Price, bool) {
 // (DeepSeek's deepseek-flash is deepseek-v4.1-flash).
 func PricedBy(providers []string, id string) (Price, bool) {
 	all, at := loadGen()
+	return pricedOnce(at, 'p', providers, id, func() (Price, bool) { return pricedBy(all, at, providers, id) })
+}
+
+func pricedBy(all map[string]mdProvider, at int, providers []string, id string) (Price, bool) {
 	for _, pid := range providers {
 		if m, ok := all[pid].Models[id]; ok && m.Cost != nil {
 			return *m.Cost, true
@@ -1052,6 +1104,10 @@ func madeByOf(all map[string]mdProvider, at int, b string) *madeBy {
 // those prices it.
 func MakerPriced(prefer []string, id string) (Price, bool) {
 	all, at := loadGen()
+	return pricedOnce(at, 'm', prefer, id, func() (Price, bool) { return makerPriced(all, at, prefer, id) })
+}
+
+func makerPriced(all map[string]mdProvider, at int, prefer []string, id string) (Price, bool) {
 	b := bareID(id)
 	if r, ok := unprofiled(b); ok {
 		b = r
@@ -1187,6 +1243,16 @@ func NameOf(id string) string {
 		n += " " + id[strings.LastIndexByte(id, '['):]
 	}
 	return n
+}
+
+// Spelling is the spelling models.dev gives a model most, of every bare
+// id it knows that is the same model (SameModel): glm-5.3-flash for
+// glm-5-3-flash, GLM-5.3-Flash or Ark's glm-5-3-flash-260828, as most of
+// its providers spell it (the normal index normalFor reads). Lowercase,
+// without a vendor's prefix; "" when it knows the model by no spelling.
+func Spelling(id string) string {
+	load()
+	return normal[SameModel(id)]
 }
 
 // Named gives a model the list names by its id alone the name models.dev
@@ -1621,7 +1687,7 @@ func ListedByBorrowed(providers []string, id string) ([]string, bool) {
 }
 
 func listedBy(providers []string, id string, providerOverrides bool) ([]string, bool) {
-	all := load()
+	all, at := loadGen()
 	b := bareID(id)
 	if r, _, ok := renamed(b); ok {
 		b = r
@@ -1641,11 +1707,8 @@ func listedBy(providers []string, id string, providerOverrides bool) ([]string, 
 	}
 	for _, want := range []string{b, cutAt(b, '('), cutAt(b, ':')} {
 		for _, pid := range providers {
-			for key, m := range all[pid].Models {
-				if bareID(key) != want {
-					continue
-				}
-				if e, ok := pick(pid, m); ok {
+			for _, key := range levelIndexOf(all, at, pid).bare[want] {
+				if e, ok := pick(pid, all[pid].Models[key]); ok {
 					return e, true
 				}
 			}
@@ -1660,20 +1723,58 @@ func listedBy(providers []string, id string, providerOverrides bool) ([]string, 
 		return nil, false
 	}
 	for _, pid := range providers {
-		var keys []string
-		for key := range all[pid].Models {
-			if SameModel(bareID(key)) == n {
-				keys = append(keys, key)
-			}
-		}
-		slices.Sort(keys)
-		for _, key := range keys {
+		for _, key := range levelIndexOf(all, at, pid).same[n] {
 			if e, ok := pick(pid, all[pid].Models[key]); ok {
 				return e, true
 			}
 		}
 	}
 	return nil, false
+}
+
+// levelIndex is a provider's model keys by what listedBy looks them up
+// by, each in key order: their id without a path or case (bare), and
+// SameModel's spelling of it (same). listedBy, asked for every model's
+// levels on each look at the providers, read every vendor's every model
+// through SameModel's regexp each time: 0.28 GB of the 2.6 GB a real
+// config allocated over 20 polls. KinEfforts looks its thinking models up
+// by their versionless shape (kin), where it split and joined every key
+// on each ask: 66 MB of 1.4 GB.
+type levelIndex struct {
+	bare, same, kin map[string][]string
+}
+
+var levelIndexes struct {
+	sync.Mutex
+	gen int
+	by  map[string]*levelIndex
+}
+
+// levelIndexOf is pid's levelIndex in all, the catalog loaded at Reset
+// count at.
+func levelIndexOf(all map[string]mdProvider, at int, pid string) *levelIndex {
+	levelIndexes.Lock()
+	defer levelIndexes.Unlock()
+	if levelIndexes.by == nil || levelIndexes.gen != at {
+		levelIndexes.gen, levelIndexes.by = at, map[string]*levelIndex{}
+	}
+	if x, ok := levelIndexes.by[pid]; ok {
+		return x
+	}
+	x := &levelIndex{bare: map[string][]string{}, same: map[string][]string{}, kin: map[string][]string{}}
+	for _, key := range slices.Sorted(maps.Keys(all[pid].Models)) {
+		b := bareID(key)
+		x.bare[b] = append(x.bare[b], key)
+		n := SameModel(b)
+		x.same[n] = append(x.same[n], key)
+		if m := all[pid].Models[key]; (m.Thinks || len(m.efforts("")) > 0) && !m.budgeted() {
+			if s, ok := versionless(b); ok {
+				x.kin[s] = append(x.kin[s], key)
+			}
+		}
+	}
+	levelIndexes.by[pid] = x
+	return x
 }
 
 // variantSuffix is a word a proxy puts after a model's id to name the
@@ -1700,7 +1801,7 @@ func Unsuffixed(id string) (string, bool) {
 // from mimo-v2.6-flash): a model newer than the catalog on this machine
 // offers its line's levels, not none. False when none of them has one.
 func KinEfforts(providers []string, id string) ([]string, bool) {
-	all := load()
+	all, at := loadGen()
 	shape, ok := versionless(bareID(id))
 	if !ok {
 		return nil, false
@@ -1711,13 +1812,8 @@ func KinEfforts(providers []string, id string) ([]string, bool) {
 		found              bool
 	)
 	for _, pid := range providers {
-		for key, m := range all[pid].Models {
-			if !m.Thinks && len(m.efforts("")) == 0 || m.budgeted() {
-				continue
-			}
-			if s, ok := versionless(bareID(key)); !ok || s != shape {
-				continue
-			}
+		for _, key := range levelIndexOf(all, at, pid).kin[shape] {
+			m := all[pid].Models[key]
 			// the newest; of two the same day, the first provider's, then
 			// the greater id, whatever order the map gives
 			if !found || m.ReleaseDate > newest || m.ReleaseDate == newest && pid == from && key > name {
@@ -1878,10 +1974,11 @@ func DrawsID(id string) bool {
 
 // ImagesAPI is whether a model draws on an images API rather than answering
 // in chat with pictures: gpt-image, dall-e, imagen, flux, seedream… — not
-// gemini-*-image or gpt-5-image, which chat.
+// gemini-*-image or gpt-5-image, which chat. iFlytek Loomy's Hy-Image
+// generators (Hy-Image-3.5-preview) draw on its images API too (#4913).
 func ImagesAPI(id string) bool {
 	id = strings.ToLower(id)
-	for _, w := range []string{"gpt-image", "chatgpt-image", "dall-e", "imagen", "imagine", "qwen-image", "wanx", "wan2", "seedream", "cogview", "flux", "stable-diffusion", "sdxl", "kolors", "hidream", "sensenova-u1"} {
+	for _, w := range []string{"gpt-image", "chatgpt-image", "dall-e", "imagen", "imagine", "qwen-image", "wanx", "wan2", "seedream", "cogview", "flux", "stable-diffusion", "sdxl", "kolors", "hidream", "sensenova-u1", "hy-image"} {
 		if strings.Contains(id, w) {
 			return true
 		}
