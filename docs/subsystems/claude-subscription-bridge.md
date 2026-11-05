@@ -712,8 +712,16 @@ history to the 1h cache at 2×.
    file of two lines, a user line holding the conversation before that
    reply as below (its images as image blocks, client cache marks taken
    out) and an assistant line holding the reply's words (thinking left
-   out). The run starts with `--resume` on it and is typed only the turns
-   after the reply, as a saved session's run is (the session is
+   out). The user line tells every message before the reply inside
+   `<conversation_history>`, with no `<current_turn>`
+   (`renderClaudePromptAt` with the split at the end): the reply answers
+   the last of them, and the turn to answer is the one typed after it.
+   Before 11-04 the user line was rendered as a first message, so the
+   turn the reply answers was marked `<current_turn>`, "the turn to answer
+   now", and a resumed run answered an old question again or said its
+   tool calls had no results (愛睏柴犬阿茶 on Discord,
+   `TestClaudeTUIReplayMarksNoEarlierTurnCurrent`). The run starts with
+   `--resume` on it and is typed only the turns after the reply, as a saved session's run is (the session is
    discarded if the run doesn't take it). The file goes in the project
    folder of the work folder with its links followed, which is the one
    Claude Code reads (on a Mac `/var` is `/private/var`). Before 11-01
@@ -842,9 +850,23 @@ before the run is let go and its file removed (`branchAt`, a cut copy as
 in [Tool results another request answers first](#tool-results-another-request-answers-first)),
 and a new interactive run resumes the copy, told only the turn's
 messages. Before, every turn after a suggestion was told whole to a new
-run (bbfatx on X). There is no cut with a client's own cache marks, or for a run with no session or no line;
-then the turn is told whole, as before.
-`TestClaudeInteractiveSideQuestionBranchesBeforeIt` holds it.
+run (bbfatx on X). The interactive mode streams a reply first and tells
+its session lines after, read from the file, so as a suggestion begins
+`lastLine` may be a line before the reply (its tool call) or, in a run's
+first reply, empty. The run also keeps the reply's message id (`lastMsg`
+from `replyBegun`, then `backMsg`, `behindMsg` and the shelf's
+`behindMsg`), and `cutReply` cuts after that reply's last main-thread
+line: by the id alone when no line was heard, waiting up to `cutWait` for
+the reply's lines before it falls back to the line (sleepy_shibe, twice).
+The shelf (`unshelve`, `cutBehind`) takes a session behind a side
+question by either. There is no cut with a client's own cache marks, or
+for a run with no session, or neither a line nor a reply; then the turn
+is told whole, as before.
+`TestClaudeInteractiveSideQuestionBranchesBeforeIt`,
+`TestClaudeInteractiveSideQuestionAfterACallKeepsTheReply`,
+`TestClaudeInteractiveSideQuestionAfterAFirstReplyOfWordsKeepsTheReply`,
+`TestClaudeShelvedSideQuestionAfterAFirstReplyOfWordsKeepsTheReply` and
+`TestClaudeCutReplyWaitsForTheReplysLines` hold it.
 
 A turn after a reply that starts a new run logs why none waited
 (`whyNoRun`, "claude: no run waits for this turn: …"): its run went on
@@ -1146,12 +1168,27 @@ client's own prompt named another folder. Under a real Claude Code client,
 
 A run therefore starts in the folder the caller names. `clientWorkDir`
 reads the system prompt and every message that is not the model's, and
-takes the last folder named. It knows four ways of naming it:
+takes the folder the first of them names (in that text, its last line).
+It knows four ways of naming it:
 
 - Claude Code: "Primary working directory: X";
 - Codex: `<cwd>X</cwd>`;
 - OpenCode: "Working directory: X";
 - pi: "Current working directory: X".
+
+The first text counts, not the last, so a conversation keeps one folder.
+Claude Code says a move (`cd`) as a later "# Environment update" message,
+"Primary working directory: /y (was /x)". Taking that one gave a run
+started again for the conversation (its saved session resumed, a branch,
+a replay) another prompt than its first run: `envTurnsNote` names the
+folder, and a run in the caller's own folder has that folder in Claude
+Code's environment and saves its session in that folder's project, so
+`--resume` found nothing. Either way the prefix after Claude Code's own
+part changed and the whole conversation was written to the cache again
+(EricWvi on X: …/frontend, then …/frontend/src, the cache read flipping
+between under 10% and over 90%). The move still reaches the model in the
+conversation, as the caller said it. Not measured: whether a model told
+the first folder in `envTurnsNote` after a move misreads the update.
 
 The folder is taken only when it is an absolute path to a folder on this
 computer. Otherwise, as for a caller elsewhere, a Windows path on a Mac,

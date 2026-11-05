@@ -18,6 +18,7 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/budget"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -136,6 +137,9 @@ func (s *Server) apiSearch(ctx context.Context, query string) (string, []Hit, er
 // turned away; #1477), which then rests (searchRestFor). Anything else, such as
 // no answer in time, isn't about the key, and the next isn't tried.
 func (s *Server) askSearchAPIKeys(ctx context.Context, a provider.SearchAPI, query string) ([]foundPage, error) {
+	if v, ok := provider.SearchVendorOf(a.Vendor); ok && v.Plugin != "" && v.Auth != "" {
+		return s.askSearchSignedIn(ctx, a, v, query)
+	}
 	keys := a.Keys()
 	if len(keys) == 0 {
 		keys = []string{""}
@@ -261,6 +265,9 @@ func pagesSaid(pages []foundPage) (string, []Hit) {
 
 // askSearchAPI asks one search API for the query.
 func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query string) ([]foundPage, error) {
+	if v, ok := provider.SearchVendorOf(a.Vendor); ok && v.Plugin != "" {
+		return s.askPluginSearch(ctx, a, v, query)
+	}
 	var r *http.Request
 	var err error
 	post := func(path string, body any) {
@@ -404,6 +411,60 @@ func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query s
 		pages = pages[:searchHits]
 	}
 	return pages, nil
+}
+
+// runPluginSearch asks a plugin's search API in the host (a test's has no host).
+var runPluginSearch = plugin.RunSearch
+
+// askPluginSearch asks a search API a plugin gives (its search hook) in the
+// plugin host. It is asked as a built-in is: from askSearchAPIKeys, so with
+// the user's keys in their order, the same time to answer, the same rest of
+// a key it refused (the plugin throws an error with a status) and the same
+// row in the request log; and with the query apiSearch masked. What it
+// found is cut and cleaned as a built-in's pages are.
+func (s *Server) askPluginSearch(ctx context.Context, a provider.SearchAPI, v provider.SearchVendor, query string) ([]foundPage, error) {
+	got, err := runPluginSearch(ctx, v.Plugin, v.PluginID, query, searchHits, a.Key, a.Base())
+	if err != nil {
+		var r plugin.SearchRefused
+		if errors.As(err, &r) {
+			msg := r.Msg
+			if a.Key != "" {
+				msg = strings.ReplaceAll(msg, a.Key, provider.MaskSearchKey(a.Key))
+			}
+			if keyRefusal(r.Status) {
+				return nil, searchRefused{r.Status, msg, r.RetryAfter}
+			}
+			return nil, errors.New(msg)
+		}
+		if ctx.Err() != nil {
+			return nil, errors.New("no answer in time")
+		}
+		if a.Key != "" {
+			err = errors.New(strings.ReplaceAll(err.Error(), a.Key, provider.MaskSearchKey(a.Key)))
+		}
+		return nil, err
+	}
+	return pluginPages(got), nil
+}
+
+// pluginPages are the pages a plugin's search found, cut and cleaned as a
+// built-in's are.
+func pluginPages(got []plugin.SearchPage) []foundPage {
+	var pages []foundPage
+	for _, r := range got {
+		if r.URL == "" {
+			continue
+		}
+		title := searchPlain(r.Title)
+		if title == "" {
+			title = r.URL
+		}
+		pages = append(pages, foundPage{Title: title, URL: r.URL, Text: clipText(searchPlain(r.Text), pageText), Age: r.Age})
+		if len(pages) == searchHits {
+			break
+		}
+	}
+	return pages
 }
 
 // readSearchAPI reads the pages out of a search API's reply.
