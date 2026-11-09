@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -43,7 +41,7 @@ func codexModels(ctx context.Context, sign func(context.Context, *http.Request, 
 	if err := sign(ctx, req, nil); err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +82,7 @@ func CodexLiveList(ctx context.Context) ([]byte, error) {
 	if err := p.Account.sign(ctx, req, nil); err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -230,19 +228,9 @@ var codexExecutable = func() string {
 	if p, err := proc.LookPath("codex"); err == nil {
 		return p
 	}
-	names := []string{"codex"}
-	if runtime.GOOS == "windows" {
-		names = []string{"codex.cmd", "codex.exe", "codex"}
-	}
-	for _, d := range proc.UserBinDirs() {
-		for _, n := range names {
-			p := filepath.Join(d, n)
-			if st, err := os.Stat(p); err == nil && !st.IsDir() {
-				return p
-			}
-		}
-	}
-	return ""
+	// on Windows npm's codex.cmd, never the sh shim npm leaves alone when
+	// an install fails partway, which Windows can't run (CLJY on Discord)
+	return proc.ToolIn("codex", proc.UserBinDirs())
 }
 
 // parseCodexModels reads the backend's list, the listed ones in its order.
@@ -672,7 +660,10 @@ func buildCodexListTag(kind string) string {
 // user kept, and whether they narrowed that list at all. The backend lists
 // every model the account can reach; when the user has picked among them on
 // the codex provider, the gateway keeps its /models answer to those (see
-// codexModels). Not narrowed — the account's list is left whole.
+// codexModels). Not narrowed — the account's list is left whole. The picks
+// are Picks: a model the vendor listed since they were saved is kept, as
+// magpie's catalog serves it, or the account's own list froze at what was
+// listed when the user picked (#5062).
 //
 // A provider switched off picks nothing, as it serves no agent anything
 // (Provider.Off): its picks are kept for when it is switched on again and
@@ -699,8 +690,9 @@ func CodexNativePicked() (map[string]bool, bool) {
 	if len(p.Models) == 0 {
 		return nil, false
 	}
-	keep := make(map[string]bool, len(p.Models))
-	for _, id := range p.Models {
+	picks := p.Picks()
+	keep := make(map[string]bool, len(picks))
+	for _, id := range picks {
 		keep[id] = true
 	}
 	return keep, true

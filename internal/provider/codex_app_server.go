@@ -47,7 +47,8 @@ import (
 // a new list at its next launch, or on the Agents row's Restart.
 //
 // The app-server is ended as a clean exit (proc.End): the app reads any
-// other exit as a crash and shows it.
+// other exit as a crash and shows it. A signed-in ChatGPT app can show its
+// error page all the same; codex_app_crash.go reopens it then.
 
 // CodexAppRoute is set by the agent package: what in Codex's config the
 // app-server reads as it starts and magpie writes (its provider and base
@@ -288,6 +289,14 @@ var codexApp struct {
 	// were last listed
 	back   map[int]bool
 	backAt time.Time
+	// crashSince, crashBy: magpie last ended the app's app-server at
+	// crashSince, and until crashBy its logs are read for the page the
+	// app shows when it can't take another (codexAppCrashStep); snag:
+	// the app showed that page and magpie couldn't reopen it, while the
+	// app-servers in snagPids (those running then) run
+	crashSince, crashBy time.Time
+	snag                bool
+	snagPids            []int
 }
 
 // codexAppBackEvery is how often the app-servers left on the takeover
@@ -406,6 +415,7 @@ func KeepCodexAppOnItsProvider(ctx context.Context, busy func() (int, time.Time)
 // have opened before: its app-servers are ended too. It says which pids it
 // ended.
 func codexAppStep(ctx context.Context, now time.Time, busy func() (int, time.Time)) []int {
+	codexAppCrashStep(ctx, now, busy)
 	if CodexAppRoute == nil {
 		return nil
 	}
@@ -614,6 +624,7 @@ func codexAppStep(ctx context.Context, now time.Time, busy func() (int, time.Tim
 	}
 	if len(ended) > 0 {
 		log.Printf("codex: ended the Codex app's app-server %v for the app to start another: %s", ended, c.why)
+		watchCodexAppCrashLocked(now)
 	}
 	return ended
 }
@@ -641,7 +652,7 @@ func codexTurnOpen(home string, now, since time.Time) bool {
 		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
 			return nil
 		}
-		info, err := d.Info()
+		info, err := sessionFileInfo(path)
 		if err != nil || now.Sub(info.ModTime()) > codexTurnWindow {
 			return nil
 		}
@@ -666,7 +677,10 @@ func codexSessionsQuietFor(home string, now time.Time, d time.Duration) bool {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
 			return nil
 		}
-		info, err := e.Info()
+		info, err := sessionFileInfo(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -678,6 +692,16 @@ func codexSessionsQuietFor(home string, now time.Time, d time.Duration) bool {
 	})
 	return quiet && err == nil
 }
+
+// sessionFileInfo is the session file at path's own time and size, never
+// the folder listing's (a fs.DirEntry's Info): Windows stamps a file in
+// its folder only as it is closed, and Codex keeps a session's file open
+// while the app-server runs it, so the listing has the time it was
+// opened (os.ReadDir on the Windows box: a file held open and written
+// to an hour after its stamp still listed the stamp, at its old size).
+// A turn running in a thread opened more than codexTurnWindow before
+// then counted as no turn, and its app-server was ended under it.
+func sessionFileInfo(path string) (fs.FileInfo, error) { return os.Lstat(path) }
 
 // sessionTurnTail is how much of a session file's end sessionTurnOpen reads.
 const sessionTurnTail = 512 << 10
@@ -757,6 +781,7 @@ func RestartCodexApp(ctx context.Context, bundle string) error {
 			return err
 		}
 		ended = append(ended, p.PID)
+		watchCodexAppCrash(time.Now())
 	}
 	if len(ended) == 0 {
 		return errors.New("the Codex app's app-server isn't running")
@@ -905,6 +930,7 @@ func RestartSwitchedCodexApp(ctx context.Context) error {
 			log.Printf("codex: restarting the Codex app's app-server %d for the account switched to: %v", p, err)
 			return ErrCodexAppNoEnd
 		}
+		watchCodexAppCrash(time.Now())
 	}
 	// waitFor lists the app-servers until ok holds of them, for at most limit
 	waitFor := func(limit time.Duration, ok func([]int) bool) (bool, error) {
