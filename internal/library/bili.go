@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -19,6 +18,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -37,12 +37,13 @@ import (
 // bili's local proxy, which forwards to the gateway (ANTHROPIC_BASE_URL
 // .../bili/<magpie's address>). Codex's lane is an MCP server only, ZCode's
 // routes only its own provider, Kimi Code's renames the default model in
-// config.toml at each start (bili-kimi), dsh's installs through dsh's
-// package manager, and Hermes' can't be tried without touching its
-// launcher: none of those is offered.
+// config.toml at each start (bili-kimi) and dsh's installs through dsh's
+// package manager: none of those is offered.
 //
-// Zed has no plugin of bili's: its magpie provider goes through bili's
-// /bili/ prefix with bili start answering there (biliURLLanes, bili_url.go).
+// Zed has no plugin of bili's, and Hermes' sets HTTPS_PROXY alone, which
+// magpie's http://127.0.0.1 provider never takes: their magpie provider
+// goes through bili's /bili/ prefix with bili start answering there
+// (biliURLLanes, bili_url.go).
 //
 // bili's remove doesn't put a file back as it was: it leaves "packages": []
 // in Pi's settings.json and "extensions:" in omp's config.yml, and after
@@ -106,6 +107,9 @@ type BiliView struct {
 	ListErr string   `json:"listErr,omitempty"`
 	Restart []string `json:"restart,omitempty"`
 	Backup  string   `json:"backup,omitempty"`
+	// Saved is what bili says it saved (bili_saved.go), nil when no bili
+	// has answered here yet
+	Saved *BiliSaved `json:"saved,omitempty"`
 }
 
 var biliMu sync.Mutex
@@ -188,7 +192,7 @@ func biliAgents(agents []*agent.Agent) []*agent.Agent {
 
 // biliStatusLine is a row of bili plugin list: the agent, then its
 // status, then the version and how it updates, apart by two spaces or more.
-var biliColumns = regexp.MustCompile(`\s{2,}`)
+var biliColumns = lazyre.New(`\s{2,}`)
 
 // parseBiliList is each agent's status as bili plugin list prints it.
 func parseBiliList(out string) map[string]string {
@@ -209,6 +213,22 @@ func biliOn(status string) bool {
 }
 
 // ReadBili says whether bili is installed and which agents have its plugin.
+// biliVersion is the version in `bili --version`'s output. Its output is
+// read with stderr, where bili writes warnings first (a config key it
+// doesn't know: "2026-11-09T23:44:06.211 [warn] [v=0.1.213] ..."), so
+// the version is the first word of the line that starts with one.
+func biliVersion(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		w, _, _ := strings.Cut(strings.TrimSpace(l), " ")
+		if biliVersionRe.MatchString(w) {
+			return w
+		}
+	}
+	return ""
+}
+
+var biliVersionRe = lazyre.New(`^v?\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]*)?$`)
+
 func ReadBili() *BiliView {
 	return readBili(detected())
 }
@@ -222,8 +242,9 @@ func readBili(agents []*agent.Agent) *BiliView {
 		}
 	} else {
 		if out, err := biliRun(v.Path, 30*time.Second, "--version"); err == nil {
-			v.Version, _, _ = strings.Cut(strings.TrimSpace(out), " ")
+			v.Version = biliVersion(out)
 		}
+		v.Saved = readBiliSaved()
 		out, err := biliRun(v.Path, 30*time.Second, "plugin", "list")
 		if st = parseBiliList(out); err != nil || len(st) == 0 {
 			v.ListErr = lastLines(out, 2)
@@ -604,7 +625,7 @@ func keyPath(p []string) (string, bool) {
 
 // biliURL is the ANTHROPIC_BASE_URL bili's Claude Code plugin writes: its
 // proxy, then the URL it forwards to.
-var biliURL = regexp.MustCompile(`^https?://(?:127\.0\.0\.1|localhost|\[::1\]):\d+/bili/(https?://.+)$`)
+var biliURL = lazyre.New(`^https?://(?:127\.0\.0\.1|localhost|\[::1\]):\d+/bili/(https?://.+)$`)
 
 // biliMergeJSON is now with what the install changed (before → after) and
 // nothing changed since (cur still has it) put back as before, and what

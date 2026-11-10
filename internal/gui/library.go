@@ -622,6 +622,11 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			// a plugin's tools off for every agent, or on again, from its
 			// row on the Plugins page (Name is the plugin's)
 			res, err = library.PluginServerOn(in.Name, in.On)
+		case "servers/on":
+			// off for every agent, project and app at the router's
+			// address, kept with its settings, or on again as it was
+			// (swang20201 on X)
+			res, err = library.ServerOn(in.Name, in.On)
 		case "servers/agents-all":
 			res, err = library.EveryServerAgents(in.Agents, in.On)
 		case "servers/agents-some":
@@ -727,6 +732,8 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.RemoveProject(in.Dir, in.Keep)
 		case "projects/skill":
 			res, err = library.ProjectSkill(in.Dir, in.Name, in.Agents)
+		case "projects/skills":
+			res, err = library.ProjectSkills(in.Dir, in.Names, in.Agents)
 		case "projects/server":
 			res, err = library.ProjectServer(in.Dir, in.Name, in.Agents)
 		case "projects/copy":

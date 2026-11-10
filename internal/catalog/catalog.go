@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -24,6 +23,7 @@ import (
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/filememo"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // Model is one entry the picker can offer.
@@ -631,9 +631,16 @@ func loadGen() (map[string]mdProvider, int) {
 	if !loaded {
 		loaded = true
 		func() {
-			for _, p := range []string{CachePath(), opencodeCache()} {
-				b, err := os.ReadFile(p)
-				if err != nil {
+			// magpie's own copy, OpenCode's, then the one magpie ships
+			// with (bundled.go): a file that can't be read or parsed is
+			// passed over for the next, never read as no catalog
+			for _, read := range []func() ([]byte, error){
+				func() ([]byte, error) { return os.ReadFile(CachePath()) },
+				func() ([]byte, error) { return os.ReadFile(opencodeCache()) },
+				func() ([]byte, error) { return bundledCatalog(), nil },
+			} {
+				b, err := read()
+				if err != nil || b == nil {
 					continue
 				}
 				var m map[string]mdProvider
@@ -856,11 +863,9 @@ func syncLock(ctx context.Context, onlyIfMissing bool) error {
 	if err := json.Unmarshal(b, &probe); err != nil || len(probe) == 0 {
 		return fmt.Errorf("models.dev: unexpected payload")
 	}
-	p := CachePath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(p, b, 0o644); err != nil {
+	// written whole through a rename: a reader never sees it half
+	// written, and a failed write keeps the last good copy
+	if err := writeWhole(CachePath(), b, time.Time{}); err != nil {
 		return err
 	}
 	// the lab catalog beside it is best effort: without it the provider
@@ -1610,7 +1615,7 @@ var relayPrefixes = []string{"claude-"}
 // a model another of them lists is (openai-, databricks-, doubao-, zai-):
 // the model after it is the same model, its window, levels and images
 // included.
-var channelPrefix = regexp.MustCompile(`^[a-z]{2,24}-`)
+var channelPrefix = lazyre.New(`^[a-z]{2,24}-`)
 
 // renamed is the model a relay renamed to b, when models.dev lists none
 // by b (found), and the window the rename names, if any: a window mark
@@ -1812,7 +1817,7 @@ func levelIndexOf(all map[string]mdProvider, at int, pid string) *levelIndex {
 // channel lists gemini-3.8-flash-high, claude-opus-5-5-high,
 // claude-opus-4-6-thinking and gpt-oss-120b-medium, and its xAI channel
 // grok-3-mini-fast. Its "(high)" form is found's.
-var variantSuffix = regexp.MustCompile(`(?i)-(minimal|low|medium|high|xhigh|max|thinking|fast)$`)
+var variantSuffix = lazyre.New(`(?i)-(minimal|low|medium|high|xhigh|max|thinking|fast)$`)
 
 // Unsuffixed is id with a proxy's level or speed word taken off
 // (variantSuffix), and whether it had one. It is for borrowing levels a
